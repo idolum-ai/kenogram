@@ -24,7 +24,8 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 	root := repoRoot(t)
 	tmp := t.TempDir()
 	fixture := filepath.Join(tmp, "fixture")
-	run(t, root, nil, "go", "build", "-o", fixture, "./internal/integration/testdata/probe")
+	buildEnv := append(os.Environ(), "CGO_ENABLED=0")
+	run(t, root, buildEnv, "go", "build", "-o", fixture, "./internal/integration/testdata/probe")
 	containerfile := filepath.Join(tmp, "Containerfile")
 	if err := os.WriteFile(containerfile, []byte("FROM scratch\nCOPY fixture /usr/bin/tail\nCOPY fixture /usr/local/bin/probe\nCOPY fixture /bin/sh\n"), 0o600); err != nil {
 		t.Fatal(err)
