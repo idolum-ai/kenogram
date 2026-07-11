@@ -1,0 +1,31 @@
+version = 1
+name = "engineering"
+
+[world]
+hostname = "engineering"
+base = "ubuntu:24.04@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+workdir = "/workspace"
+user = "agent"
+
+[resources]
+cpus = 4
+memory_bytes = 8589934592
+pids = 512
+
+[workspace]
+paths = ["/workspace"]
+
+[[mounts]]
+source = "."
+target = "/workspace/kenogram"
+mode = "rw"
+
+[[network.allow]]
+host = "api.anthropic.com"
+port = 443
+
+[[services]]
+name = "agent-session"
+command = ["/usr/bin/tmux", "new-session", "-d", "-s", "main"]
+autostart = true
+restart = "on-failure"
