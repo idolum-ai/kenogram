@@ -363,10 +363,7 @@ func (a *App) materialize(ctx context.Context, l worldfs.Layout, container strin
 			return err
 		}
 	}
-	if err := a.Backend.Copy(ctx, container, filepath.Join(root, "KENOGRAM.md"), "/KENOGRAM.md"); err != nil {
-		return err
-	}
-	return a.Backend.Copy(ctx, container, filepath.Join(root, "etc", "kenogram"), "/etc/kenogram")
+	return a.Backend.Copy(ctx, container, filepath.Join(root, "."), "/")
 }
 
 func doorAddress(allows []plan.NetworkAllow) string {
