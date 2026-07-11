@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/kenogram-mark.svg" alt="Kenogram: graphite declarations terminate at a black marked place in a warm white field" width="760">
+</p>
+
 # Kenogram
 
 Kenogram materializes small, faithful Linux computers from a declaration.
