@@ -12,7 +12,9 @@ import (
 
 func main() {
 	if filepath.Base(os.Args[0]) == "tail" {
-		select {}
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	if len(os.Args) < 2 {
 		os.Exit(2)
