@@ -14,7 +14,7 @@ for file in "${required[@]}"; do
   [[ -s "$file" ]] || { echo "missing required file: $file" >&2; exit 1; }
 done
 
-if rg -n 'github.com/idolum-ai/kenogram/internal/(app|backend|proxy|worldfs)' internal/decl internal/plan >/dev/null 2>&1; then
+if rg -n 'github.com/idolum-ai/kenogram/internal/(app|backend|proxy|worldfs|history)' internal/decl internal/plan >/dev/null 2>&1; then
   echo "pure declaration and plan packages import a stateful package" >&2
   exit 1
 fi

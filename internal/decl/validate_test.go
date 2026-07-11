@@ -82,3 +82,14 @@ func TestValidateRejectsDuplicateNetworkAndServices(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestValidateRejectsSymlinkedSource(t *testing.T) {
+	d, dir := validForValidation(t)
+	if err := os.Symlink(filepath.Join(dir, "repo"), filepath.Join(dir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	d.Mounts[0].Source = "linked"
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("got %v", err)
+	}
+}

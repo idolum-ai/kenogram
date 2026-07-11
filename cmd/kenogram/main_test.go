@@ -20,11 +20,11 @@ func TestDryRunExample(t *testing.T) {
 	}
 }
 
-func TestUpWithoutDryRunIsHonest(t *testing.T) {
+func TestUpWithoutConfirmationIsHonest(t *testing.T) {
 	root := repoRoot(t)
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"up", filepath.Join(root, "kenogram.example.toml")}, &stdout, &stderr)
-	if code != 1 || !strings.Contains(stderr.String(), "no world was changed") {
+	if code != 2 || !strings.Contains(stderr.String(), "without --yes") {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 }

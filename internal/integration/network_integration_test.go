@@ -1,0 +1,207 @@
+//go:build linux
+
+package integration
+
+import (
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
+	if os.Getenv("KENOGRAM_INTEGRATION") != "1" {
+		t.Skip("set KENOGRAM_INTEGRATION=1")
+	}
+	require(t, "podman")
+	require(t, "nsenter")
+	root := repoRoot(t)
+	tmp := t.TempDir()
+	fixture := filepath.Join(tmp, "fixture")
+	run(t, root, nil, "go", "build", "-o", fixture, "./internal/integration/testdata/probe")
+	containerfile := filepath.Join(tmp, "Containerfile")
+	if err := os.WriteFile(containerfile, []byte("FROM scratch\nCOPY fixture /usr/bin/tail\nCOPY fixture /usr/local/bin/probe\nCOPY fixture /bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	image := "localhost/kenogram-integration:" + fmt.Sprint(time.Now().UnixNano())
+	run(t, tmp, nil, "podman", "build", "-t", image, "-f", containerfile, ".")
+	t.Cleanup(func() {
+		exec.Command("podman", "rm", "--force", "kenogram-integration-g1", "kenogram-integration-g2").Run()
+		exec.Command("podman", "rmi", "--force", image).Run()
+	})
+	bin := filepath.Join(tmp, "kenogram")
+	run(t, root, nil, "go", "build", "-o", bin, "./cmd/kenogram")
+	state := filepath.Join(tmp, "state")
+	env := append(os.Environ(), "KENOGRAM_STATE_DIR="+state)
+	declaration := filepath.Join(tmp, "kenogram.toml")
+	writeDeclaration(t, declaration, image, "")
+	run(t, tmp, env, bin, "up", "--yes", declaration)
+	container := "kenogram-integration-g1"
+	interfaces := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "interfaces")
+	if strings.TrimSpace(interfaces) != "lo" {
+		t.Fatalf("interfaces=%q", interfaces)
+	}
+	direct := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "dial", "1.1.1.1:443")
+	if !strings.Contains(direct, "unroutable") {
+		t.Fatalf("direct=%q", direct)
+	}
+	if got := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "resolve", "example.com"); !strings.Contains(got, "absent") {
+		t.Fatalf("resolver=%q", got)
+	}
+	if got := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "udp", "1.1.1.1:53"); !strings.Contains(got, "unroutable") {
+		t.Fatalf("udp=%q", got)
+	}
+	if got := strings.TrimSpace(run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "listeners")); got != "" {
+		t.Fatalf("base listeners=%q", got)
+	}
+	host, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	go func() {
+		for {
+			conn, err := host.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	port := host.Addr().(*net.TCPAddr).Port
+	writeDeclaration(t, declaration, image, fmt.Sprintf("[[network.allow]]\nhost = \"localhost\"\nport = %d\n", port))
+	run(t, tmp, env, bin, "up", "--yes", declaration)
+	container = "kenogram-integration-g2"
+	proxied := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", port))
+	if !strings.Contains(proxied, "200") {
+		t.Fatalf("proxy=%q", proxied)
+	}
+	direct = run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "dial", fmt.Sprintf("127.0.0.1:%d", port))
+	if !strings.Contains(direct, "unroutable") {
+		t.Fatalf("bypass=%q", direct)
+	}
+	if got := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "listeners"); !strings.Contains(got, "0C38") {
+		t.Fatalf("door listener=%q", got)
+	}
+	denied := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", "denied.example:443")
+	if !strings.Contains(denied, "403") {
+		t.Fatalf("denied=%q", denied)
+	}
+	second, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	go func() {
+		for {
+			conn, err := second.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	secondPort := second.Addr().(*net.TCPAddr).Port
+	run(t, tmp, env, bin, "allow", "integration", fmt.Sprintf("localhost:%d", secondPort), "--for", "250ms")
+	granted := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", secondPort))
+	if !strings.Contains(granted, "200") {
+		t.Fatalf("grant=%q", granted)
+	}
+	time.Sleep(350 * time.Millisecond)
+	expired := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", secondPort))
+	if !strings.Contains(expired, "403") {
+		t.Fatalf("expired=%q", expired)
+	}
+	var recorded struct {
+		Generation int64 `json:"generation"`
+		ProxyPID   int   `json:"proxy_pid"`
+	}
+	statePath := filepath.Join(state, "integration", "state.json")
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &recorded); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(recorded.ProxyPID, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if out, err := runFailure(tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", port)); err == nil {
+		t.Fatalf("door survived proxy death: %s", out)
+	}
+	if got := run(t, tmp, env, "podman", "inspect", "--format", "{{.State.Running}}", container); strings.TrimSpace(got) != "true" {
+		t.Fatalf("world stopped with proxy: %q", got)
+	}
+	run(t, tmp, env, bin, "up", "--yes", declaration)
+	raw, err = os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &recorded); err != nil {
+		t.Fatal(err)
+	}
+	if recorded.Generation != 2 {
+		t.Fatalf("matching up replaced generation: %d", recorded.Generation)
+	}
+}
+
+func writeDeclaration(t *testing.T, path, image, network string) {
+	t.Helper()
+	raw := fmt.Sprintf("version = 1\nname = \"integration\"\nallow_unpinned = true\n[world]\nhostname = \"integration\"\nbase = %q\nworkdir = \"/workspace\"\nuser = \"0\"\n[resources]\ncpus = 1\nmemory_bytes = 268435456\npids = 128\n[workspace]\npaths = [\"/workspace\"]\n%s", image, network)
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+func run(t *testing.T, dir string, env []string, name string, args ...string) string {
+	t.Helper()
+	command := exec.Command(name, args...)
+	command.Dir = dir
+	if env != nil {
+		command.Env = env
+	}
+	out, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v: %v\n%s", name, args, err, out)
+	}
+	return string(out)
+}
+func runFailure(dir string, env []string, name string, args ...string) (string, error) {
+	command := exec.Command(name, args...)
+	command.Dir = dir
+	if env != nil {
+		command.Env = env
+	}
+	out, err := command.CombinedOutput()
+	return string(out), err
+}
+func require(t *testing.T, name string) {
+	t.Helper()
+	if _, err := exec.LookPath(name); err != nil {
+		t.Skipf("%s unavailable", name)
+	}
+}
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(wd, "go.mod")); err == nil {
+			return wd
+		}
+		parent := filepath.Dir(wd)
+		if parent == wd {
+			t.Fatal("root not found")
+		}
+		wd = parent
+	}
+}

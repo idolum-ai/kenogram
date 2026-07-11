@@ -4,17 +4,24 @@ Kenogram materializes small, faithful Linux computers from a declaration.
 Everything visible inside a world belongs to its inhabitant. Everything outside
 the world is absent.
 
-This repository is at milestone M1. It implements the declaration and planning
-boundary: a strict TOML subset, schema validation, canonical semantic plans,
-and both plan and declaration digests. It does **not** yet create containers.
+The repository implements the v3.1 lifecycle: strict declarations and semantic
+plans, rootless Podman generations, binary replacement with rollback, carried
+workspace digest trees, regenerated configuration, runtime evidence, a
+hash-chained history, a network-absent namespace with a host-held loopback door,
+and memory-only ephemeral grants.
 
 ```sh
 make check
 go run ./cmd/kenogram up --dry-run ./kenogram.toml
+go run ./cmd/kenogram up --yes ./kenogram.toml
 ```
 
 The requirements in [`requirements/`](requirements/) are binding. The complete
 design is recorded in [`docs/design.md`](docs/design.md); implementation status
 is stated separately so unfinished behavior is never implied by the charter.
 
-Kenogram is Linux-only and uses the Go standard library exclusively.
+Kenogram is Linux-only and uses the Go standard library exclusively. It requires
+rootless Podman on cgroups v2, `nsenter`, and configured subordinate UID/GID
+ranges. `make integration` verifies the real namespace boundary; it is mandatory
+in CI and intentionally fails rather than weakening isolation when those host
+prerequisites are absent.

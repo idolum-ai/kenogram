@@ -18,6 +18,12 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Install check tools
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep podman uidmap fuse-overlayfs
       - name: Check
         run: make check
+      - name: Verify rootless runtime
+        run: |
+          podman info --format json
+          podman unshare true
+      - name: Integration
+        run: make integration

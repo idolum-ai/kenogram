@@ -1,0 +1,65 @@
+package backend
+
+import (
+	"context"
+	"github.com/idolum-ai/kenogram/internal/plan"
+	"reflect"
+	"testing"
+)
+
+type call struct {
+	name string
+	args []string
+}
+type fake struct {
+	calls []call
+	out   []byte
+}
+
+func (f *fake) Run(_ context.Context, n string, a ...string) ([]byte, error) {
+	f.calls = append(f.calls, call{n, append([]string{}, a...)})
+	return f.out, nil
+}
+func (f *fake) Start(_ context.Context, n string, a ...string) error {
+	f.calls = append(f.calls, call{n, append([]string{}, a...)})
+	return nil
+}
+func (f *fake) Interactive(_ context.Context, n string, a ...string) error {
+	f.calls = append(f.calls, call{n, append([]string{}, a...)})
+	return nil
+}
+func TestCreateExactArgv(t *testing.T) {
+	f := &fake{}
+	p := New(f)
+	r := plan.Result{PlanDigest: "pd", DeclarationDigest: "dd", Plan: plan.Plan{Name: "w", World: plan.World{Hostname: "h", Base: "base@sha256:x", Workdir: "/workspace", User: "agent"}, Resources: plan.Resources{CPUs: 2, MemoryBytes: 3, PIDs: 4}, NetworkAllow: []plan.NetworkAllow{{Host: "x", Port: 443}}}}
+	_, err := p.Create(context.Background(), r, 7, []Mount{{Source: "/host", Target: "/workspace", Mode: "rw", NoExec: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"create", "--name", "kenogram-w-g7", "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--hostname", "h", "--user", "agent", "--workdir", "/workspace", "--cpus", "2", "--memory", "3", "--pids-limit", "4", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=w", "--label", "io.kenogram.generation=7", "--label", "io.kenogram.plan-digest=pd", "--label", "io.kenogram.declaration-digest=dd", "--env", "NO_PROXY=localhost,127.0.0.1", "--env", "HTTP_PROXY=http://127.0.0.1:3128", "--env", "HTTPS_PROXY=http://127.0.0.1:3128", "--mount", "type=bind,src=/host,dst=/workspace,rw,nodev,nosuid,noexec", "base@sha256:x", "/usr/bin/tail", "-f", "/dev/null"}
+	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].args, want) {
+		t.Fatalf("got %#v", f.calls)
+	}
+}
+func TestVerifyEvidence(t *testing.T) {
+	r := plan.Result{PlanDigest: "p", DeclarationDigest: "d", Plan: plan.Plan{Name: "w", Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
+	e := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}}
+	if err := Verify(e, r, 1); err != nil {
+		t.Fatal(err)
+	}
+	e.NetworkMode = "bridge"
+	if err := Verify(e, r, 1); err == nil {
+		t.Fatal("bridge accepted")
+	}
+}
+
+func TestPreflightRequiresRootlessCgroupV2AndSubIDs(t *testing.T) {
+	f := &fake{out: []byte(`{"host":{"security":{"rootless":true},"cgroupVersion":"v2","idMappings":{"uidmap":[{"size":65536}],"gidmap":[{"size":65536}]}}}`)}
+	if err := New(f).Preflight(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.out = []byte(`{"host":{"security":{"rootless":true},"cgroupVersion":"v2","idMappings":{"uidmap":[{"size":1}],"gidmap":[{"size":1}]}}}`)
+	if err := New(f).Preflight(context.Background()); err == nil {
+		t.Fatal("single mapping accepted")
+	}
+}

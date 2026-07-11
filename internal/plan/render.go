@@ -22,7 +22,11 @@ func RenderText(w io.Writer, result Result) error {
 		return err
 	}
 	for _, c := range p.Copies {
-		if _, err := fmt.Fprintf(w, "copy: %s -> %s mode=%s secret=%t\n", c.Source, c.Target, c.Mode, c.Secret); err != nil {
+		digest := c.SourceDigest
+		if c.Secret {
+			digest = "<redacted>"
+		}
+		if _, err := fmt.Fprintf(w, "copy: %s -> %s mode=%s secret=%t digest=%s\n", c.Source, c.Target, c.Mode, c.Secret, digest); err != nil {
 			return err
 		}
 	}

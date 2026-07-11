@@ -8,7 +8,7 @@ LDFLAGS := -X github.com/idolum-ai/kenogram/internal/version.Version=$(VERSION) 
 GOCACHE ?= /tmp/kenogram-go-build
 GOMODCACHE ?= /tmp/kenogram-go-mod
 
-.PHONY: build install uninstall test test-race vet check architecture stdlib-only docs-freshness secrets smoke fmt
+.PHONY: build install uninstall test test-race integration vet check architecture stdlib-only docs-freshness secrets smoke fmt
 
 build:
 	mkdir -p bin
@@ -49,3 +49,6 @@ secrets:
 
 smoke: build
 	bash scripts/smoke.sh
+
+integration:
+	KENOGRAM_INTEGRATION=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/integration -count=1 -v

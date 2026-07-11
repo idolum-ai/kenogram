@@ -1,6 +1,7 @@
 # Network contract
 
-Status: planned; no networking is implemented at M1.
+Status: implemented. Unit contracts always run; all observable invariants run
+against rootless Podman in the mandatory Linux integration job.
 
 The normative acceptance invariants are:
 
@@ -15,7 +16,8 @@ The normative acceptance invariants are:
 9. Ephemeral grants die by deadline or proxy death and removal closes connections.
 10. Repeated application of one declaration is indistinguishable under 1–9.
 
-The reference mechanism is a host process holding a listener created inside a
-rootless, none-network namespace. The mechanism is non-normative; the invariants
-must be tested against the real supported runtime before this requirement becomes
-implemented.
+The mechanism uses a short-lived `nsenter` helper to create the listener inside
+the world's user and network namespaces and transfer its descriptor over an
+`AF_UNIX` socketpair. The helper exits; the host proxy retains the listener. The
+proxy resolves per connection, bounds rate and concurrency, logs metadata only,
+and closes connections when their grant is removed or expires.

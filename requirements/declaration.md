@@ -1,6 +1,6 @@
 # Declaration contract
 
-Status: implemented at M1.
+Status: implemented.
 
 Kenogram reads exactly one UTF-8 declaration. The accepted TOML subset contains
 double-quoted strings with TOML-compatible basic escapes, booleans, signed decimal

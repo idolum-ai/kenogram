@@ -5,5 +5,6 @@ cd "$repo_root"
 bin="${KENOGRAM_SMOKE_BIN:-bin/kenogram}"
 [[ -x "$bin" ]] || { echo "missing smoke binary: $bin" >&2; exit 1; }
 "$bin" version | rg -q '^kenogram '
-"$bin" help | rg -q 'up --dry-run'
+"$bin" help | rg -q 'kenogram up'
+"$bin" help | rg -q 'kenogram allow'
 echo "smoke check passed"

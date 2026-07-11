@@ -73,6 +73,16 @@ func TestRenderDoesNotReadOrPrintSourceContents(t *testing.T) {
 	if strings.Contains(out.String(), secret) {
 		t.Fatal("render exposed source content")
 	}
+	if strings.Contains(out.String(), result.Plan.Copies[0].SourceDigest) {
+		t.Fatal("render exposed secret digest")
+	}
+	encoded, err := JSON(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), result.Plan.Copies[0].SourceDigest) {
+		t.Fatal("JSON exposed secret digest")
+	}
 }
 
 func TestCanonicalHasTrailingNewline(t *testing.T) {
@@ -82,5 +92,28 @@ func TestCanonicalHasTrailingNewline(t *testing.T) {
 	}
 	if !bytes.HasSuffix(b, []byte("\n")) {
 		t.Fatalf("canonical bytes lack newline: %q", b)
+	}
+}
+
+func TestCopiedContentChangesPlanIdentity(t *testing.T) {
+	d, path, data := fixture(t, "")
+	source := filepath.Join(filepath.Dir(path), "source")
+	if err := os.WriteFile(source, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.Copies = []decl.Copy{{Source: "source", Target: "/config", Mode: "0600"}}
+	first, err := Build(d, path, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Build(d, path, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.PlanDigest == second.PlanDigest {
+		t.Fatal("copy drift did not change plan digest")
 	}
 }

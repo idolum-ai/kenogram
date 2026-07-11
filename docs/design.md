@@ -16,7 +16,9 @@ data is carried and digested; configuration is regenerated.
 Networking begins with a namespace containing loopback and no exterior route or
 resolver. Declared destinations add one visible object: a host-held TCP proxy
 socket bound on the world's loopback. The proxy resolves and dials exact declared
-name-and-port pairs. This is an implementation target, not an M1 claim.
+name-and-port pairs. The implementation transfers that listener descriptor from
+a short-lived namespace helper to the host proxy; no route or in-world forwarder
+is created.
 
 The implementation advances only through observable contracts. In particular,
 no world is called applied until runtime evidence has been inspected, and no

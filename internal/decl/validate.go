@@ -134,9 +134,17 @@ func sourceExists(dir, source string) error {
 	if source == "" {
 		return fmt.Errorf("source must not be empty")
 	}
-	_, err := os.Lstat(resolveSource(dir, source))
+	resolved := resolveSource(dir, source)
+	_, err := os.Lstat(resolved)
 	if err != nil {
 		return fmt.Errorf("source %q: %w", source, err)
+	}
+	evaluated, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return fmt.Errorf("source %q: %w", source, err)
+	}
+	if evaluated != filepath.Clean(resolved) {
+		return fmt.Errorf("source %q contains a symlink; symlinked host sources are not accepted", source)
 	}
 	return nil
 }

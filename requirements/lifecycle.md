@@ -1,6 +1,7 @@
 # Lifecycle contract
 
-Status: planned.
+Status: implemented; the real runtime boundary is continuously verified by the
+mandatory Linux integration job.
 
 Generations are named `kenogram-<world>-g<N>`. A successor is staged before the
 predecessor stops; they never run concurrently over one workspace. The successor
@@ -12,3 +13,9 @@ tree. Configuration is regenerated from the declaration. Confirmation surfaces
 workspace drift. Rootless operation, private namespaces, capability reduction,
 seccomp, device allowlisting, cgroups v2, and absence of the runtime socket are
 mandatory.
+
+Rootless Podman, cgroups v2, and subordinate UID/GID mappings are hard
+preflight requirements. Generated `/KENOGRAM.md`, `world.json`, and service
+supervisors are configuration state. Matching surviving generations are adopted;
+matching stopped generations are restarted; missing or mismatched runtime state
+is replaced. A failed cutover restores predecessor services and its door.
