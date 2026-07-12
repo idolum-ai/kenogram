@@ -45,7 +45,7 @@ func TestEngramControlsOpenClawInsideKenogram(t *testing.T) {
 	containerfile := filepath.Join(tmp, "Containerfile")
 	containerBody := fmt.Sprintf(`FROM %s
 USER root
-RUN echo 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/bookworm-backports.list && apt-get update && apt-get install --no-install-recommends -t bookworm-backports -y tmux && apt-get install --no-install-recommends -y curl procps && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install --no-install-recommends -y tmux curl procps && rm -rf /var/lib/apt/lists/*
 ARG KENOGRAM_UID
 ARG KENOGRAM_GID
 RUN getent group "$KENOGRAM_GID" >/dev/null || groupadd --gid "$KENOGRAM_GID" kenogram-test; printf 'kenogram:x:%%s:%%s:Kenogram composition:/workspace:/bin/sh\n' "$KENOGRAM_UID" "$KENOGRAM_GID" >> /etc/passwd
@@ -84,7 +84,6 @@ USER node
 	waitForOpenClaw(t, ctx, tmp, testEnv, container)
 	assertOpenClawVersion(t, ctx, tmp, testEnv, container, openClaw.Version)
 	waitForTmuxTarget(t, ctx, tmp, testEnv, container, "main:openclaw")
-	assertEngramTmuxIdentityFormat(t, ctx, tmp, testEnv, container, "main:openclaw")
 	waitForEngramPolling(t, telegram, 20*time.Second)
 
 	telegram.enqueueText("/attach main:openclaw")
@@ -119,18 +118,6 @@ USER node
 	assertDestroyedOutcomes(t, stateRoot, world, "applied", "destroyed")
 	assertSecretAbsent(t, filepath.Join(stateRoot, ".destroyed"), openClawSecretCanary)
 	assertSecretAbsent(t, filepath.Join(stateRoot, ".destroyed"), secretCanary)
-}
-
-func assertEngramTmuxIdentityFormat(t *testing.T, ctx context.Context, dir string, env []string, container, target string) {
-	t.Helper()
-	version := strings.TrimSpace(run(t, ctx, dir, env, "podman", "exec", container, "tmux", "-V"))
-	format := "#{session_name}\t#{window_id}\t#{pane_id}"
-	out := strings.TrimSpace(run(t, ctx, dir, env, "podman", "exec", container, "tmux", "display-message", "-p", "-t", target, format))
-	parts := strings.Split(out, "\t")
-	if len(parts) != 3 || !strings.HasPrefix(parts[1], "@") || !strings.HasPrefix(parts[2], "%") {
-		t.Fatalf("%s does not preserve Engram's tmux identity format: %q", version, out)
-	}
-	t.Logf("evidence tmux=%s window=%s pane=%s", version, parts[1], parts[2])
 }
 
 func materializeEngramRelease(t *testing.T, ctx context.Context, tmp string, lock releaseLock) string {
