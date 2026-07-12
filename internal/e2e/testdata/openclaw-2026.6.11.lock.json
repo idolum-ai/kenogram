@@ -1,0 +1,8 @@
+{
+  "version": "2026.6.11",
+  "npm_asset": "openclaw-2026.6.11.tgz",
+  "npm_sha256": "3b3165508391b82b38e62189979df589a45a2d8019a8ef7910fccc554649ce7b",
+  "npm_integrity": "sha512-T+P/g19IheeT1ckXMoPN61dYuE8vBF4MderI+kWkvpuFYxPkJxn8AXLpu9IXCnN9g36Acpm9+mMD/V+lsvOkyA==",
+  "npm_url": "https://registry.npmjs.org/openclaw/-/openclaw-2026.6.11.tgz",
+  "image": "docker.io/openclaw/openclaw@sha256:3814fb1f62f9cfc5944de088c5817c68c88b5d721feebe36420b666a90a61ce7"
+}

@@ -38,5 +38,14 @@ ranges. `make integration` verifies the real namespace boundary; it is mandatory
 in CI and intentionally fails rather than weakening isolation when those host
 prerequisites are absent.
 
-`make e2e` composes it with the checksum-pinned Engram `v0.1.0` release. Security
-reports belong in GitHub's private vulnerability-reporting flow.
+`make e2e` runs the release-pinned composition proofs. Kenogram isolates the
+OpenClaw `2026.6.11` TUI with a deterministic fake model, accepts the Engram
+`v0.2.0` release, and proves the hermetic fake-Telegram → Engram → tmux →
+OpenClaw path, including Bot API file download routing. Pull requests require
+the OpenClaw isolation proof; the full composition runs on `main` and nightly.
+
+The operator-assisted `make e2e-telegram-canary` is deliberately separate. It
+uses a protected canary bot to prove the real Telegram path and never runs on a
+pull request. Exact commands and secret requirements are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md#composition-proofs). Security reports belong
+in GitHub's private vulnerability-reporting flow.

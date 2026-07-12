@@ -65,17 +65,38 @@ jobs:
         id: engram-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: /tmp/engram-v0.1.0-linux-amd64.tar.gz
-          key: engram-v0.1.0-linux-amd64-6c6fa2ec4644bfc1cd4d294d734f0b3e0a664f1799dda11ffd1db148f2bcfb25
+          path: /tmp/engram-v0.2.0-linux-amd64.tar.gz
+          key: engram-v0.2.0-linux-amd64-a4ec04e3ac2924ed391c32b0b52ec95a48a727680d9d06f60a63cf5691f98a82
       - name: Seed immutable Engram fixture
         if: steps.engram-cache.outputs.cache-hit != 'true'
         run: |
-          curl --fail --location --proto '=https' --tlsv1.2 --output /tmp/engram-v0.1.0-linux-amd64.tar.gz https://github.com/idolum-ai/engram/releases/download/v0.1.0/engram-v0.1.0-linux-amd64.tar.gz
-          echo '6c6fa2ec4644bfc1cd4d294d734f0b3e0a664f1799dda11ffd1db148f2bcfb25  /tmp/engram-v0.1.0-linux-amd64.tar.gz' | sha256sum --check
+          curl --fail --location --proto '=https' --tlsv1.2 --output /tmp/engram-v0.2.0-linux-amd64.tar.gz https://github.com/idolum-ai/engram/releases/download/v0.2.0/engram-v0.2.0-linux-amd64.tar.gz
+          echo 'a4ec04e3ac2924ed391c32b0b52ec95a48a727680d9d06f60a63cf5691f98a82  /tmp/engram-v0.2.0-linux-amd64.tar.gz' | sha256sum --check
+      - name: Restore immutable OpenClaw fixture
+        id: openclaw-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/openclaw-2026.6.11.tgz
+          key: openclaw-2026.6.11-3b3165508391b82b38e62189979df589a45a2d8019a8ef7910fccc554649ce7b
+      - name: Seed immutable OpenClaw fixture
+        if: steps.openclaw-cache.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 --output /tmp/openclaw-2026.6.11.tgz https://registry.npmjs.org/openclaw/-/openclaw-2026.6.11.tgz
+          echo '3b3165508391b82b38e62189979df589a45a2d8019a8ef7910fccc554649ce7b  /tmp/openclaw-2026.6.11.tgz' | sha256sum --check
       - name: Engram release E2E
-        run: make e2e
+        run: make e2e-release
         env:
-          KENOGRAM_ENGRAM_ARCHIVE: /tmp/engram-v0.1.0-linux-amd64.tar.gz
+          KENOGRAM_ENGRAM_ARCHIVE: /tmp/engram-v0.2.0-linux-amd64.tar.gz
+          KENOGRAM_VERIFY_UPSTREAM: ${{ github.event_name == 'schedule' && '1' || '0' }}
+      - name: OpenClaw isolation and TUI E2E
+        run: make e2e-openclaw
+        env:
+          KENOGRAM_OPENCLAW_ARCHIVE: /tmp/openclaw-2026.6.11.tgz
+      - name: Engram controls OpenClaw through fake Telegram
+        if: github.event_name != 'pull_request'
+        run: make e2e-composition
+        env:
+          KENOGRAM_ENGRAM_ARCHIVE: /tmp/engram-v0.2.0-linux-amd64.tar.gz
           KENOGRAM_VERIFY_UPSTREAM: ${{ github.event_name == 'schedule' && '1' || '0' }}
 
   nightly-native:

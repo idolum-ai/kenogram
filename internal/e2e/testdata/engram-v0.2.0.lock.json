@@ -1,0 +1,9 @@
+{
+  "version": "v0.2.0",
+  "commit": "b23c854e1d3d",
+  "asset": "engram-v0.2.0-linux-amd64.tar.gz",
+  "sha256": "a4ec04e3ac2924ed391c32b0b52ec95a48a727680d9d06f60a63cf5691f98a82",
+  "release_url": "https://github.com/idolum-ai/engram/releases/tag/v0.2.0",
+  "asset_url": "https://github.com/idolum-ai/engram/releases/download/v0.2.0/engram-v0.2.0-linux-amd64.tar.gz",
+  "checksums_url": "https://github.com/idolum-ai/engram/releases/download/v0.2.0/checksums.txt"
+}

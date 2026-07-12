@@ -27,3 +27,10 @@ processes are untrusted relative to the host. The Linux kernel and rootless
 Podman are dependencies whose isolation Kenogram observes but does not
 independently establish. Declared writable mounts and secrets intentionally
 cross the boundary. Kenogram does not claim to harden a multi-tenant host.
+
+Test credentials remain outside the declaration and durable world state.
+Hermetic composition uses canary values and local fake APIs. The optional live
+Telegram canary requires a dedicated bot and account, receives credentials only
+through the protected `live-telegram-canary` environment, scans Kenogram state
+for the bot token, and destroys its world after the proof. It is never executed
+for untrusted pull-request code.

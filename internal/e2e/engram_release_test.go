@@ -38,7 +38,7 @@ type releaseLock struct {
 
 func TestEngramReleaseLock(t *testing.T) {
 	lock := readReleaseLock(t)
-	if lock.Version != "v0.1.0" || lock.Commit != "296d8e36f367" {
+	if lock.Version != "v0.2.0" || lock.Commit != "b23c854e1d3d" {
 		t.Fatalf("unexpected Engram identity: %#v", lock)
 	}
 	if len(lock.SHA256) != sha256.Size*2 {
@@ -72,6 +72,7 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	root := repositoryRoot(t)
 	tmp := t.TempDir()
 	lock := readReleaseLock(t)
+	t.Logf("evidence engram_version=%s commit=%s sha256=%s", lock.Version, lock.Commit, lock.SHA256)
 	archive := filepath.Join(tmp, lock.Asset)
 	if supplied := os.Getenv("KENOGRAM_ENGRAM_ARCHIVE"); supplied != "" {
 		copyRegularFile(t, supplied, archive, 0o600)
@@ -185,7 +186,7 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 
 func readReleaseLock(t *testing.T) releaseLock {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "engram-v0.1.0.lock.json"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "engram-v0.2.0.lock.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,6 +449,11 @@ func assertGeneration(t *testing.T, path string, generation int64, status string
 
 func assertDestroyedHistory(t *testing.T, stateRoot, world string) {
 	t.Helper()
+	assertDestroyedOutcomes(t, stateRoot, world, "applied", "adopted", "stopped", "restarted", "destroyed")
+}
+
+func assertDestroyedOutcomes(t *testing.T, stateRoot, world string, outcomes ...string) {
+	t.Helper()
 	matches, err := filepath.Glob(filepath.Join(stateRoot, ".destroyed", world+"-*", "history.jsonl"))
 	if err != nil {
 		t.Fatal(err)
@@ -459,9 +465,10 @@ func assertDestroyedHistory(t *testing.T, stateRoot, world string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, outcome := range []string{`"outcome":"applied"`, `"outcome":"adopted"`, `"outcome":"stopped"`, `"outcome":"restarted"`, `"outcome":"destroyed"`} {
-		if !strings.Contains(string(raw), outcome) {
-			t.Fatalf("destroyed history lacks %s:\n%s", outcome, raw)
+	for _, outcome := range outcomes {
+		encoded := `"outcome":"` + outcome + `"`
+		if !strings.Contains(string(raw), encoded) {
+			t.Fatalf("destroyed history lacks %s:\n%s", encoded, raw)
 		}
 	}
 }
