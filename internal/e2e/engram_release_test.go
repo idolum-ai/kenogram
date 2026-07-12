@@ -347,7 +347,7 @@ target = "/etc/engram-revision"
 mode = "0644"
 [[services]]
 name = "tmux"
-command = ["/usr/bin/tmux", "new-session", "-d", "-s", "main", "while :; do sleep 60; done"]
+command = ["/usr/bin/tmux", "new-session", "-d", "-s", "main"]
 autostart = true
 restart = "never"
 `, world, image, user, engram, envSource, revisionSource)
