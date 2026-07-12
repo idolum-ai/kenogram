@@ -64,6 +64,22 @@ func TestVerifyEvidence(t *testing.T) {
 	}
 }
 
+func TestParseIDMap(t *testing.T) {
+	got, err := parseIDMap([]byte("         0     100000       1001\n      1001       1001          1\n      1002     101002      64534\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []IDMap{{ContainerID: 0, HostID: 100000, Size: 1001}, {ContainerID: 1001, HostID: 1001, Size: 1}, {ContainerID: 1002, HostID: 101002, Size: 64534}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ID mappings = %#v, want %#v", got, want)
+	}
+	for _, raw := range [][]byte{nil, []byte("0 1"), []byte("0 x 1"), []byte("0 0 0")} {
+		if _, err := parseIDMap(raw); err == nil {
+			t.Fatalf("parseIDMap(%q) succeeded", raw)
+		}
+	}
+}
+
 func TestPreflightRequiresRootlessCgroupV2AndSubIDs(t *testing.T) {
 	f := &fake{out: []byte(`{"host":{"security":{"rootless":true},"cgroupVersion":"v2","idMappings":{"uidmap":[{"size":65536}],"gidmap":[{"size":65536}]}}}`)}
 	if err := New(f).Preflight(context.Background()); err != nil {

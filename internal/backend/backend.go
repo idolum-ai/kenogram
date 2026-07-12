@@ -277,7 +277,57 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 	for _, mapping := range d.IDMappings.GIDMap {
 		e.GIDMap = append(e.GIDMap, IDMap{ContainerID: mapping.ContainerID, HostID: mapping.HostID, Size: mapping.Size})
 	}
+	if len(e.UIDMap) == 0 && e.PID > 0 {
+		e.UIDMap, err = readProcIDMap(e.PID, "uid_map")
+		if err != nil {
+			return Evidence{}, fmt.Errorf("read runtime UID mapping evidence: %w", err)
+		}
+	}
+	if len(e.GIDMap) == 0 && e.PID > 0 {
+		e.GIDMap, err = readProcIDMap(e.PID, "gid_map")
+		if err != nil {
+			return Evidence{}, fmt.Errorf("read runtime GID mapping evidence: %w", err)
+		}
+	}
 	return e, nil
+}
+
+func readProcIDMap(pid int, name string) ([]IDMap, error) {
+	if pid <= 0 || name != "uid_map" && name != "gid_map" {
+		return nil, fmt.Errorf("invalid process mapping request")
+	}
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), name))
+	if err != nil {
+		return nil, err
+	}
+	return parseIDMap(raw)
+}
+
+func parseIDMap(raw []byte) ([]IDMap, error) {
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	mappings := make([]IDMap, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("invalid ID mapping line")
+		}
+		values := [3]int64{}
+		for index, field := range fields {
+			value, err := strconv.ParseInt(field, 10, 64)
+			if err != nil || value < 0 {
+				return nil, fmt.Errorf("invalid ID mapping value")
+			}
+			values[index] = value
+		}
+		if values[2] <= 0 {
+			return nil, fmt.Errorf("invalid ID mapping size")
+		}
+		mappings = append(mappings, IDMap{ContainerID: values[0], HostID: values[1], Size: values[2]})
+	}
+	if len(mappings) == 0 {
+		return nil, fmt.Errorf("empty ID mapping")
+	}
+	return mappings, nil
 }
 func Verify(e Evidence, result plan.Result, generation int64) error {
 	if !e.Running {

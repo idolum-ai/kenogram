@@ -43,7 +43,7 @@ func TestGitHTTPSPrivateCAWorkflow(t *testing.T) {
 	seed := filepath.Join(root, "seed")
 	mustMkdir(t, seed)
 	gitRun(t, seed, nil, git, "init", "--initial-branch=main")
-	mustWriteFile(t, filepath.Join(seed, "go.mod"), "module fixture.example/proof\n\ngo 1.23\n")
+	mustWriteFile(t, filepath.Join(seed, "go.mod"), "module fixture.example/proof\n\ngo 1.22\n")
 	mustWriteFile(t, filepath.Join(seed, "proof.go"), "package proof\n\nfunc Value() string { return \"provable\" }\n")
 	mustWriteFile(t, filepath.Join(seed, "proof_test.go"), "package proof\n\nimport \"testing\"\n\nfunc TestValue(t *testing.T) { if Value() != \"provable\" { t.Fatal(Value()) } }\n")
 	identity := []string{"GIT_AUTHOR_NAME=Kenogram Proof", "GIT_AUTHOR_EMAIL=proof@kenogram.invalid", "GIT_COMMITTER_NAME=Kenogram Proof", "GIT_COMMITTER_EMAIL=proof@kenogram.invalid"}
