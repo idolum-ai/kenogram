@@ -93,6 +93,11 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	mustWrite(t, containerfile, []byte(containerBody), 0o600)
 	image := "localhost/kenogram-engram-e2e:" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	run(t, ctx, tmp, nil, "podman", "build", "--pull=missing", "-t", image, "-f", containerfile, ".")
+	imageDigest := strings.TrimSpace(run(t, ctx, tmp, nil, "podman", "image", "inspect", "--format", "{{.Digest}}", image))
+	if !strings.HasPrefix(imageDigest, "sha256:") || len(imageDigest) != len("sha256:")+sha256.Size*2 {
+		t.Fatalf("invalid built image digest: %q", imageDigest)
+	}
+	pinnedImage := image + "@" + imageDigest
 
 	world := "engram-e2e-" + strconv.Itoa(os.Getpid())
 	stateRoot := filepath.Join(tmp, "state")
@@ -116,7 +121,7 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	writeEngramEnv(t, envSource, 123)
 	mustWrite(t, revisionSource, []byte("one\n"), 0o600)
 	user := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
-	writeDeclaration(t, declaration, world, image, user, engram, envSource, revisionSource)
+	writeDeclaration(t, declaration, world, pinnedImage, user, engram, envSource, revisionSource)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	first := containerName(world, 1)
 	waitFor(t, 10*time.Second, func() (bool, string) {
