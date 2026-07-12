@@ -5,5 +5,6 @@ cd "$repo_root"
 rg -q 'Status: implemented' requirements/declaration.md
 rg -q 'Status: implemented' requirements/network.md
 rg -q 'make integration' README.md requirements/INDEX.md
+rg -q 'make e2e' README.md requirements/INDEX.md
 rg -q 'not a morphogrammatic calculus' docs/kenogrammatics.md
 echo "docs freshness check passed"

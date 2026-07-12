@@ -35,3 +35,8 @@ rootless Podman on cgroups v2, `nsenter`, and configured subordinate UID/GID
 ranges. `make integration` verifies the real namespace boundary; it is mandatory
 in CI and intentionally fails rather than weakening isolation when those host
 prerequisites are absent.
+
+`make e2e` additionally verifies that the checksum-pinned Engram `v0.1.0`
+release can be materialized into a network-absent world, operate offline with
+real tmux, emit an upstream signal, carry state across replacement, restart by
+adoption, and leave preserved history after destruction.

@@ -27,3 +27,5 @@ jobs:
           podman unshare true
       - name: Integration
         run: make integration
+      - name: Engram release E2E
+        run: make e2e

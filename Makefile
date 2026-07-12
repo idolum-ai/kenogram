@@ -8,7 +8,7 @@ LDFLAGS := -X github.com/idolum-ai/kenogram/internal/version.Version=$(VERSION) 
 GOCACHE ?= /tmp/kenogram-go-build
 GOMODCACHE ?= /tmp/kenogram-go-mod
 
-.PHONY: build install uninstall test test-race integration vet check architecture stdlib-only docs-freshness secrets smoke fmt
+.PHONY: build install uninstall test test-race integration e2e vet check architecture stdlib-only docs-freshness secrets smoke fmt
 
 build:
 	mkdir -p bin
@@ -52,3 +52,6 @@ smoke: build
 
 integration:
 	KENOGRAM_INTEGRATION=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/integration -count=1 -v
+
+e2e:
+	KENOGRAM_E2E=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/e2e -run TestEngramReleaseInsideKenogram -count=1 -timeout=10m -v

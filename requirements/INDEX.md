@@ -24,6 +24,8 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
 
 - `make test` runs unit, contract, and parser fuzz-seed tests.
 - `make integration` runs the rootless Podman boundary contract and is mandatory in CI.
+- `make e2e` composes Kenogram with the checksum-pinned Engram `v0.1.0`
+  release across materialization, replacement, restart, and destruction.
 - `make architecture` checks required files and package dependency direction.
 - `make stdlib-only` rejects third-party Go modules.
 - `make check` runs the complete local quality gate.
