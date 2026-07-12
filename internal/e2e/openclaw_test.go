@@ -234,17 +234,23 @@ func (p *observedProvider) assertObserved(t *testing.T) {
 
 func (p *observedProvider) waitObserved(t *testing.T, timeout time.Duration) {
 	t.Helper()
+	if !p.observedWithin(timeout) {
+		t.Fatal("OpenClaw never reached the declared provider")
+	}
+}
+
+func (p *observedProvider) observedWithin(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		p.mu.Lock()
 		requests := p.requests
 		p.mu.Unlock()
 		if requests > 0 {
-			return
+			return true
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("OpenClaw never reached the declared provider")
+	return false
 }
 
 func (p *observedProvider) waitObservedContaining(t *testing.T, timeout time.Duration, fragment string) {

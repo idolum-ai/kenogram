@@ -89,7 +89,15 @@ USER node
 	telegram.enqueueText("/attach main:openclaw")
 	telegram.waitOutbound(t, 20*time.Second, "attached existing tmux target")
 	telegram.enqueueText("/send 1 Reply with the proof marker.")
-	provider.waitObserved(t, 30*time.Second)
+	if !provider.observedWithin(30 * time.Second) {
+		pane, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:openclaw")
+		audit, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "cat", "/workspace/.engram/audit.jsonl")
+		state, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "cat", "/workspace/.engram/state.json")
+		telegram.mu.Lock()
+		outbound := append([]telegramOutbound(nil), telegram.outbound...)
+		telegram.mu.Unlock()
+		t.Fatalf("OpenClaw never reached the declared provider\npane:\n%s\nEngram state:\n%s\nEngram audit:\n%s\nTelegram outbound: %#v", pane, state, audit, outbound)
+	}
 	waitFor(t, 30*time.Second, func() (bool, string) {
 		out, err := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:openclaw")
 		return err == nil && strings.Contains(out, openClawProof), out
