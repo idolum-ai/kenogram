@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/idolum-ai/kenogram/internal/plan"
 )
 
 func TestStateAppliedAndGeneration(t *testing.T) {
@@ -98,6 +100,17 @@ func TestStagingPreservesSourceIdentityBeforeTargetMode(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("staged source mode=%v", info.Mode().Perm())
+	}
+	sourceDigest, err := plan.DigestSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagedDigest, err := plan.DigestSource(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stagedDigest != sourceDigest {
+		t.Fatalf("staged source digest = %s, want %s", stagedDigest, sourceDigest)
 	}
 	if err := l.ApplyStageMode(stage, "0644"); err != nil {
 		t.Fatal(err)

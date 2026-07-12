@@ -621,6 +621,13 @@ func (a *App) mounts(l worldfs.Layout, result plan.Result) ([]backend.Mount, err
 }
 func (a *App) materialize(ctx context.Context, l worldfs.Layout, container string, generation int64, p Prepared) error {
 	for i, c := range p.Result.Plan.Copies {
+		liveDigest, err := plan.DigestSource(c.Source)
+		if err != nil {
+			return err
+		}
+		if liveDigest != c.SourceDigest {
+			return fmt.Errorf("copy source %s changed after planning", c.Source)
+		}
 		stage, err := l.StageSource(generation, i, c.Source, c.Mode)
 		if err != nil {
 			return err
@@ -630,7 +637,7 @@ func (a *App) materialize(ctx context.Context, l worldfs.Layout, container strin
 			return err
 		}
 		if stagedDigest != c.SourceDigest {
-			return fmt.Errorf("copy source %s changed after planning", c.Source)
+			return fmt.Errorf("staging did not preserve copy source %s", c.Source)
 		}
 		if err := l.ApplyStageMode(stage, c.Mode); err != nil {
 			return err

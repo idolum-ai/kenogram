@@ -13,6 +13,11 @@ type Change struct {
 }
 
 func Diff(before, after Plan) ([]Change, error) {
+	// Plans are passed by value, but their slices still share backing arrays
+	// with the caller. Redaction must operate on private copies so rendering a
+	// diff cannot corrupt the plan that will subsequently be materialized.
+	before.Copies = append([]Copy(nil), before.Copies...)
+	after.Copies = append([]Copy(nil), after.Copies...)
 	secretChanges := []Change{}
 	for i := 0; i < len(before.Copies) && i < len(after.Copies); i++ {
 		if before.Copies[i].Secret && after.Copies[i].Secret && before.Copies[i].SourceDigest != after.Copies[i].SourceDigest {
