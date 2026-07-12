@@ -318,7 +318,7 @@ func writeOpenClawConfig(t *testing.T, path, providerHost string, providerPort i
 	body := fmt.Sprintf(`{
   "gateway": {"mode":"local","bind":"loopback","auth":{"mode":"token","token":%q}},
   "proxy": {"enabled":true,"proxyUrl":"http://127.0.0.1:3128","loopbackMode":"gateway-only"},
-  "models": {"mode":"merge","providers":{"kenogram-proof":{"baseUrl":"http://%s:%d/v1","apiKey":%q,"api":"openai-completions","models":[{"id":"proof","name":"Kenogram proof","reasoning":false,"input":["text"],"contextWindow":8192,"maxTokens":256}]}}},
+  "models": {"mode":"merge","providers":{"kenogram-proof":{"baseUrl":"http://%s:%d/v1","apiKey":%q,"api":"openai-completions","models":[{"id":"proof","name":"Kenogram proof","reasoning":false,"input":["text"],"contextWindow":32768,"maxTokens":256}]}}},
   "agents": {"defaults":{"workspace":"/workspace/openclaw","model":{"primary":"kenogram-proof/proof"},"models":{"kenogram-proof/proof":{"params":{"stream":true}}},"memorySearch":{"enabled":false},"sandbox":{"mode":"off"}}}
 }
 `, openClawGatewayToken, providerHost, providerPort, openClawSecretCanary)
