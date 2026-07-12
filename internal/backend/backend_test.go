@@ -80,6 +80,22 @@ func TestParseIDMap(t *testing.T) {
 	}
 }
 
+func TestParseProcBoundingCaps(t *testing.T) {
+	zero, err := parseProcBoundingCaps([]byte("Name:\ttail\nCapBnd:\t0000000000000000\n"))
+	if err != nil || zero == nil || len(zero) != 0 {
+		t.Fatalf("zero bounding set = %#v, %v", zero, err)
+	}
+	nonzero, err := parseProcBoundingCaps([]byte("CapBnd:\t0000000000000400\n"))
+	if err != nil || !reflect.DeepEqual(nonzero, []string{"0000000000000400"}) {
+		t.Fatalf("nonzero bounding set = %#v, %v", nonzero, err)
+	}
+	for _, raw := range [][]byte{nil, []byte("CapBnd:\n"), []byte("CapBnd:\tnot-hex\n")} {
+		if _, err := parseProcBoundingCaps(raw); err == nil {
+			t.Fatalf("parseProcBoundingCaps(%q) succeeded", raw)
+		}
+	}
+}
+
 func TestPreflightRequiresRootlessCgroupV2AndSubIDs(t *testing.T) {
 	f := &fake{out: []byte(`{"host":{"security":{"rootless":true},"cgroupVersion":"v2","idMappings":{"uidmap":[{"size":65536}],"gidmap":[{"size":65536}]}}}`)}
 	if err := New(f).Preflight(context.Background()); err != nil {

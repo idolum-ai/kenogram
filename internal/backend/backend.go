@@ -268,6 +268,12 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 	}
 	d := docs[0]
 	e := Evidence{Name: strings.TrimPrefix(d.Name, "/"), Running: d.State.Running, PID: d.State.Pid, NetworkMode: d.HostConfig.NetworkMode, IPCMode: d.HostConfig.IpcMode, PIDMode: d.HostConfig.PidMode, UTSMode: d.HostConfig.UTSMode, UserNSMode: d.HostConfig.UsernsMode, User: d.Config.User, Hostname: d.Config.Hostname, WorkingDir: d.Config.WorkingDir, CapDrop: d.HostConfig.CapDrop, BoundingCaps: d.BoundingCaps, SecurityOpt: d.HostConfig.SecurityOpt, Devices: len(d.HostConfig.Devices), Labels: d.Config.Labels, Memory: d.HostConfig.Memory, NanoCPUs: d.HostConfig.NanoCPUs, PIDs: d.HostConfig.PidsLimit}
+	if e.BoundingCaps == nil && e.PID > 0 {
+		e.BoundingCaps, err = readProcBoundingCaps(e.PID)
+		if err != nil {
+			return Evidence{}, fmt.Errorf("read runtime capability evidence: %w", err)
+		}
+	}
 	for _, m := range d.Mounts {
 		e.Mounts = append(e.Mounts, EvidenceMount{Source: m.Source, Destination: m.Destination, RW: m.RW, Mode: m.Mode, Options: m.Options})
 	}
@@ -328,6 +334,42 @@ func parseIDMap(raw []byte) ([]IDMap, error) {
 		return nil, fmt.Errorf("empty ID mapping")
 	}
 	return mappings, nil
+}
+
+func readProcBoundingCaps(pid int) ([]string, error) {
+	if pid <= 0 {
+		return nil, fmt.Errorf("invalid process capability request")
+	}
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+	if err != nil {
+		return nil, err
+	}
+	return parseProcBoundingCaps(raw)
+}
+
+func parseProcBoundingCaps(raw []byte) ([]string, error) {
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "CapBnd:") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, "CapBnd:"))
+		if value == "" {
+			return nil, fmt.Errorf("empty capability bounding set")
+		}
+		for _, character := range value {
+			digit := character >= '0' && character <= '9'
+			lower := character >= 'a' && character <= 'f'
+			upper := character >= 'A' && character <= 'F'
+			if !digit && !lower && !upper {
+				return nil, fmt.Errorf("invalid capability bounding set")
+			}
+		}
+		if strings.Trim(value, "0") == "" {
+			return []string{}, nil
+		}
+		return []string{strings.ToLower(value)}, nil
+	}
+	return nil, fmt.Errorf("capability bounding set is absent")
 }
 func Verify(e Evidence, result plan.Result, generation int64) error {
 	if !e.Running {
