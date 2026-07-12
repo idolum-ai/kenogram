@@ -65,6 +65,9 @@ func TestUpRecordsAppliedOnlyAfterEvidence(t *testing.T) {
 	if _, err := os.Stat(layout.Applied); err != nil {
 		t.Fatal(err)
 	}
+	if !containsCall(runner.calls, "cp ", "/generated/. kenogram-w-g1:/") {
+		t.Fatalf("generated root contents were not copied to /: %v", runner.calls)
+	}
 }
 func TestUpRejectsBadRuntimeEvidence(t *testing.T) {
 	base := t.TempDir()
@@ -112,4 +115,13 @@ func countCalls(calls []string, prefix string) int {
 		}
 	}
 	return count
+}
+
+func containsCall(calls []string, prefix, fragment string) bool {
+	for _, call := range calls {
+		if strings.HasPrefix(call, prefix) && strings.Contains(call, fragment) {
+			return true
+		}
+	}
+	return false
 }

@@ -363,7 +363,9 @@ func (a *App) materialize(ctx context.Context, l worldfs.Layout, container strin
 			return err
 		}
 	}
-	return a.Backend.Copy(ctx, container, filepath.Join(root, "."), "/")
+	// Preserve the trailing /. so Podman copies the generated directory's
+	// contents into the container root rather than creating /generated.
+	return a.Backend.Copy(ctx, container, root+string(os.PathSeparator)+".", "/")
 }
 
 func doorAddress(allows []plan.NetworkAllow) string {
