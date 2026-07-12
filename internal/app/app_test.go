@@ -101,6 +101,22 @@ func TestUpRecordsAppliedOnlyAfterEvidence(t *testing.T) {
 	}
 }
 
+func TestMaterializeCreatesWorldUserServiceStatusDirectory(t *testing.T) {
+	layout := worldfs.For(t.TempDir(), "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeRunner{}
+	a := &App{Backend: backend.New(runner)}
+	if err := a.materialize(context.Background(), layout, "kenogram-w-g1", 1, preparedFixture()); err != nil {
+		t.Fatal(err)
+	}
+	statusDir := filepath.Join(layout.Staging, "g1", "generated", "run", "kenogram", "services")
+	if info, err := os.Stat(statusDir); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("service status directory = %#v, %v", info, err)
+	}
+}
+
 func TestUpRecoversRollbackTransitionBeforeCreating(t *testing.T) {
 	base := t.TempDir()
 	layout := worldfs.For(base, "w")

@@ -643,6 +643,12 @@ func (a *App) materialize(ctx context.Context, l worldfs.Layout, container strin
 	if err := os.MkdirAll(filepath.Join(root, "etc", "kenogram", "services"), 0o700); err != nil {
 		return err
 	}
+	// Service supervisors run as the declared world user. Materialize their
+	// runtime status directory with host-user ownership so they never need
+	// permission to create a child directly under root-owned /run.
+	if err := os.MkdirAll(filepath.Join(root, "run", "kenogram", "services"), 0o700); err != nil {
+		return err
+	}
 	inside := insideDocument()
 	if err := os.WriteFile(filepath.Join(root, "KENOGRAM.md"), []byte(inside), 0o444); err != nil {
 		return err
