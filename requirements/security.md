@@ -1,10 +1,13 @@
 # Security contract
 
-Status: implemented, subject to the kernel/runtime limits stated here.
+Status: binding contract. Evidence and open boundaries are indexed in `INDEX.md`.
 
 The declaration is host-authored but still parsed fail-closed. It cannot select
-arbitrary schema extensions. Planning reads metadata only: copied and mounted
-file contents are neither rendered nor incorporated into the semantic plan digest.
+arbitrary schema extensions. Planning never renders copied, mounted, or secret
+bytes. Copied file and tree contents are deterministically digested into the
+plan; live mounts are not. Secret bytes and their digests are never emitted in
+plan output, logs, history, or generated projections. Host-private recovery
+state may retain a source digest, but never copied bytes.
 
 Relative sources resolve against the declaration directory, not the caller's
 working directory. Missing sources fail validation. Secret files must have no
@@ -16,3 +19,11 @@ mode, provenance labels, declared mounts, and resource limits. The runtime socke
 is never mounted. Kenogram protects the host only to the extent provided by the
 kernel, rootless runtime, and its own correctness; declared rw mounts and secrets
 remain world-owned input by design.
+
+## Trust boundary
+
+The host operator and host-authored declaration are trusted authority. World
+processes are untrusted relative to the host. The Linux kernel and rootless
+Podman are dependencies whose isolation Kenogram observes but does not
+independently establish. Declared writable mounts and secrets intentionally
+cross the boundary. Kenogram does not claim to harden a multi-tenant host.

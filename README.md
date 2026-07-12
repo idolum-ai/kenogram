@@ -4,25 +4,26 @@
 
 # Kenogram
 
-Kenogram materializes small, faithful Linux computers from a declaration.
-Everything visible inside a world belongs to its inhabitant. Everything outside
-the world is absent.
-
-The repository implements strict declarations and semantic plans, rootless
-Podman generations, binary replacement with rollback, carried
-workspace digest trees, regenerated configuration, runtime evidence, a
-hash-chained history, a network-absent namespace with a host-held loopback door,
-and memory-only ephemeral grants.
+Kenogram materializes small Linux computers from a declaration. Everything
+visible inside a world belongs to its inhabitant; everything else is absent
+unless the declaration deliberately carries it across the boundary.
 
 ```sh
-make check
-go run ./cmd/kenogram up --dry-run ./kenogram.toml
-go run ./cmd/kenogram up --yes ./kenogram.toml
+make build
+./bin/kenogram up --dry-run ./kenogram.example.toml
 ```
 
-The requirements in [`requirements/`](requirements/) are binding. The complete
-design is recorded in [`docs/design.md`](docs/design.md); implementation status
-is stated separately so unfinished behavior is never implied by the charter.
+This first command is read-only. Before applying a real declaration, replace the
+example image digest and review its mounts and destinations. Durable state lives
+under `$XDG_DATA_HOME/kenogram/worlds` (normally
+`~/.local/share/kenogram/worlds`); tests and automation may set
+`KENOGRAM_STATE_DIR`.
+
+The contracts in [`requirements/`](requirements/) are binding. Their
+[evidence table](requirements/INDEX.md#evidence-and-open-boundaries) separates
+what is proven from what remains open. See the [declaration
+schema](requirements/declaration.md), [operations and
+recovery](requirements/operations.md), and [contributor contract](CONTRIBUTING.md).
 
 The name is a deliberate but limited adaptation of Rudolf Kaehr's
 kenogrammatics: the project privileges observable patterns over the identity of
@@ -30,13 +31,12 @@ their realization, without claiming to implement a morphogrammatic calculus.
 [`docs/kenogrammatics.md`](docs/kenogrammatics.md) records that lineage, the
 engineering analogy, and its limits.
 
-Kenogram is Linux-only and uses the Go standard library exclusively. It requires
+Kenogram is pre-release, Linux-only, and uses the Go standard library
+exclusively. It requires
 rootless Podman on cgroups v2, `nsenter`, and configured subordinate UID/GID
 ranges. `make integration` verifies the real namespace boundary; it is mandatory
 in CI and intentionally fails rather than weakening isolation when those host
 prerequisites are absent.
 
-`make e2e` additionally verifies that the checksum-pinned Engram `v0.1.0`
-release can be materialized into a network-absent world, operate offline with
-real tmux, emit an upstream signal, carry state across replacement, restart by
-adoption, and leave preserved history after destruction.
+`make e2e` composes it with the checksum-pinned Engram `v0.1.0` release. Security
+reports belong in GitHub's private vulnerability-reporting flow.

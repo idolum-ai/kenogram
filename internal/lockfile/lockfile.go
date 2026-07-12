@@ -31,7 +31,7 @@ func acquire(path string, allowStale bool) (*Lock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create lock: %w", err)
 	}
-	if _, err := f.WriteString(strconv.Itoa(os.Getpid()) + " " + processStart(os.Getpid()) + "\n"); err != nil {
+	if _, err := f.WriteString(strconv.Itoa(os.Getpid()) + " " + ProcessStart(os.Getpid()) + "\n"); err != nil {
 		f.Close()
 		os.Remove(path)
 		return nil, fmt.Errorf("write lock: %w", err)
@@ -57,10 +57,13 @@ func stale(path string) bool {
 	if err != nil {
 		return false
 	}
-	start := processStart(pid)
+	start := ProcessStart(pid)
 	return start == "" || start != fields[1]
 }
-func processStart(pid int) string {
+
+// ProcessStart returns the Linux process start-time field used to distinguish
+// a live process from a later process that reused its PID.
+func ProcessStart(pid int) string {
 	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
 		return ""
@@ -78,10 +81,23 @@ func processStart(pid int) string {
 }
 
 func (l *Lock) Release() error {
+	if l == nil {
+		return nil
+	}
+	return l.releaseAt(l.path)
+}
+
+// ReleaseMoved releases a lock whose containing directory was atomically
+// renamed while held.
+func (l *Lock) ReleaseMoved(path string) error {
+	return l.releaseAt(path)
+}
+
+func (l *Lock) releaseAt(path string) error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	err := errors.Join(l.file.Close(), os.Remove(l.path))
+	err := errors.Join(l.file.Close(), os.Remove(path))
 	l.file = nil
 	if err != nil {
 		return fmt.Errorf("release lock: %w", err)

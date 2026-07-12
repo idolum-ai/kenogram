@@ -1,6 +1,6 @@
 # Plan contract
 
-Status: implemented.
+Status: binding contract. Evidence and open boundaries are indexed in `INDEX.md`.
 
 Planning resolves source paths relative to the declaration directory and cleans
 all absolute target paths. A semantic plan is encoded as JSON from fixed-order

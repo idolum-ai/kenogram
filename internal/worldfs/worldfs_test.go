@@ -41,6 +41,11 @@ func TestDigestDeterministicAndDrift(t *testing.T) {
 	if first.Root != second.Root {
 		t.Fatal("nondeterministic")
 	}
+	for _, entry := range first.Entries {
+		if entry.Type == "directory" && entry.Size != 0 {
+			t.Fatalf("directory %q contributes filesystem size %d", entry.Path, entry.Size)
+		}
+	}
 	if err := os.WriteFile(filepath.Join(root, "a"), []byte("two"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -50,5 +55,58 @@ func TestDigestDeterministicAndDrift(t *testing.T) {
 	}
 	if ChangedFiles(first, third) != 1 {
 		t.Fatalf("changed=%d", ChangedFiles(first, third))
+	}
+}
+
+func TestTransitionRoundTripAndClear(t *testing.T) {
+	l := For(t.TempDir(), "x")
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	want := Transition{Version: 1, Phase: "rollback", Prior: &State{Name: "x", Generation: 1}, Successor: State{Name: "x", Generation: 2}, SuccessorDeclaration: []byte("version = 1\n")}
+	if err := l.WriteTransition(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := l.ReadTransition()
+	if err != nil || got.Prior.Generation != 1 || got.Successor.Generation != 2 {
+		t.Fatalf("transition=%#v err=%v", got, err)
+	}
+	if err := l.ClearTransition(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.ReadTransition(); !os.IsNotExist(err) {
+		t.Fatalf("transition remains: %v", err)
+	}
+}
+
+func TestStagingPreservesSourceIdentityBeforeTargetMode(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(source, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := For(t.TempDir(), "x")
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	stage, err := l.StageSource(1, 0, source, "0644")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("staged source mode=%v", info.Mode().Perm())
+	}
+	if err := l.ApplyStageMode(stage, "0644"); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("materialized target mode=%v", info.Mode().Perm())
 	}
 }

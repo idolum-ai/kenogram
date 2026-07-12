@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/idolum-ai/kenogram/internal/naming"
 )
 
 var pinnedImage = regexp.MustCompile(`@sha256:[0-9a-fA-F]{64}$`)
@@ -16,11 +18,8 @@ func Validate(d Declaration, declarationDir string) error {
 	if d.Version != 1 {
 		return fmt.Errorf("version must be 1, got %d", d.Version)
 	}
-	if strings.TrimSpace(d.Name) == "" {
-		return fmt.Errorf("name must not be empty")
-	}
-	if strings.ContainsAny(d.Name, "/\\") {
-		return fmt.Errorf("name must not contain a path separator")
+	if err := naming.World(d.Name); err != nil {
+		return err
 	}
 	if d.World.Hostname == "" || d.World.Base == "" || d.World.User == "" {
 		return fmt.Errorf("world hostname, base, and user must not be empty")
@@ -105,8 +104,8 @@ func Validate(d Declaration, declarationDir string) error {
 	}
 	seenServices := map[string]bool{}
 	for i, service := range d.Services {
-		if service.Name == "" {
-			return fmt.Errorf("services[%d].name must not be empty", i)
+		if err := naming.Service(service.Name); err != nil {
+			return fmt.Errorf("services[%d].name: %w", i, err)
 		}
 		if seenServices[service.Name] {
 			return fmt.Errorf("duplicate service name %q", service.Name)

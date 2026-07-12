@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"github.com/idolum-ai/kenogram/internal/plan"
+	"os"
 	"reflect"
 	"testing"
 )
@@ -42,14 +43,24 @@ func TestCreateExactArgv(t *testing.T) {
 	}
 }
 func TestVerifyEvidence(t *testing.T) {
-	r := plan.Result{PlanDigest: "p", DeclarationDigest: "d", Plan: plan.Plan{Name: "w", Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
-	e := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}}
+	r := plan.Result{PlanDigest: "p", DeclarationDigest: "d", Plan: plan.Plan{Name: "w", World: plan.World{User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
+	e := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", IPCMode: "private", PIDMode: "private", UTSMode: "private", UserNSMode: "", UIDMap: []IDMap{{ContainerID: int64(os.Getuid()), HostID: int64(os.Getuid()), Size: 1}}, GIDMap: []IDMap{{ContainerID: int64(os.Getgid()), HostID: int64(os.Getgid()), Size: 1}}, User: "agent", Hostname: "", WorkingDir: "", CapDrop: []string{"CAP_ALL"}, BoundingCaps: []string{}, SecurityOpt: []string{"no-new-privileges"}, Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}}
 	if err := Verify(e, r, 1); err != nil {
 		t.Fatal(err)
 	}
 	e.NetworkMode = "bridge"
 	if err := Verify(e, r, 1); err == nil {
 		t.Fatal("bridge accepted")
+	}
+	e.NetworkMode = "none"
+	e.SecurityOpt = nil
+	if err := Verify(e, r, 1); err == nil {
+		t.Fatal("missing no-new-privileges accepted")
+	}
+	e.SecurityOpt = []string{"no-new-privileges"}
+	e.Mounts = []EvidenceMount{{Source: "/run/podman/podman.sock", Destination: "/runtime.sock", RW: true, Mode: "nodev,nosuid"}}
+	if err := Verify(e, r, 1); err == nil {
+		t.Fatal("runtime socket accepted")
 	}
 }
 
@@ -61,5 +72,18 @@ func TestPreflightRequiresRootlessCgroupV2AndSubIDs(t *testing.T) {
 	f.out = []byte(`{"host":{"security":{"rootless":true},"cgroupVersion":"v2","idMappings":{"uidmap":[{"size":1}],"gidmap":[{"size":1}]}}}`)
 	if err := New(f).Preflight(context.Background()); err == nil {
 		t.Fatal("single mapping accepted")
+	}
+}
+
+func TestExistsMatchesExactContainerName(t *testing.T) {
+	f := &fake{out: []byte("kenogram-a-g1\nkenogram-ab-g1\n")}
+	p := New(f)
+	exists, err := p.Exists(context.Background(), "kenogram-a-g1")
+	if err != nil || !exists {
+		t.Fatalf("exists=%v err=%v", exists, err)
+	}
+	exists, err = p.Exists(context.Background(), "kenogram-missing-g1")
+	if err != nil || exists {
+		t.Fatalf("exists=%v err=%v", exists, err)
 	}
 }

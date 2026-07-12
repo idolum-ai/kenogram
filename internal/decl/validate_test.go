@@ -83,6 +83,23 @@ func TestValidateRejectsDuplicateNetworkAndServices(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnsafeOperationalNames(t *testing.T) {
+	for _, name := range []string{".", "..", "Upper", "-leading", "a/b", "a b", strings.Repeat("a", 64)} {
+		d, dir := validForValidation(t)
+		d.Name = name
+		if err := Validate(d, dir); err == nil {
+			t.Errorf("world name %q accepted", name)
+		}
+	}
+	for _, name := range []string{".", "..", "Upper", "../escape", "a b", strings.Repeat("a", 64)} {
+		d, dir := validForValidation(t)
+		d.Services[0].Name = name
+		if err := Validate(d, dir); err == nil {
+			t.Errorf("service name %q accepted", name)
+		}
+	}
+}
+
 func TestValidateRejectsSymlinkedSource(t *testing.T) {
 	d, dir := validForValidation(t)
 	if err := os.Symlink(filepath.Join(dir, "repo"), filepath.Join(dir, "linked")); err != nil {

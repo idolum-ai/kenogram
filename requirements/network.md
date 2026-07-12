@@ -1,7 +1,7 @@
 # Network contract
 
-Status: implemented. Unit contracts always run; all observable invariants run
-against rootless Podman in the mandatory Linux integration job.
+Status: binding contract. Unit and rootless Podman evidence is mandatory in CI;
+the strongest evidence and remaining invariant gaps are indexed in `INDEX.md`.
 
 The normative acceptance invariants are:
 

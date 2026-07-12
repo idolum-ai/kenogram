@@ -1,6 +1,6 @@
 # Declaration contract
 
-Status: implemented.
+Status: binding contract. Evidence and open boundaries are indexed in `INDEX.md`.
 
 Kenogram reads exactly one UTF-8 declaration. The accepted TOML subset contains
 double-quoted strings with TOML-compatible basic escapes, booleans, signed decimal
@@ -21,3 +21,20 @@ paths must exist. Secret file sources must not grant group or other permission.
 The world `name` is its stable operational address; changing it addresses a
 different world. This namespace rule does not claim that names determine
 behavioral or ontological identity.
+
+## Version 1 schema
+
+| Section | Keys | Multiplicity |
+|---|---|---|
+| root | `version`, `name`, `allow_unpinned` | once |
+| `[world]` | `hostname`, `base`, `workdir`, `user` | once |
+| `[resources]` | `cpus`, `memory_bytes`, `pids` | once |
+| `[workspace]` | `paths` | once |
+| `[[copies]]` | `source`, `target`, `mode`, `secret` | zero or more |
+| `[[mounts]]` | `source`, `target`, `mode` | zero or more |
+| `[[network.allow]]` | `host`, `port` | zero or more |
+| `[[services]]` | `name`, `command`, `autostart`, `restart` | zero or more |
+
+The parser, not this summary, is authoritative about required keys and defaults.
+Start from [`../kenogram.example.toml`](../kenogram.example.toml) and use
+`kenogram up --dry-run` as the validation boundary.

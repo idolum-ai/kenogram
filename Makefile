@@ -8,7 +8,7 @@ LDFLAGS := -X github.com/idolum-ai/kenogram/internal/version.Version=$(VERSION) 
 GOCACHE ?= /tmp/kenogram-go-build
 GOMODCACHE ?= /tmp/kenogram-go-mod
 
-.PHONY: build install uninstall test test-race integration e2e vet check architecture stdlib-only docs-freshness secrets smoke fmt
+.PHONY: build install uninstall test test-evidence test-race integration e2e vet check architecture stdlib-only docs-freshness secrets smoke fmt
 
 build:
 	mkdir -p bin
@@ -23,6 +23,11 @@ uninstall:
 
 test:
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./...
+
+test-evidence:
+	mkdir -p artifacts
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test -json ./... > artifacts/test.json
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test -coverprofile=artifacts/coverage.out ./...
 
 test-race:
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test -race ./...
@@ -51,7 +56,7 @@ smoke: build
 	bash scripts/smoke.sh
 
 integration:
-	KENOGRAM_INTEGRATION=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/integration -count=1 -v
+	KENOGRAM_INTEGRATION=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/integration -count=1 -timeout=5m -v
 
 e2e:
 	KENOGRAM_E2E=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/e2e -run TestEngramReleaseInsideKenogram -count=1 -timeout=10m -v

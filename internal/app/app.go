@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/decl"
 	"github.com/idolum-ai/kenogram/internal/history"
 	"github.com/idolum-ai/kenogram/internal/lockfile"
+	"github.com/idolum-ai/kenogram/internal/naming"
 	"github.com/idolum-ai/kenogram/internal/plan"
 	"github.com/idolum-ai/kenogram/internal/proxy"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
@@ -72,7 +74,10 @@ func PrepareBytes(raw []byte, path string) (Prepared, error) {
 	return Prepared{raw, d, result, path}, nil
 }
 
-func (a *App) Up(ctx context.Context, prepared Prepared) error {
+func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
+	if err := naming.World(prepared.Result.Plan.Name); err != nil {
+		return err
+	}
 	if err := a.Backend.Preflight(ctx); err != nil {
 		return fmt.Errorf("runtime preflight: %w", err)
 	}
@@ -85,19 +90,42 @@ func (a *App) Up(ctx context.Context, prepared Prepared) error {
 		return err
 	}
 	defer lock.Release()
+	if err := a.recoverTransition(ctx, l); err != nil {
+		return fmt.Errorf("recover interrupted transition: %w", err)
+	}
 	prior, priorErr := l.ReadState()
+	if priorErr != nil && !os.IsNotExist(priorErr) {
+		return fmt.Errorf("read predecessor state: %w", priorErr)
+	}
+	priorExists := false
 	priorActive := false
-	if priorErr == nil && prior.Status == "running" && prior.Container != "" {
-		if evidence, inspectErr := a.Backend.Inspect(ctx, prior.Container); inspectErr == nil && evidence.Running {
-			priorActive = true
+	if priorErr == nil && prior.Container != "" {
+		priorExists, err = a.Backend.Exists(ctx, prior.Container)
+		if err != nil {
+			return fmt.Errorf("observe predecessor existence: %w", err)
+		}
+		if priorExists {
+			evidence, inspectErr := a.Backend.Inspect(ctx, prior.Container)
+			if inspectErr != nil {
+				return fmt.Errorf("observe predecessor runtime: %w", inspectErr)
+			}
+			priorActive = evidence.Running
 		}
 	}
-	if priorErr == nil && prior.PlanDigest == prepared.Result.PlanDigest && prior.Container != "" {
+	if priorErr == nil && prior.PlanDigest == prepared.Result.PlanDigest && prior.Container != "" && priorExists {
 		if adopted, adoptErr := a.adopt(ctx, l, prior, prepared, priorActive); adoptErr != nil {
 			return adoptErr
 		} else if adopted {
 			return nil
 		}
+	}
+	var priorPrepared *Prepared
+	if priorErr == nil && prior.Container != "" {
+		loaded, loadErr := a.loadPredecessor(l, prior)
+		if loadErr != nil {
+			return fmt.Errorf("load predecessor intent: %w", loadErr)
+		}
+		priorPrepared = &loaded
 	}
 	generation := l.NextGeneration()
 	before, _ := worldfs.Digest(l.Workspace)
@@ -115,38 +143,73 @@ func (a *App) Up(ctx context.Context, prepared Prepared) error {
 	successorStarted := false
 	successorProxy := false
 	rolledBack := false
-	rollback := func() {
+	transitionWritten := false
+	rollback := func() error {
 		if rolledBack || !cutover || !priorActive {
-			return
+			return nil
 		}
 		rolledBack = true
-		_ = a.restorePredecessor(context.Background(), l, prior)
+		if priorPrepared == nil {
+			return fmt.Errorf("predecessor intent unavailable")
+		}
+		return a.restorePredecessor(context.Background(), l, prior, *priorPrepared)
 	}
 	defer func() {
 		if !success {
+			var cleanup []error
 			if successorProxy {
-				_ = a.stopProxy(l)
+				cleanup = append(cleanup, a.stopProxy(l))
 			}
 			if successorStarted {
-				_ = a.Backend.Stop(context.Background(), container)
+				cleanup = append(cleanup, a.Backend.Stop(context.Background(), container))
 			}
 			if cutover {
-				rollback()
+				cleanup = append(cleanup, rollback())
 			}
-			_ = a.Backend.Destroy(context.Background(), container)
+			cleanup = append(cleanup, a.Backend.Destroy(context.Background(), container))
+			if transitionWritten && errors.Join(cleanup...) == nil {
+				cleanup = append(cleanup, l.ClearTransition())
+			}
+			retErr = errors.Join(retErr, errors.Join(cleanup...))
 		}
 	}()
 	if err := a.materialize(ctx, l, container, generation, prepared); err != nil {
 		return a.recordFailure(l, prepared, "materialize", err)
 	}
+	if err := l.ClearStaging(generation); err != nil {
+		return a.recordFailure(l, prepared, "clear staging", err)
+	}
+	absoluteDeclarationPath, _ := filepath.Abs(prepared.Path)
+	state := worldfs.State{Name: prepared.Result.Plan.Name, Generation: generation, Container: container, PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, DeclarationPath: absoluteDeclarationPath, Status: "staging"}
+	transition := worldfs.Transition{Version: 1, Phase: "rollback", Successor: state, SuccessorDeclaration: prepared.Raw}
+	transition.SuccessorPlan, err = encodeRecoveryPlan(prepared.Result)
+	if err != nil {
+		return err
+	}
+	if priorErr == nil && prior.Container != "" {
+		priorCopy := prior
+		transition.Prior = &priorCopy
+		transition.PriorWasRunning = priorActive
+		if priorPrepared != nil {
+			transition.PriorDeclaration = priorPrepared.Raw
+			transition.PriorPlan, err = encodeRecoveryPlan(priorPrepared.Result)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if err := l.WriteTransition(transition); err != nil {
+		return err
+	}
+	transitionWritten = true
 	if priorActive {
+		cutover = true
 		if err := a.stopProxy(l); err != nil {
 			return err
 		}
 		if err := a.Backend.Stop(ctx, prior.Container); err != nil {
 			return a.recordFailure(l, prepared, "stop predecessor", err)
 		}
-		cutover = true
 	}
 	if err := a.Backend.Start(ctx, container); err != nil {
 		return a.recordFailure(l, prepared, "start successor", err)
@@ -164,13 +227,8 @@ func (a *App) Up(ctx context.Context, prepared Prepared) error {
 		}
 		successorProxy = true
 	}
-	for _, service := range prepared.Result.Plan.Services {
-		if service.Autostart {
-			script := "/etc/kenogram/services/" + service.Name + ".sh"
-			if err := a.Backend.Exec(ctx, container, true, []string{"/bin/sh", script}); err != nil {
-				return a.recordFailure(l, prepared, "start service "+service.Name, err)
-			}
-		}
+	if err := a.startServices(ctx, container, prepared.Result.Plan.Services); err != nil {
+		return a.recordFailure(l, prepared, "start services", err)
 	}
 	evidence, err = a.Backend.Inspect(ctx, container)
 	if err != nil || backend.Verify(evidence, prepared.Result, generation) != nil {
@@ -183,30 +241,59 @@ func (a *App) Up(ctx context.Context, prepared Prepared) error {
 	if err != nil {
 		return err
 	}
+	state.Status = "running"
+	state.ProxyPID = proxyPID
+	transition.Phase = "commit"
+	transition.Successor = state
+	transition.Workspace = after
+	transition.ImageDigests = []string{prepared.Result.Plan.World.Base}
+	if err := l.WriteTransition(transition); err != nil {
+		return err
+	}
 	if _, err := l.WriteDigest(generation, after); err != nil {
 		return err
 	}
-	absoluteDeclarationPath, _ := filepath.Abs(prepared.Path)
-	state := worldfs.State{Name: prepared.Result.Plan.Name, Generation: generation, Container: container, PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, DeclarationPath: absoluteDeclarationPath, Status: "running", ProxyPID: proxyPID}
 	if err := l.WriteApplied(prepared.Raw); err != nil {
+		return err
+	}
+	if err := l.WriteAppliedPlan(transition.SuccessorPlan); err != nil {
 		return err
 	}
 	if err := l.WriteState(state); err != nil {
 		return err
 	}
-	if _, err := history.Append(l.History, history.Record{Action: "up", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, ImageDigests: []string{prepared.Result.Plan.World.Base}, WorkspaceDigest: after.Root, Outcome: "applied"}, a.Now()); err != nil {
+	if _, err := history.AppendOnce(l.History, history.Record{Action: "up", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, ImageDigests: []string{prepared.Result.Plan.World.Base}, WorkspaceDigest: after.Root, Outcome: "applied"}, a.Now()); err != nil {
 		return err
 	}
-	if priorErr == nil && prior.Container != "" && prior.Container != container {
-		_ = a.Backend.Destroy(ctx, prior.Container)
-	}
 	success = true
+	if priorErr == nil && priorExists && prior.Container != "" && prior.Container != container {
+		if err := a.Backend.Destroy(ctx, prior.Container); err != nil {
+			return fmt.Errorf("applied successor but remove predecessor: %w", err)
+		}
+	}
+	if err := l.ClearTransition(); err != nil {
+		return fmt.Errorf("applied successor but clear transition: %w", err)
+	}
 	fmt.Fprintf(a.Out, "applied %s generation g%d (%s)\n", prepared.Result.Plan.Name, generation, prepared.Result.PlanDigest)
 	return nil
 }
 
-func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, prepared Prepared, running bool) (bool, error) {
+func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, prepared Prepared, running bool) (adopted bool, retErr error) {
 	restarted := false
+	proxyStarted := false
+	committed := false
+	defer func() {
+		if !committed {
+			var cleanup []error
+			if proxyStarted {
+				cleanup = append(cleanup, a.stopProxy(l))
+			}
+			if restarted {
+				cleanup = append(cleanup, a.Backend.Stop(context.Background(), state.Container))
+			}
+			retErr = errors.Join(retErr, errors.Join(cleanup...))
+		}
+	}()
 	if !running {
 		if err := a.Backend.Start(ctx, state.Container); err != nil {
 			return false, nil
@@ -226,18 +313,22 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 		if err != nil {
 			return false, err
 		}
+		proxyStarted = true
 	}
 	if restarted {
-		for _, service := range prepared.Result.Plan.Services {
-			if service.Autostart {
-				if err := a.Backend.Exec(ctx, state.Container, true, []string{"/bin/sh", "/etc/kenogram/services/" + service.Name + ".sh"}); err != nil {
-					return false, err
-				}
-			}
+		if err := a.startServices(ctx, state.Container, prepared.Result.Plan.Services); err != nil {
+			return false, err
 		}
 	}
 	state.Status = "running"
 	state.ProxyPID = proxyPID
+	recoveryPlan, err := encodeRecoveryPlan(prepared.Result)
+	if err != nil {
+		return false, err
+	}
+	if err := l.WriteAppliedPlan(recoveryPlan); err != nil {
+		return false, err
+	}
 	if err := l.WriteState(state); err != nil {
 		return false, err
 	}
@@ -253,6 +344,7 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 		return false, err
 	}
 	fmt.Fprintf(a.Out, "%s %s generation g%d (%s)\n", state.Name, outcome, state.Generation, state.PlanDigest)
+	committed = true
 	return true, nil
 }
 func (a *App) proxyAlive(l worldfs.Layout) bool {
@@ -260,8 +352,12 @@ func (a *App) proxyAlive(l worldfs.Layout) bool {
 	if err != nil {
 		return false
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil || pid <= 1 {
+	fields := strings.Fields(string(raw))
+	if len(fields) != 2 {
+		return false
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil || pid <= 1 || lockfile.ProcessStart(pid) != fields[1] {
 		return false
 	}
 	cmdline, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
@@ -278,24 +374,208 @@ func (a *App) proxyAlive(l worldfs.Layout) bool {
 	return err == nil
 }
 
-func (a *App) restorePredecessor(ctx context.Context, l worldfs.Layout, prior worldfs.State) error {
-	if err := a.Backend.Start(ctx, prior.Container); err != nil {
-		return err
-	}
-	evidence, err := a.Backend.Inspect(ctx, prior.Container)
+func (a *App) loadPredecessor(l worldfs.Layout, prior worldfs.State) (Prepared, error) {
+	raw, err := os.ReadFile(l.Applied)
 	if err != nil {
-		return err
-	}
-	raw, readErr := os.ReadFile(l.Applied)
-	if readErr != nil {
-		return readErr
+		return Prepared{}, err
 	}
 	sourcePath := prior.DeclarationPath
 	if sourcePath == "" {
 		sourcePath = l.Applied
 	}
+	if rawPlan, planErr := os.ReadFile(l.AppliedPlan); planErr == nil {
+		return preparedFromRecovery(raw, rawPlan, sourcePath, prior)
+	} else if !os.IsNotExist(planErr) {
+		return Prepared{}, planErr
+	}
 	prepared, err := PrepareBytes(raw, sourcePath)
 	if err != nil {
+		return Prepared{}, err
+	}
+	if prepared.Result.PlanDigest != prior.PlanDigest {
+		return Prepared{}, fmt.Errorf("applied predecessor plan %s does not match state %s", prepared.Result.PlanDigest, prior.PlanDigest)
+	}
+	return prepared, nil
+}
+
+func encodeRecoveryPlan(result plan.Result) ([]byte, error) {
+	type wireResult plan.Result
+	raw, err := json.MarshalIndent(wireResult(result), "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(raw, '\n'), nil
+}
+
+func preparedFromRecovery(rawDeclaration, rawPlan []byte, path string, state worldfs.State) (Prepared, error) {
+	type wireResult plan.Result
+	var wire wireResult
+	if err := json.Unmarshal(rawPlan, &wire); err != nil {
+		return Prepared{}, fmt.Errorf("decode applied plan: %w", err)
+	}
+	result := plan.Result(wire)
+	canonical, err := plan.Canonical(result.Plan)
+	if err != nil {
+		return Prepared{}, err
+	}
+	planSum := sha256.Sum256(canonical)
+	if hex.EncodeToString(planSum[:]) != state.PlanDigest || result.PlanDigest != state.PlanDigest {
+		return Prepared{}, fmt.Errorf("applied recovery plan does not match state plan digest")
+	}
+	if DeclarationDigest(rawDeclaration) != state.DeclarationDigest || result.DeclarationDigest != state.DeclarationDigest {
+		return Prepared{}, fmt.Errorf("applied recovery plan does not match state declaration digest")
+	}
+	return Prepared{Raw: rawDeclaration, Result: result, Path: path}, nil
+}
+
+func (a *App) recoverTransition(ctx context.Context, l worldfs.Layout) error {
+	transition, err := l.ReadTransition()
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if transition.Phase == "rollback" {
+		return a.rollbackTransition(ctx, l, transition)
+	}
+
+	path := transition.Successor.DeclarationPath
+	if path == "" {
+		path = l.Applied
+	}
+	prepared, prepareErr := preparedFromRecovery(transition.SuccessorDeclaration, transition.SuccessorPlan, path, transition.Successor)
+	exists, existsErr := a.Backend.Exists(ctx, transition.Successor.Container)
+	if prepareErr != nil || existsErr != nil || !exists {
+		transition.Phase = "rollback"
+		if err := l.WriteTransition(transition); err != nil {
+			return err
+		}
+		return a.rollbackTransition(ctx, l, transition)
+	}
+	evidence, inspectErr := a.Backend.Inspect(ctx, transition.Successor.Container)
+	if inspectErr != nil || backend.Verify(evidence, prepared.Result, transition.Successor.Generation) != nil {
+		transition.Phase = "rollback"
+		if err := l.WriteTransition(transition); err != nil {
+			return err
+		}
+		return a.rollbackTransition(ctx, l, transition)
+	}
+	if len(prepared.Result.Plan.NetworkAllow) > 0 && !a.proxyAlive(l) {
+		pid, err := a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
+		if err != nil {
+			return err
+		}
+		transition.Successor.ProxyPID = pid
+		if err := l.WriteTransition(transition); err != nil {
+			return err
+		}
+	}
+	if _, err := l.WriteDigest(transition.Successor.Generation, transition.Workspace); err != nil {
+		return err
+	}
+	if err := l.WriteApplied(transition.SuccessorDeclaration); err != nil {
+		return err
+	}
+	if err := l.WriteAppliedPlan(transition.SuccessorPlan); err != nil {
+		return err
+	}
+	if err := l.WriteState(transition.Successor); err != nil {
+		return err
+	}
+	if _, err := history.AppendOnce(l.History, history.Record{Action: "up", PlanDigest: transition.Successor.PlanDigest, DeclarationDigest: transition.Successor.DeclarationDigest, ImageDigests: transition.ImageDigests, WorkspaceDigest: transition.Workspace.Root, Outcome: "applied"}, a.Now()); err != nil {
+		return err
+	}
+	if transition.Prior != nil && transition.Prior.Container != "" && transition.Prior.Container != transition.Successor.Container {
+		exists, err := a.Backend.Exists(ctx, transition.Prior.Container)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if err := a.Backend.Destroy(ctx, transition.Prior.Container); err != nil {
+				return err
+			}
+		}
+	}
+	return l.ClearTransition()
+}
+
+func (a *App) rollbackTransition(ctx context.Context, l worldfs.Layout, transition worldfs.Transition) error {
+	if err := a.stopProxy(l); err != nil {
+		return err
+	}
+	if transition.Successor.Container != "" {
+		exists, err := a.Backend.Exists(ctx, transition.Successor.Container)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if err := a.Backend.Destroy(ctx, transition.Successor.Container); err != nil {
+				return err
+			}
+		}
+	}
+	if transition.Prior == nil {
+		for _, path := range []string{l.State, l.Applied, l.AppliedPlan} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		return l.ClearTransition()
+	}
+	if len(transition.PriorDeclaration) == 0 {
+		return fmt.Errorf("predecessor declaration is missing")
+	}
+	path := transition.Prior.DeclarationPath
+	if path == "" {
+		path = l.Applied
+	}
+	prepared, err := preparedFromRecovery(transition.PriorDeclaration, transition.PriorPlan, path, *transition.Prior)
+	if err != nil {
+		return err
+	}
+	if transition.PriorWasRunning {
+		if err := a.restorePredecessor(ctx, l, *transition.Prior, prepared); err != nil {
+			return err
+		}
+	} else {
+		if err := l.WriteApplied(transition.PriorDeclaration); err != nil {
+			return err
+		}
+		if err := l.WriteAppliedPlan(transition.PriorPlan); err != nil {
+			return err
+		}
+		if err := l.WriteState(*transition.Prior); err != nil {
+			return err
+		}
+	}
+	return l.ClearTransition()
+}
+
+func (a *App) restorePredecessor(ctx context.Context, l worldfs.Layout, prior worldfs.State, prepared Prepared) error {
+	exists, err := a.Backend.Exists(ctx, prior.Container)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("predecessor container %s is missing", prior.Container)
+	}
+	evidence, err := a.Backend.Inspect(ctx, prior.Container)
+	if err != nil {
+		return err
+	}
+	restarted := false
+	if !evidence.Running {
+		if err := a.Backend.Start(ctx, prior.Container); err != nil {
+			return err
+		}
+		restarted = true
+		evidence, err = a.Backend.Inspect(ctx, prior.Container)
+		if err != nil {
+			return err
+		}
+	}
+	if err := backend.Verify(evidence, prepared.Result, prior.Generation); err != nil {
 		return err
 	}
 	proxyPID := 0
@@ -305,15 +585,23 @@ func (a *App) restorePredecessor(ctx context.Context, l worldfs.Layout, prior wo
 			return err
 		}
 	}
-	for _, service := range prepared.Result.Plan.Services {
-		if service.Autostart {
-			if err := a.Backend.Exec(ctx, prior.Container, true, []string{"/bin/sh", "/etc/kenogram/services/" + service.Name + ".sh"}); err != nil {
-				return err
-			}
+	if restarted {
+		if err := a.startServices(ctx, prior.Container, prepared.Result.Plan.Services); err != nil {
+			return err
 		}
 	}
 	prior.ProxyPID = proxyPID
 	prior.Status = "running"
+	if err := l.WriteApplied(prepared.Raw); err != nil {
+		return err
+	}
+	recoveryPlan, err := encodeRecoveryPlan(prepared.Result)
+	if err != nil {
+		return err
+	}
+	if err := l.WriteAppliedPlan(recoveryPlan); err != nil {
+		return err
+	}
 	return l.WriteState(prior)
 }
 
@@ -335,6 +623,16 @@ func (a *App) materialize(ctx context.Context, l worldfs.Layout, container strin
 	for i, c := range p.Result.Plan.Copies {
 		stage, err := l.StageSource(generation, i, c.Source, c.Mode)
 		if err != nil {
+			return err
+		}
+		stagedDigest, err := plan.DigestSource(stage)
+		if err != nil {
+			return err
+		}
+		if stagedDigest != c.SourceDigest {
+			return fmt.Errorf("copy source %s changed after planning", c.Source)
+		}
+		if err := l.ApplyStageMode(stage, c.Mode); err != nil {
 			return err
 		}
 		if err := a.Backend.Copy(ctx, container, stage, c.Target); err != nil {
@@ -359,7 +657,15 @@ func (a *App) materialize(ctx context.Context, l worldfs.Layout, container strin
 	}
 	for _, service := range p.Result.Plan.Services {
 		script := serviceScript(service)
-		if err := os.WriteFile(filepath.Join(root, "etc", "kenogram", "services", service.Name+".sh"), []byte(script), 0o555); err != nil {
+		if err := naming.Service(service.Name); err != nil {
+			return err
+		}
+		serviceRoot := filepath.Join(root, "etc", "kenogram", "services")
+		servicePath, err := naming.JoinUnder(serviceRoot, service.Name+".sh")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(servicePath, []byte(script), 0o555); err != nil {
 			return err
 		}
 	}
@@ -380,14 +686,53 @@ func serviceScript(s plan.Service) string {
 		command[i] = shellQuote(arg)
 	}
 	line := strings.Join(command, " ")
+	prefix := "#!/bin/sh\nset -u\nstatus_dir=/run/kenogram/services\nmkdir -p \"$status_dir\"\nstatus=\"$status_dir/" + s.Name + "\"\nrun_service() {\n  printf 'starting\\n' >\"$status\"\n  " + line + " &\n  pid=$!\n  printf 'running %s\\n' \"$pid\" >\"$status\"\n  wait \"$pid\"\n  code=$?\n  printf 'exited %s\\n' \"$code\" >\"$status\"\n  return \"$code\"\n}\n"
 	switch s.Restart {
 	case "always":
-		return "#!/bin/sh\nwhile :; do " + line + "; done\n"
+		return prefix + "while :; do\n  run_service || :\n  sleep 1\ndone\n"
 	case "on-failure":
-		return "#!/bin/sh\nwhile :; do\n  " + line + "\n  status=$?\n  [ \"$status\" -eq 0 ] && exit 0\ndone\n"
+		return prefix + "while :; do\n  run_service\n  code=$?\n  [ \"$code\" -eq 0 ] && exit 0\n  sleep 1\ndone\n"
 	default:
-		return "#!/bin/sh\nexec " + line + "\n"
+		return prefix + "run_service\n"
 	}
+}
+
+func (a *App) startServices(ctx context.Context, container string, services []plan.Service) error {
+	for _, service := range services {
+		if !service.Autostart {
+			continue
+		}
+		script := "/etc/kenogram/services/" + service.Name + ".sh"
+		if err := a.Backend.Exec(ctx, container, true, []string{"/bin/sh", script}); err != nil {
+			return fmt.Errorf("%s: %w", service.Name, err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			raw, err := a.Backend.ExecOutput(ctx, container, []string{"/bin/sh", "-c", "cat /run/kenogram/services/" + shellQuote(service.Name)})
+			status := strings.TrimSpace(string(raw))
+			if err == nil && strings.HasPrefix(status, "running ") {
+				break
+			}
+			if err == nil && status == "exited 0" {
+				// A service command may intentionally daemonize (tmux is the
+				// canonical example). Its successful acknowledgement is
+				// observable even though no foreground child remains.
+				break
+			}
+			if err == nil && strings.HasPrefix(status, "exited ") {
+				return fmt.Errorf("%s became %s", service.Name, status)
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("%s did not report running", service.Name)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}
+	return nil
 }
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 func insideDocument() string {
@@ -412,12 +757,14 @@ Files under /workspace survive replacement; everything else is rebuilt.
 `
 }
 func (a *App) recordFailure(l worldfs.Layout, p Prepared, detail string, cause error) error {
-	_, _ = history.Append(l.History, history.Record{Action: "up", PlanDigest: p.Result.PlanDigest, DeclarationDigest: p.Result.DeclarationDigest, Outcome: "failed", Detail: detail + ": " + cause.Error()}, a.Now())
-	return fmt.Errorf("%s: %w", detail, cause)
+	_, historyErr := history.Append(l.History, history.Record{Action: "up", PlanDigest: p.Result.PlanDigest, DeclarationDigest: p.Result.DeclarationDigest, Outcome: "failed", Detail: detail + ": " + cause.Error()}, a.Now())
+	return errors.Join(fmt.Errorf("%s: %w", detail, cause), historyErr)
 }
 
 func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, allows []plan.NetworkAllow) (int, error) {
-	_ = a.stopProxy(l)
+	if err := a.stopProxy(l); err != nil {
+		return 0, err
+	}
 	args := []string{"_proxy", "--pid", strconv.Itoa(pid), "--control", l.ProxySocket, "--log", filepath.Join(l.Root, "proxy.log")}
 	for _, allow := range allows {
 		args = append(args, "--allow", netJoin(allow.Host, int(allow.Port)))
@@ -433,7 +780,12 @@ func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, allows 
 		return 0, err
 	}
 	processPID := command.Process.Pid
-	if err := os.WriteFile(l.ProxyPID, []byte(strconv.Itoa(processPID)+"\n"), 0o600); err != nil {
+	start := lockfile.ProcessStart(processPID)
+	if start == "" {
+		command.Process.Kill()
+		return 0, fmt.Errorf("observe proxy process start")
+	}
+	if err := os.WriteFile(l.ProxyPID, []byte(strconv.Itoa(processPID)+" "+start+"\n"), 0o600); err != nil {
 		command.Process.Kill()
 		return 0, err
 	}
@@ -450,7 +802,7 @@ func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, allows 
 	_ = syscall.Kill(processPID, syscall.SIGTERM)
 	return 0, fmt.Errorf("proxy did not become ready")
 }
-func netJoin(host string, port int) string { return host + ":" + strconv.Itoa(port) }
+func netJoin(host string, port int) string { return net.JoinHostPort(host, strconv.Itoa(port)) }
 func (a *App) stopProxy(l worldfs.Layout) error {
 	raw, err := os.ReadFile(l.ProxyPID)
 	if os.IsNotExist(err) {
@@ -459,37 +811,75 @@ func (a *App) stopProxy(l worldfs.Layout) error {
 	if err != nil {
 		return err
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err == nil && pid > 1 {
+	fields := strings.Fields(string(raw))
+	if len(fields) != 2 {
+		return fmt.Errorf("invalid proxy identity in %s", l.ProxyPID)
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil || pid <= 1 {
+		return fmt.Errorf("invalid proxy PID in %s", l.ProxyPID)
+	}
+	start := lockfile.ProcessStart(pid)
+	if start != "" {
+		if start != fields[1] {
+			return fmt.Errorf("proxy PID %d was reused; ownership is uncertain", pid)
+		}
 		cmdline, readErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
-		owned := readErr == nil && strings.Contains(string(cmdline), "_proxy") && strings.Contains(string(cmdline), l.ProxySocket)
-		if owned {
-			if killErr := syscall.Kill(pid, syscall.SIGTERM); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
-				return killErr
-			}
+		if readErr != nil {
+			return fmt.Errorf("observe proxy PID %d: %w", pid, readErr)
+		}
+		if !strings.Contains(string(cmdline), "_proxy") || !strings.Contains(string(cmdline), l.ProxySocket) {
+			return fmt.Errorf("proxy PID %d ownership is uncertain", pid)
+		}
+		if killErr := syscall.Kill(pid, syscall.SIGTERM); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+			return killErr
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for lockfile.ProcessStart(pid) == fields[1] && time.Now().Before(deadline) {
+			time.Sleep(25 * time.Millisecond)
+		}
+		if lockfile.ProcessStart(pid) == fields[1] {
+			return fmt.Errorf("proxy PID %d did not exit", pid)
 		}
 	}
-	_ = os.Remove(l.ProxyPID)
-	_ = os.Remove(l.ProxySocket)
-	return nil
+	return errors.Join(removeIfExists(l.ProxyPID), removeIfExists(l.ProxySocket))
+}
+
+func removeIfExists(path string) error {
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 func (a *App) Down(ctx context.Context, name string) error {
+	if err := naming.World(name); err != nil {
+		return err
+	}
 	l := worldfs.For(a.BaseDir, name)
 	lock, err := lockfile.Acquire(l.Lock)
 	if err != nil {
 		return err
 	}
 	defer lock.Release()
+	if err := a.Backend.Preflight(ctx); err != nil {
+		return fmt.Errorf("runtime preflight: %w", err)
+	}
+	if err := a.recoverTransition(ctx, l); err != nil {
+		return fmt.Errorf("recover interrupted transition: %w", err)
+	}
 	s, err := l.ReadState()
 	if err != nil {
 		return err
 	}
-	_ = a.stopProxy(l)
 	if s.Status == "running" {
 		if err := a.Backend.Stop(ctx, s.Container); err != nil {
 			return err
 		}
+	}
+	if err := a.stopProxy(l); err != nil {
+		return err
 	}
 	s.Status = "down"
 	s.ProxyPID = 0
@@ -500,46 +890,91 @@ func (a *App) Down(ctx context.Context, name string) error {
 	return err
 }
 func (a *App) Destroy(ctx context.Context, name string) error {
+	if err := naming.World(name); err != nil {
+		return err
+	}
 	l := worldfs.For(a.BaseDir, name)
 	lock, err := lockfile.Acquire(l.Lock)
 	if err != nil {
 		return err
 	}
-	s, _ := l.ReadState()
-	_ = a.stopProxy(l)
+	if err := a.Backend.Preflight(ctx); err != nil {
+		lock.Release()
+		return fmt.Errorf("runtime preflight: %w", err)
+	}
+	if err := a.recoverTransition(ctx, l); err != nil {
+		lock.Release()
+		return fmt.Errorf("recover interrupted transition: %w", err)
+	}
+	s, err := l.ReadState()
+	if err != nil {
+		lock.Release()
+		return err
+	}
 	if s.Container != "" {
-		_ = a.Backend.Destroy(ctx, s.Container)
+		exists, err := a.Backend.Exists(ctx, s.Container)
+		if err != nil {
+			lock.Release()
+			return err
+		}
+		if exists {
+			if err := a.Backend.Destroy(ctx, s.Container); err != nil {
+				lock.Release()
+				return err
+			}
+		}
 	}
-	_, _ = history.Append(l.History, history.Record{Action: "destroy", PlanDigest: s.PlanDigest, DeclarationDigest: s.DeclarationDigest, Outcome: "destroyed"}, a.Now())
-	historyBytes, _ := os.ReadFile(l.History)
-	if err := lock.Release(); err != nil {
+	if err := a.stopProxy(l); err != nil {
+		lock.Release()
 		return err
 	}
-	if err := os.RemoveAll(l.Root); err != nil {
+	if _, err := history.Append(l.History, history.Record{Action: "destroy", PlanDigest: s.PlanDigest, DeclarationDigest: s.DeclarationDigest, Outcome: "destroyed"}, a.Now()); err != nil {
+		lock.Release()
 		return err
 	}
-	tombstone := filepath.Join(a.BaseDir, ".destroyed", name+"-"+strconv.FormatInt(a.Now().UnixNano(), 10))
-	if err := os.MkdirAll(tombstone, 0o700); err != nil {
+	tombstoneParent := filepath.Join(a.BaseDir, ".destroyed")
+	if err := os.MkdirAll(tombstoneParent, 0o700); err != nil {
+		lock.Release()
 		return err
 	}
-	if len(historyBytes) == 0 {
-		return nil
+	tombstone := filepath.Join(tombstoneParent, name+"-"+strconv.FormatInt(a.Now().UnixNano(), 10))
+	if err := os.Rename(l.Root, tombstone); err != nil {
+		lock.Release()
+		return err
 	}
-	file, err := os.OpenFile(filepath.Join(tombstone, "history.jsonl"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err := syncDirectory(tombstoneParent); err != nil {
+		lock.Release()
+		return err
+	}
+	if err := lock.ReleaseMoved(filepath.Join(tombstone, "mutation.lock")); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(tombstone)
 	if err != nil {
 		return err
 	}
-	if _, err := file.Write(historyBytes); err != nil {
-		file.Close()
+	for _, entry := range entries {
+		if entry.Name() == "history.jsonl" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(tombstone, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return syncDirectory(tombstone)
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
 		return err
 	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return err
-	}
-	return file.Close()
+	return errors.Join(directory.Sync(), directory.Close())
 }
 func (a *App) Enter(ctx context.Context, name string, repair bool) error {
+	if err := naming.World(name); err != nil {
+		return err
+	}
 	l := worldfs.For(a.BaseDir, name)
 	s, err := l.ReadState()
 	if err != nil {
@@ -552,6 +987,9 @@ func (a *App) Enter(ctx context.Context, name string, repair bool) error {
 	return a.Backend.Attach(ctx, s.Container, command)
 }
 func (a *App) Allow(name, destination, duration string) error {
+	if err := naming.World(name); err != nil {
+		return err
+	}
 	d, err := proxy.ParseDestination(destination)
 	if err != nil {
 		return err
@@ -572,8 +1010,61 @@ func (a *App) Allow(name, destination, duration string) error {
 	_, err = history.Append(l.History, history.Record{Action: "allow", PlanDigest: s.PlanDigest, DeclarationDigest: s.DeclarationDigest, Outcome: "granted", Detail: destination + " for " + duration}, a.Now())
 	return err
 }
-func (a *App) Status(ctx context.Context, name string) (worldfs.State, backend.Evidence, error) {
+func (a *App) Revoke(name, destination string) error {
+	if err := naming.World(name); err != nil {
+		return err
+	}
+	d, err := proxy.ParseDestination(destination)
+	if err != nil {
+		return err
+	}
 	l := worldfs.For(a.BaseDir, name)
+	lock, err := lockfile.Acquire(l.Lock)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	if err := proxy.SendControl(l.ProxySocket, proxy.ControlRequest{Operation: "remove", Host: d.Host, Port: d.Port}); err != nil {
+		return err
+	}
+	s, _ := l.ReadState()
+	_, err = history.Append(l.History, history.Record{Action: "revoke", PlanDigest: s.PlanDigest, DeclarationDigest: s.DeclarationDigest, Outcome: "removed", Detail: destination}, a.Now())
+	return err
+}
+func (a *App) RepairHistory(name string) error {
+	if err := naming.World(name); err != nil {
+		return err
+	}
+	l := worldfs.For(a.BaseDir, name)
+	lock, err := lockfile.Acquire(l.Lock)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	if err := history.RepairTruncatedTail(l.History); err != nil {
+		return err
+	}
+	s, _ := l.ReadState()
+	_, err = history.Append(l.History, history.Record{Action: "history-repair", PlanDigest: s.PlanDigest, DeclarationDigest: s.DeclarationDigest, Outcome: "truncated-tail-removed"}, a.Now())
+	return err
+}
+func (a *App) Status(ctx context.Context, name string) (worldfs.State, backend.Evidence, error) {
+	if err := naming.World(name); err != nil {
+		return worldfs.State{}, backend.Evidence{}, err
+	}
+	l := worldfs.For(a.BaseDir, name)
+	if transition, err := l.ReadTransition(); err == nil {
+		state := transition.Successor
+		state.Status = "recovery-required:" + transition.Phase
+		exists, observeErr := a.Backend.Exists(ctx, state.Container)
+		if observeErr != nil || !exists {
+			return state, backend.Evidence{}, observeErr
+		}
+		evidence, inspectErr := a.Backend.Inspect(ctx, state.Container)
+		return state, evidence, inspectErr
+	} else if !os.IsNotExist(err) {
+		return worldfs.State{Name: name, Status: "recovery-required:corrupt-transition"}, backend.Evidence{}, err
+	}
 	if _, err := history.Verify(l.History); err != nil {
 		return worldfs.State{}, backend.Evidence{}, fmt.Errorf("verify history: %w", err)
 	}
@@ -597,17 +1088,22 @@ func (a *App) Worlds() ([]worldfs.State, error) {
 	}
 	states := []worldfs.State{}
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || entry.Name() == ".destroyed" {
 			continue
 		}
 		s, err := worldfs.For(a.BaseDir, entry.Name()).ReadState()
-		if err == nil {
-			states = append(states, s)
+		if err != nil {
+			states = append(states, worldfs.State{Name: entry.Name(), Status: "uncertain: " + err.Error()})
+			continue
 		}
+		states = append(states, s)
 	}
 	return states, nil
 }
 func (a *App) WorkspaceDrift(name string) (string, error) {
+	if err := naming.World(name); err != nil {
+		return "", err
+	}
 	l := worldfs.For(a.BaseDir, name)
 	current, err := worldfs.Digest(l.Workspace)
 	if os.IsNotExist(err) {

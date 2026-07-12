@@ -8,9 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/idolum-ai/kenogram/internal/naming"
 )
 
-type Layout struct{ Root, Workspace, Digests, Staging, Applied, State, History, Lock, ProxySocket, ProxyPID string }
+type Layout struct{ Root, Workspace, Digests, Staging, Applied, AppliedPlan, State, History, Transition, Lock, ProxySocket, ProxyPID string }
 
 func BaseDir() (string, error) {
 	if xdg := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdg != "" {
@@ -25,14 +27,11 @@ func BaseDir() (string, error) {
 
 func For(base, name string) Layout {
 	root := filepath.Join(base, name)
-	return Layout{Root: root, Workspace: filepath.Join(root, "workspace"), Digests: filepath.Join(root, "digests"), Staging: filepath.Join(root, "staging"), Applied: filepath.Join(root, "applied.toml"), State: filepath.Join(root, "state.json"), History: filepath.Join(root, "history.jsonl"), Lock: filepath.Join(root, "mutation.lock"), ProxySocket: filepath.Join(root, "proxy.sock"), ProxyPID: filepath.Join(root, "proxy.pid")}
+	return Layout{Root: root, Workspace: filepath.Join(root, "workspace"), Digests: filepath.Join(root, "digests"), Staging: filepath.Join(root, "staging"), Applied: filepath.Join(root, "applied.toml"), AppliedPlan: filepath.Join(root, "applied-plan.json"), State: filepath.Join(root, "state.json"), History: filepath.Join(root, "history.jsonl"), Transition: filepath.Join(root, "transition.json"), Lock: filepath.Join(root, "mutation.lock"), ProxySocket: filepath.Join(root, "proxy.sock"), ProxyPID: filepath.Join(root, "proxy.pid")}
 }
 
 func ValidateName(name string) error {
-	if strings.TrimSpace(name) == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
-		return fmt.Errorf("invalid world name %q", name)
-	}
-	return nil
+	return naming.World(name)
 }
 
 func (l Layout) Ensure() error {
@@ -58,6 +57,23 @@ type State struct {
 	ProxyPID          int    `json:"proxy_pid,omitempty"`
 }
 
+// Transition is the durable reconciliation record for an interrupted up.
+// Phase is either rollback (the prior state remains authoritative) or commit
+// (the verified successor must be made authoritative).
+type Transition struct {
+	Version              int        `json:"version"`
+	Phase                string     `json:"phase"`
+	Prior                *State     `json:"prior,omitempty"`
+	PriorWasRunning      bool       `json:"prior_was_running,omitempty"`
+	PriorDeclaration     []byte     `json:"prior_declaration,omitempty"`
+	PriorPlan            []byte     `json:"prior_plan,omitempty"`
+	Successor            State      `json:"successor"`
+	SuccessorDeclaration []byte     `json:"successor_declaration"`
+	SuccessorPlan        []byte     `json:"successor_plan"`
+	Workspace            DigestTree `json:"workspace,omitempty"`
+	ImageDigests         []string   `json:"image_digests,omitempty"`
+}
+
 func (l Layout) ReadState() (State, error) {
 	var s State
 	raw, err := os.ReadFile(l.State)
@@ -71,6 +87,42 @@ func (l Layout) ReadState() (State, error) {
 }
 func (l Layout) WriteState(s State) error      { return atomicJSON(l.State, s, 0o600) }
 func (l Layout) WriteApplied(raw []byte) error { return atomicWrite(l.Applied, raw, 0o600) }
+func (l Layout) WriteAppliedPlan(raw []byte) error {
+	return atomicWrite(l.AppliedPlan, raw, 0o600)
+}
+func (l Layout) WriteTransition(t Transition) error {
+	if t.Version != 1 || (t.Phase != "rollback" && t.Phase != "commit") {
+		return fmt.Errorf("invalid transition version or phase")
+	}
+	return atomicJSON(l.Transition, t, 0o600)
+}
+func (l Layout) ReadTransition() (Transition, error) {
+	var transition Transition
+	raw, err := os.ReadFile(l.Transition)
+	if err != nil {
+		return transition, err
+	}
+	if err := json.Unmarshal(raw, &transition); err != nil {
+		return transition, fmt.Errorf("decode transition: %w", err)
+	}
+	if transition.Version != 1 || (transition.Phase != "rollback" && transition.Phase != "commit") {
+		return transition, fmt.Errorf("unsupported transition version or phase")
+	}
+	return transition, nil
+}
+func (l Layout) ClearTransition() error {
+	if err := os.Remove(l.Transition); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return syncDir(l.Root)
+}
+func (l Layout) ClearStaging(generation int64) error {
+	path := filepath.Join(l.Staging, fmt.Sprintf("g%d", generation))
+	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	return syncDir(l.Staging)
+}
 func (l Layout) NextGeneration() int64 {
 	s, err := l.ReadState()
 	if err != nil || s.Generation < 0 {

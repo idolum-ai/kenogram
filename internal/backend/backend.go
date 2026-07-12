@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -138,6 +139,21 @@ func (p *Podman) Destroy(ctx context.Context, name string) error {
 	_, err := p.Runner.Run(ctx, p.Binary, "rm", "--force", name)
 	return err
 }
+
+// Exists observes whether an exact container name is present without treating
+// absence as a command failure.
+func (p *Podman) Exists(ctx context.Context, name string) (bool, error) {
+	raw, err := p.Runner.Run(ctx, p.Binary, "ps", "--all", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 func (p *Podman) Exec(ctx context.Context, name string, detach bool, command []string) error {
 	args := []string{"exec"}
 	if detach {
@@ -147,6 +163,10 @@ func (p *Podman) Exec(ctx context.Context, name string, detach bool, command []s
 	args = append(args, command...)
 	_, err := p.Runner.Run(ctx, p.Binary, args...)
 	return err
+}
+func (p *Podman) ExecOutput(ctx context.Context, name string, command []string) ([]byte, error) {
+	args := append([]string{"exec", name}, command...)
+	return p.Runner.Run(ctx, p.Binary, args...)
 }
 func (p *Podman) Attach(ctx context.Context, name string, command []string) error {
 	args := append([]string{"exec", "--interactive", "--tty", name}, command...)
@@ -158,27 +178,79 @@ type Evidence struct {
 	Running                bool
 	PID                    int
 	NetworkMode            string
+	IPCMode                string
+	PIDMode                string
+	UTSMode                string
+	UserNSMode             string
+	User                   string
+	Hostname               string
+	WorkingDir             string
+	CapDrop                []string
+	BoundingCaps           []string
+	SecurityOpt            []string
+	Devices                int
+	UIDMap                 []IDMap
+	GIDMap                 []IDMap
 	Labels                 map[string]string
-	MountTargets           []string
+	Mounts                 []EvidenceMount
 	Memory, NanoCPUs, PIDs int64
 }
+type IDMap struct {
+	ContainerID int64
+	HostID      int64
+	Size        int64
+}
+type EvidenceMount struct {
+	Source      string
+	Destination string
+	RW          bool
+	Mode        string
+	Options     []string
+}
 type inspectDocument struct {
-	Name  string `json:"Name"`
-	State struct {
+	Name         string   `json:"Name"`
+	BoundingCaps []string `json:"BoundingCaps"`
+	State        struct {
 		Running bool `json:"Running"`
 		Pid     int  `json:"Pid"`
 	} `json:"State"`
+	IDMappings struct {
+		UIDMap []struct {
+			ContainerID int64 `json:"ContainerID"`
+			HostID      int64 `json:"HostID"`
+			Size        int64 `json:"Size"`
+		} `json:"UidMap"`
+		GIDMap []struct {
+			ContainerID int64 `json:"ContainerID"`
+			HostID      int64 `json:"HostID"`
+			Size        int64 `json:"Size"`
+		} `json:"GidMap"`
+	} `json:"IDMappings"`
 	Config struct {
-		Labels map[string]string `json:"Labels"`
+		Labels     map[string]string `json:"Labels"`
+		User       string            `json:"User"`
+		Hostname   string            `json:"Hostname"`
+		WorkingDir string            `json:"WorkingDir"`
 	} `json:"Config"`
 	HostConfig struct {
-		NetworkMode string `json:"NetworkMode"`
-		Memory      int64  `json:"Memory"`
-		NanoCPUs    int64  `json:"NanoCpus"`
-		PidsLimit   int64  `json:"PidsLimit"`
+		NetworkMode string   `json:"NetworkMode"`
+		IpcMode     string   `json:"IpcMode"`
+		PidMode     string   `json:"PidMode"`
+		UTSMode     string   `json:"UTSMode"`
+		UsernsMode  string   `json:"UsernsMode"`
+		Memory      int64    `json:"Memory"`
+		NanoCPUs    int64    `json:"NanoCpus"`
+		PidsLimit   int64    `json:"PidsLimit"`
+		CapDrop     []string `json:"CapDrop"`
+		SecurityOpt []string `json:"SecurityOpt"`
+		Devices     []any    `json:"Devices"`
 	} `json:"HostConfig"`
 	Mounts []struct {
-		Destination string `json:"Destination"`
+		Source      string   `json:"Source"`
+		Destination string   `json:"Destination"`
+		RW          bool     `json:"RW"`
+		Mode        string   `json:"Mode"`
+		Options     []string `json:"Options"`
 	} `json:"Mounts"`
 }
 
@@ -188,13 +260,22 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 		return Evidence{}, err
 	}
 	var docs []inspectDocument
-	if err := json.Unmarshal(raw, &docs); err != nil || len(docs) != 1 {
+	if err := json.Unmarshal(raw, &docs); err != nil {
 		return Evidence{}, fmt.Errorf("decode podman inspect: %w", err)
 	}
+	if len(docs) != 1 {
+		return Evidence{}, fmt.Errorf("decode podman inspect: got %d documents, want 1", len(docs))
+	}
 	d := docs[0]
-	e := Evidence{Name: strings.TrimPrefix(d.Name, "/"), Running: d.State.Running, PID: d.State.Pid, NetworkMode: d.HostConfig.NetworkMode, Labels: d.Config.Labels, Memory: d.HostConfig.Memory, NanoCPUs: d.HostConfig.NanoCPUs, PIDs: d.HostConfig.PidsLimit}
+	e := Evidence{Name: strings.TrimPrefix(d.Name, "/"), Running: d.State.Running, PID: d.State.Pid, NetworkMode: d.HostConfig.NetworkMode, IPCMode: d.HostConfig.IpcMode, PIDMode: d.HostConfig.PidMode, UTSMode: d.HostConfig.UTSMode, UserNSMode: d.HostConfig.UsernsMode, User: d.Config.User, Hostname: d.Config.Hostname, WorkingDir: d.Config.WorkingDir, CapDrop: d.HostConfig.CapDrop, BoundingCaps: d.BoundingCaps, SecurityOpt: d.HostConfig.SecurityOpt, Devices: len(d.HostConfig.Devices), Labels: d.Config.Labels, Memory: d.HostConfig.Memory, NanoCPUs: d.HostConfig.NanoCPUs, PIDs: d.HostConfig.PidsLimit}
 	for _, m := range d.Mounts {
-		e.MountTargets = append(e.MountTargets, m.Destination)
+		e.Mounts = append(e.Mounts, EvidenceMount{Source: m.Source, Destination: m.Destination, RW: m.RW, Mode: m.Mode, Options: m.Options})
+	}
+	for _, mapping := range d.IDMappings.UIDMap {
+		e.UIDMap = append(e.UIDMap, IDMap{ContainerID: mapping.ContainerID, HostID: mapping.HostID, Size: mapping.Size})
+	}
+	for _, mapping := range d.IDMappings.GIDMap {
+		e.GIDMap = append(e.GIDMap, IDMap{ContainerID: mapping.ContainerID, HostID: mapping.HostID, Size: mapping.Size})
 	}
 	return e, nil
 }
@@ -204,6 +285,30 @@ func Verify(e Evidence, result plan.Result, generation int64) error {
 	}
 	if e.NetworkMode != "none" {
 		return fmt.Errorf("network mode is %q, want none", e.NetworkMode)
+	}
+	if e.IPCMode != "private" || e.PIDMode != "private" || e.UTSMode != "private" {
+		return fmt.Errorf("namespace evidence mismatch: ipc=%q pid=%q uts=%q", e.IPCMode, e.PIDMode, e.UTSMode)
+	}
+	if e.UserNSMode == "host" || !mapsIdentity(e.UIDMap, int64(os.Getuid())) || !mapsIdentity(e.GIDMap, int64(os.Getgid())) {
+		return fmt.Errorf("keep-id mapping evidence missing (mode %q)", e.UserNSMode)
+	}
+	if e.User != result.Plan.World.User {
+		return fmt.Errorf("runtime user is %q, want %q", e.User, result.Plan.World.User)
+	}
+	if e.Hostname != result.Plan.World.Hostname || e.WorkingDir != result.Plan.World.Workdir {
+		return fmt.Errorf("hostname/workdir evidence mismatch")
+	}
+	if e.BoundingCaps == nil || len(e.BoundingCaps) != 0 {
+		return fmt.Errorf("capability bounding set is not observably empty")
+	}
+	if !containsPrefixFold(e.SecurityOpt, "no-new-privileges") {
+		return fmt.Errorf("no-new-privileges evidence missing")
+	}
+	if containsPrefixFold(e.SecurityOpt, "seccomp=unconfined") {
+		return fmt.Errorf("unconfined seccomp evidence")
+	}
+	if e.Devices != 0 {
+		return fmt.Errorf("unexpected device mappings: %d", e.Devices)
 	}
 	expected := ContainerName(result.Plan.Name, generation)
 	if e.Name != expected {
@@ -221,19 +326,70 @@ func Verify(e Evidence, result plan.Result, generation int64) error {
 	if e.NanoCPUs != result.Plan.Resources.CPUs*1_000_000_000 {
 		return fmt.Errorf("cpu evidence mismatch")
 	}
-	targets := map[string]bool{}
-	for _, target := range e.MountTargets {
-		targets[target] = true
+	targets := map[string]EvidenceMount{}
+	for _, mount := range e.Mounts {
+		targets[mount.Destination] = mount
+		lower := strings.ToLower(mount.Source + " " + mount.Destination)
+		if strings.Contains(lower, "podman.sock") || strings.Contains(lower, "docker.sock") {
+			return fmt.Errorf("runtime control socket mount detected at %q", mount.Destination)
+		}
 	}
 	for _, target := range result.Plan.Workspace {
-		if !targets[target] {
+		evidence, ok := targets[target]
+		if !ok {
 			return fmt.Errorf("workspace mount %q missing", target)
+		}
+		if !mountHasOption(evidence, "nodev") || !mountHasOption(evidence, "nosuid") {
+			return fmt.Errorf("workspace mount %q lacks nodev/nosuid evidence", target)
 		}
 	}
 	for _, mount := range result.Plan.Mounts {
-		if !targets[mount.Target] {
+		evidence, ok := targets[mount.Target]
+		if !ok {
 			return fmt.Errorf("declared mount %q missing", mount.Target)
+		}
+		if filepath.Clean(evidence.Source) != filepath.Clean(mount.Source) {
+			return fmt.Errorf("declared mount %q source mismatch", mount.Target)
+		}
+		if evidence.RW != (mount.Mode == "rw") {
+			return fmt.Errorf("declared mount %q mode mismatch", mount.Target)
+		}
+		if !mountHasOption(evidence, "nodev") || !mountHasOption(evidence, "nosuid") {
+			return fmt.Errorf("declared mount %q lacks nodev/nosuid evidence", mount.Target)
 		}
 	}
 	return nil
+}
+
+func mapsIdentity(mappings []IDMap, id int64) bool {
+	for _, mapping := range mappings {
+		if mapping.Size > 0 && id >= mapping.HostID && id < mapping.HostID+mapping.Size {
+			containerID := mapping.ContainerID + id - mapping.HostID
+			if containerID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mountHasOption(mount EvidenceMount, option string) bool {
+	values := append([]string{mount.Mode}, mount.Options...)
+	for _, value := range values {
+		for _, field := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(field), option) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsPrefixFold(values []string, prefix string) bool {
+	for _, value := range values {
+		if strings.HasPrefix(strings.ToLower(value), strings.ToLower(prefix)) {
+			return true
+		}
+	}
+	return false
 }

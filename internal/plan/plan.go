@@ -105,7 +105,7 @@ func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) 
 	}
 	for _, c := range d.Copies {
 		source := resolve(dir, c.Source)
-		digest, err := digestSource(source)
+		digest, err := DigestSource(source)
 		if err != nil {
 			return Result{}, fmt.Errorf("digest copy source %s: %w", c.Source, err)
 		}
@@ -132,7 +132,9 @@ func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) 
 	return result, nil
 }
 
-func digestSource(root string) (string, error) {
+// DigestSource returns the canonical content and mode fingerprint used for a
+// copied file or tree.
+func DigestSource(root string) (string, error) {
 	entries := []string{}
 	err := filepath.WalkDir(root, func(path string, item os.DirEntry, walkErr error) error {
 		if walkErr != nil {

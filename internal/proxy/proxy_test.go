@@ -53,6 +53,65 @@ func TestCONNECTExactAllowanceAndProxyResolution(t *testing.T) {
 		t.Fatalf("lookups=%v", res.hosts)
 	}
 }
+
+func TestCONNECTCarriesPayloadLargerThanRequestLimit(t *testing.T) {
+	p := New([]Destination{{"allowed.example", 8443}}, Options{Resolver: &resolver{}, Dialer: pipeDialer{}})
+	client, server := net.Pipe()
+	go p.handle(server)
+	defer client.Close()
+	if _, err := fmt.Fprint(client, "CONNECT allowed.example:8443 HTTP/1.1\r\nHost: allowed.example:8443\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(client)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	payload := []byte(strings.Repeat("kenogram", 256<<10))
+	if err := client.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := client.Write(payload)
+		writeDone <- err
+	}()
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(reader, got); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatal("tunneled payload changed")
+	}
+}
+
+func TestProxyRejectsHeaderLargerThan64KiB(t *testing.T) {
+	p := New([]Destination{{"allowed.example", 8443}}, Options{Resolver: &resolver{}, Dialer: pipeDialer{}})
+	client, server := net.Pipe()
+	go p.handle(server)
+	defer client.Close()
+	writeDone := make(chan struct{})
+	go func() {
+		_, _ = fmt.Fprintf(client, "CONNECT allowed.example:8443 HTTP/1.1\r\nX-Fill: %s\r\n\r\n", strings.Repeat("x", 70<<10))
+		close(writeDone)
+	}()
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(client).ReadString('\n')
+	if err != nil || !strings.Contains(line, "400") {
+		t.Fatalf("line=%q err=%v", line, err)
+	}
+	<-writeDone
+}
 func TestRefusedDestinationNeverResolves(t *testing.T) {
 	res := &resolver{}
 	p := New(nil, Options{Resolver: res})
@@ -100,5 +159,25 @@ func TestGrantExpiryClosesAdmittedConnection(t *testing.T) {
 	buffer := make([]byte, 1)
 	if _, err := client.Read(buffer); err == nil {
 		t.Fatal("connection remained open")
+	}
+}
+
+func TestRemoveClosesAdmittedConnection(t *testing.T) {
+	p := New([]Destination{{"x", 443}}, Options{})
+	d := Destination{"x", 443}
+	admission, ok := p.allowed(d)
+	if !ok {
+		t.Fatal("not allowed")
+	}
+	client, server := net.Pipe()
+	defer client.Close()
+	p.track(server, admission)
+	p.Remove(d)
+	client.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := client.Read(make([]byte, 1)); err == nil {
+		t.Fatal("connection remained open")
+	}
+	if _, ok := p.allowed(d); ok {
+		t.Fatal("destination remained allowed")
 	}
 }

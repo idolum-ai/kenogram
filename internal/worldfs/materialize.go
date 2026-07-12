@@ -28,16 +28,22 @@ func (l Layout) StageSource(generation int64, index int, source, mode string) (s
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return "", err
 	}
-	permissions, err := parseMode(mode)
-	if err != nil {
+	if _, err := parseMode(mode); err != nil {
 		return "", err
 	}
-	if err := copyNode(source, root, permissions); err != nil {
+	if err := copyNode(source, root); err != nil {
 		return "", err
 	}
 	return root, nil
 }
-func copyNode(source, target string, topMode os.FileMode) error {
+func (l Layout) ApplyStageMode(path, mode string) error {
+	permissions, err := parseMode(mode)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(path, permissions)
+}
+func copyNode(source, target string) error {
 	info, err := os.Lstat(source)
 	if err != nil {
 		return err
@@ -46,7 +52,7 @@ func copyNode(source, target string, topMode os.FileMode) error {
 		return fmt.Errorf("copied sources may not contain symlinks: %s", source)
 	}
 	if info.IsDir() {
-		if err := os.Mkdir(target, topMode); err != nil && !os.IsExist(err) {
+		if err := os.Mkdir(target, info.Mode().Perm()); err != nil && !os.IsExist(err) {
 			return err
 		}
 		entries, err := os.ReadDir(source)
@@ -54,18 +60,11 @@ func copyNode(source, target string, topMode os.FileMode) error {
 			return err
 		}
 		for _, entry := range entries {
-			childMode := entry.Type().Perm()
-			if childMode == 0 {
-				childMode = 0o600
-			}
-			if entry.IsDir() {
-				childMode = 0o700
-			}
-			if err := copyNode(filepath.Join(source, entry.Name()), filepath.Join(target, entry.Name()), childMode); err != nil {
+			if err := copyNode(filepath.Join(source, entry.Name()), filepath.Join(target, entry.Name())); err != nil {
 				return err
 			}
 		}
-		return os.Chmod(target, topMode)
+		return os.Chmod(target, info.Mode().Perm())
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("unsupported copied source type: %s", source)
@@ -75,7 +74,7 @@ func copyNode(source, target string, topMode os.FileMode) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, topMode)
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
 	if err != nil {
 		return err
 	}

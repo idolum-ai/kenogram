@@ -26,7 +26,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printHelp(stderr)
 		return 2
 	}
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	switch args[0] {
 	case "_netns-listener":
 		return runNetnsListener(args[1:], stderr)
@@ -44,6 +45,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runStatus(ctx, args[1:], stdout, stderr)
 	case "allow":
 		return runAllow(args[1:], stdout, stderr)
+	case "revoke":
+		return runRevoke(args[1:], stdout, stderr)
+	case "repair-history":
+		return runRepairHistory(args[1:], stdout, stderr)
 	case "worlds":
 		return runWorlds(args[1:], stdout, stderr)
 	case "version", "--version", "-v":
@@ -300,6 +305,44 @@ func runAllow(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "granted %s to %s for %s\n", args[1], args[0], args[3])
 	return 0
 }
+func runRevoke(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 2 {
+		fmt.Fprintln(stderr, "usage: kenogram revoke <world> <host>:<port>")
+		return 2
+	}
+	if err := worldfs.ValidateName(args[0]); err != nil {
+		return 2
+	}
+	a, err := newApp(io.Discard)
+	if err == nil {
+		err = a.Revoke(args[0], args[1])
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "revoke:", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "revoked %s from %s\n", args[1], args[0])
+	return 0
+}
+func runRepairHistory(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 2 || args[0] != "--yes" {
+		fmt.Fprintln(stderr, "usage: kenogram repair-history --yes <world>")
+		return 2
+	}
+	if err := worldfs.ValidateName(args[1]); err != nil {
+		return 2
+	}
+	a, err := newApp(io.Discard)
+	if err == nil {
+		err = a.RepairHistory(args[1])
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "repair-history:", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s: truncated history tail removed\n", args[1])
+	return 0
+}
 func encode(stdout, stderr io.Writer, value any) int {
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
@@ -381,6 +424,8 @@ func printHelp(w io.Writer) {
   kenogram enter [--repair] <world>
   kenogram status [--json] <world>
   kenogram allow <world> <host>:<port> --for <duration>
+  kenogram revoke <world> <host>:<port>
+  kenogram repair-history --yes <world>
   kenogram worlds [--json]
   kenogram version
   kenogram help

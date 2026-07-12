@@ -119,12 +119,16 @@ func (p *Proxy) admitRate() bool {
 func (p *Proxy) handle(client net.Conn) {
 	defer client.Close()
 	_ = client.SetReadDeadline(time.Now().Add(30 * time.Second))
-	reader := bufio.NewReader(io.LimitReader(client, 64<<10))
+	bounded := &headerReader{reader: client, remaining: 64 << 10}
+	reader := bufio.NewReader(bounded)
 	request, err := http.ReadRequest(reader)
 	if err != nil {
 		writeError(client, http.StatusBadRequest)
 		return
 	}
+	// The bound applies to the HTTP proxy request only. Once CONNECT has been
+	// accepted, the same buffered reader must carry an arbitrarily large tunnel.
+	bounded.unbounded = true
 	_ = client.SetReadDeadline(time.Time{})
 	host, port, err := requestDestination(request)
 	if err != nil {
@@ -164,6 +168,29 @@ func (p *Proxy) handle(client net.Conn) {
 		return
 	}
 	relay(client, outbound)
+}
+
+var errHeaderTooLarge = errors.New("proxy request header exceeds 64 KiB")
+
+type headerReader struct {
+	reader    io.Reader
+	remaining int
+	unbounded bool
+}
+
+func (r *headerReader) Read(buffer []byte) (int, error) {
+	if r.unbounded {
+		return r.reader.Read(buffer)
+	}
+	if r.remaining <= 0 {
+		return 0, errHeaderTooLarge
+	}
+	if len(buffer) > r.remaining {
+		buffer = buffer[:r.remaining]
+	}
+	n, err := r.reader.Read(buffer)
+	r.remaining -= n
+	return n, err
 }
 
 type bufferedConn struct {

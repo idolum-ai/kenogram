@@ -47,13 +47,16 @@ func Digest(root string) (DigestTree, error) {
 		switch {
 		case info.Mode().IsRegular():
 			entry.Type = "file"
-			sum, err := hashFile(path)
+			sum, err := hashFile(path, info)
 			if err != nil {
 				return err
 			}
 			entry.SHA256 = sum
 		case info.IsDir():
 			entry.Type = "directory"
+			// Directory byte sizes are filesystem bookkeeping and do not
+			// describe the carried tree's semantic content.
+			entry.Size = 0
 		case info.Mode()&os.ModeSymlink != 0:
 			entry.Type = "symlink"
 			link, err := os.Readlink(path)
@@ -84,7 +87,7 @@ func Digest(root string) (DigestTree, error) {
 	sum := sha256.Sum256(raw)
 	return DigestTree{Root: hex.EncodeToString(sum[:]), Entries: entries}, nil
 }
-func hashFile(path string) (string, error) {
+func hashFile(path string, before os.FileInfo) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -93,6 +96,13 @@ func hashFile(path string) (string, error) {
 	hash := sha256.New()
 	if _, err := io.Copy(hash, f); err != nil {
 		return "", err
+	}
+	after, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if before.Size() != after.Size() || before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) {
+		return "", fmt.Errorf("file changed while hashing: %s", path)
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }

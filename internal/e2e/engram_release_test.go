@@ -24,6 +24,7 @@ import (
 )
 
 const debianBookwormAMD64 = "docker.io/library/debian@sha256:1def178129dfb5f24db43afbf2fcac04530012e3264ba4ff81c71184e17a9ee4"
+const secretCanary = "kenogram-canary-7f51c210b2d946e4a83572fd94d8f567"
 
 type releaseLock struct {
 	Version      string `json:"version"`
@@ -74,6 +75,9 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	archive := filepath.Join(tmp, lock.Asset)
 	if supplied := os.Getenv("KENOGRAM_ENGRAM_ARCHIVE"); supplied != "" {
 		copyRegularFile(t, supplied, archive, 0o600)
+		if os.Getenv("KENOGRAM_VERIFY_UPSTREAM") == "1" {
+			verifyPublishedChecksum(t, ctx, lock)
+		}
 	} else {
 		verifyPublishedChecksum(t, ctx, lock)
 		download(t, ctx, lock.AssetURL, archive)
@@ -125,6 +129,8 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	first := containerName(world, 1)
 	waitForTmux(t, ctx, tmp, testEnv, first)
+	assertGeneratedContract(t, ctx, tmp, testEnv, first)
+	assertSecretAbsent(t, filepath.Join(stateRoot, world), secretCanary)
 
 	assertEngramOffline(t, ctx, tmp, testEnv, first, lock)
 	firstStateDigest := inWorldSHA256(t, ctx, tmp, testEnv, first, "/workspace/.engram/state.json")
@@ -139,6 +145,8 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	mustWrite(t, revisionSource, []byte("two\n"), 0o600)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	second := containerName(world, 2)
+	assertGeneratedContract(t, ctx, tmp, testEnv, second)
+	assertSecretAbsent(t, filepath.Join(stateRoot, world), secretCanary)
 	if got := strings.TrimSpace(run(t, ctx, tmp, testEnv, "podman", "exec", second, "cat", "/workspace/sentinel")); got != "carried" {
 		t.Fatalf("workspace sentinel after replacement = %q", got)
 	}
@@ -172,6 +180,7 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 		t.Fatal("container survived destroy")
 	}
 	assertDestroyedHistory(t, stateRoot, world)
+	assertSecretAbsent(t, filepath.Join(stateRoot, ".destroyed"), secretCanary)
 }
 
 func readReleaseLock(t *testing.T) releaseLock {
@@ -307,7 +316,7 @@ func extractEngram(t *testing.T, archive, root string) string {
 
 func writeEngramEnv(t *testing.T, path string, user int) {
 	t.Helper()
-	body := fmt.Sprintf("TELEGRAM_BOT_TOKEN=offline-fixture-token\nTELEGRAM_ALLOWED_USER_ID=%d\nLLM_PROVIDER=anthropic\nANTHROPIC_API_KEY=offline-fixture-key\nANTHROPIC_MODEL=claude-haiku-4-5-20251001\nENGRAM_HOME=/workspace/.engram\nENGRAM_WORKDIR=/workspace\nENGRAM_TMUX_SESSION=main\nENGRAM_ANCHOR_MODE=guide\n", user)
+	body := fmt.Sprintf("TELEGRAM_BOT_TOKEN=offline-fixture-token\nTELEGRAM_ALLOWED_USER_ID=%d\nLLM_PROVIDER=anthropic\nANTHROPIC_API_KEY=%s\nANTHROPIC_MODEL=claude-haiku-4-5-20251001\nENGRAM_HOME=/workspace/.engram\nENGRAM_WORKDIR=/workspace\nENGRAM_TMUX_SESSION=main\nENGRAM_ANCHOR_MODE=guide\n", user, secretCanary)
 	mustWrite(t, path, []byte(body), 0o600)
 }
 
@@ -367,6 +376,46 @@ func assertEngramOffline(t *testing.T, ctx context.Context, dir string, env []st
 	}
 	if out, err := runResult(ctx, dir, env, "podman", "exec", container, "test", "!", "-e", "/run/podman/podman.sock"); err != nil {
 		t.Fatalf("runtime socket is visible: %s", out)
+	}
+}
+
+func assertGeneratedContract(t *testing.T, ctx context.Context, dir string, env []string, container string) {
+	t.Helper()
+	for _, path := range []string{"/KENOGRAM.md", "/etc/kenogram/world.json", "/etc/kenogram/services/tmux.sh"} {
+		if out, err := runResult(ctx, dir, env, "podman", "exec", container, "test", "-f", path); err != nil {
+			t.Fatalf("generated contract path %s missing: %s", path, out)
+		}
+	}
+	world := run(t, ctx, dir, env, "podman", "exec", container, "cat", "/etc/kenogram/world.json")
+	if !strings.Contains(world, `"name": "engram-e2e-`) || !strings.Contains(world, `"generation":`) {
+		t.Fatalf("world projection is incomplete:\n%s", world)
+	}
+	status := strings.TrimSpace(run(t, ctx, dir, env, "podman", "exec", container, "cat", "/run/kenogram/services/tmux"))
+	if !strings.HasPrefix(status, "running ") {
+		t.Fatalf("service evidence = %q", status)
+	}
+}
+
+func assertSecretAbsent(t *testing.T, root, canary string) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(raw), canary) {
+			return fmt.Errorf("secret canary leaked into %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

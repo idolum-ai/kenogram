@@ -186,7 +186,7 @@ func runFailure(dir string, env []string, name string, args ...string) (string, 
 func require(t *testing.T, name string) {
 	t.Helper()
 	if _, err := exec.LookPath(name); err != nil {
-		t.Skipf("%s unavailable", name)
+		t.Fatalf("required integration executable %s is unavailable: %v", name, err)
 	}
 }
 func repoRoot(t *testing.T) string {

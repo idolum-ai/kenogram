@@ -57,6 +57,13 @@ func (p *Proxy) control(conn net.Conn) {
 			return
 		}
 		json.NewEncoder(conn).Encode(ControlResponse{OK: true})
+	case "remove":
+		if request.Host == "" || request.Port < 1 || request.Port > 65535 {
+			json.NewEncoder(conn).Encode(ControlResponse{Error: "invalid destination"})
+			return
+		}
+		p.Remove(Destination{request.Host, request.Port})
+		json.NewEncoder(conn).Encode(ControlResponse{OK: true})
 	default:
 		json.NewEncoder(conn).Encode(ControlResponse{Error: "unsupported operation"})
 	}
