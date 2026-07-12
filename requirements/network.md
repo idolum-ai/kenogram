@@ -16,6 +16,11 @@ The normative acceptance invariants are:
 9. Ephemeral grants die by deadline or proxy death and removal closes connections.
 10. Repeated application of one declaration is indistinguishable under 1–9.
 
+The invariants, rather than the internal mechanism, define network conformance.
+Implementations that preserve the same observations are behaviorally equivalent
+for this contract. This is an engineering criterion informed by Kenogram's
+conceptual lineage; it is not a claim to implement formal morphic bisimulation.
+
 The mechanism uses a short-lived `nsenter` helper to create the listener inside
 the world's user and network namespaces and transfer its descriptor over an
 `AF_UNIX` socketpair. The helper exits; the host proxy retains the listener. The

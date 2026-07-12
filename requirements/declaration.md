@@ -18,4 +18,6 @@ be covered, mount targets cannot overlap, resources are positive, network ports
 are 1–65535, restart is `never`, `on-failure`, or `always`, and declared source
 paths must exist. Secret file sources must not grant group or other permission.
 
-World identity is `name`; changing it identifies a different world.
+The world `name` is its stable operational address; changing it addresses a
+different world. This namespace rule does not claim that names determine
+behavioral or ontological identity.

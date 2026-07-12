@@ -7,6 +7,10 @@ carry plan and declaration digests, image digests, workspace root digest, action
 and observed outcome, and form a SHA-256 hash chain. This is operator-facing
 tamper evidence, not an authority ledger.
 
+Digests identify the exact evidence carried by a record. They establish
+provenance; they are not a claim that byte equality exhausts the meaning or
+behavior of a world.
+
 `applied.toml` is written only after runtime evidence verifies the generation.
 Restart recovery combines the declaration, verified history, and observed runtime
 state; uncertain state is surfaced rather than invented.

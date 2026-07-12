@@ -1,107 +1,82 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 680" role="img" aria-labelledby="title desc">
   <title id="title">Kenogram</title>
-  <desc id="desc">Fine graphite declarations cross a warm white field, ending at a dense black marked place whose faint displaced boundaries suggest whole worlds written again.</desc>
+  <desc id="desc">Two different fields of identityless marks share one relational decomposition across five groups; surface inscriptions differ while the pattern remains.</desc>
   <defs>
-    <radialGradient id="paper" cx="50%" cy="42%" r="78%">
+    <radialGradient id="paper" cx="50%" cy="44%" r="78%">
       <stop offset="0" stop-color="#fffefa"/>
       <stop offset="0.62" stop-color="#faf9f4"/>
-      <stop offset="1" stop-color="#f0efe9"/>
+      <stop offset="1" stop-color="#efeee8"/>
     </radialGradient>
-    <linearGradient id="graphite" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#8d8b84" stop-opacity="0"/>
-      <stop offset="0.12" stop-color="#77756f" stop-opacity="0.48"/>
-      <stop offset="0.38" stop-color="#242421" stop-opacity="0.92"/>
-      <stop offset="0.5" stop-color="#11110f"/>
-      <stop offset="0.62" stop-color="#242421" stop-opacity="0.92"/>
-      <stop offset="0.88" stop-color="#77756f" stop-opacity="0.48"/>
-      <stop offset="1" stop-color="#8d8b84" stop-opacity="0"/>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#171715" stop-opacity="0"/>
+      <stop offset="0.18" stop-color="#171715" stop-opacity="0.42"/>
+      <stop offset="0.5" stop-color="#171715" stop-opacity="0.72"/>
+      <stop offset="0.82" stop-color="#171715" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#171715" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="line-fade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#5e5c56" stop-opacity="0.12"/>
-      <stop offset="0.26" stop-color="#292926" stop-opacity="0.68"/>
-      <stop offset="0.72" stop-color="#151513" stop-opacity="0.86"/>
-      <stop offset="1" stop-color="#5e5c56" stop-opacity="0.08"/>
-    </linearGradient>
-    <radialGradient id="core" cx="46%" cy="36%" r="82%">
-      <stop offset="0" stop-color="#11110f"/>
-      <stop offset="0.58" stop-color="#080807"/>
-      <stop offset="1" stop-color="#020202"/>
-    </radialGradient>
-    <radialGradient id="edge-fade" cx="50%" cy="43%" r="70%">
-      <stop offset="0" stop-color="#fff"/>
-      <stop offset="0.76" stop-color="#fff"/>
-      <stop offset="1" stop-color="#000"/>
-    </radialGradient>
-    <filter id="paper-grain" x="-8%" y="-8%" width="116%" height="116%">
-      <feTurbulence type="fractalNoise" baseFrequency="0.82" numOctaves="3" seed="47"/>
+    <filter id="grain" x="-8%" y="-8%" width="116%" height="116%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.76" numOctaves="3" seed="47"/>
       <feColorMatrix type="saturate" values="0"/>
-      <feComponentTransfer>
-        <feFuncA type="table" tableValues="0 0.055"/>
-      </feComponentTransfer>
+      <feComponentTransfer><feFuncA type="table" tableValues="0 0.05"/></feComponentTransfer>
     </filter>
-    <filter id="edge-fray" x="-4%" y="-4%" width="108%" height="108%">
-      <feTurbulence type="fractalNoise" baseFrequency="0.012 0.08" numOctaves="2" seed="19" result="noise"/>
-      <feDisplacementMap in="SourceGraphic" in2="noise" scale="2.1" xChannelSelector="R" yChannelSelector="G"/>
+    <filter id="fray" x="-12%" y="-12%" width="124%" height="124%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.025 0.12" numOctaves="2" seed="19" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="1.3" xChannelSelector="R" yChannelSelector="G"/>
     </filter>
-    <mask id="field-fade">
-      <rect width="1200" height="680" fill="url(#edge-fade)"/>
-    </mask>
-    <mask id="marked-absence">
-      <rect width="1200" height="680" fill="#fff"/>
-      <path fill="#000" d="M443 191c0-18 15-33 33-33h248c18 0 33 15 33 33v270c0 18-15 33-33 33H476c-18 0-33-15-33-33Z"/>
-    </mask>
-    <clipPath id="line-field">
-      <rect x="34" y="64" width="1132" height="472"/>
-    </clipPath>
-    <path id="declaration" pathLength="1" vector-effect="non-scaling-stroke" d="M-40 0H292c71 0 102-2 136-12 44-13 95-20 172-20s128 7 172 20c34 10 65 12 136 12h332"/>
-    <path id="quiet-rule" pathLength="1" vector-effect="non-scaling-stroke" d="M0 0C214-2 362 2 600 0s386-2 600 0"/>
+
+    <!-- The upper and lower alphabets deliberately share no glyph identity. -->
+    <g id="upper-a"><circle r="7.5" fill="#0a0a09"/></g>
+    <g id="upper-b"><rect x="-7" y="-7" width="14" height="14" rx="1.5" fill="none" stroke="#0a0a09" stroke-width="2"/></g>
+    <g id="upper-c"><path d="M-7 6L6-7M-2 7L7-2" fill="none" stroke="#0a0a09" stroke-width="2.2" stroke-linecap="round"/></g>
+    <g id="lower-a"><rect x="-7" y="-7" width="14" height="14" rx="1" fill="#0a0a09"/></g>
+    <g id="lower-b"><rect x="-4.5" y="-9" width="9" height="18" rx="4.5" fill="#0a0a09"/></g>
+    <g id="lower-c"><circle r="7" fill="none" stroke="#0a0a09" stroke-width="2.2"/></g>
+
+    <g id="upper-pattern">
+      <use href="#upper-a" x="0"/><use href="#upper-a" x="28"/><use href="#upper-a" x="56"/><use href="#upper-a" x="84"/>
+      <use href="#upper-b" x="144"/><use href="#upper-b" x="172"/><use href="#upper-b" x="200"/>
+      <use href="#upper-c" x="260"/><use href="#upper-c" x="288"/><use href="#upper-c" x="316"/>
+      <use href="#upper-a" x="376"/><use href="#upper-a" x="404"/><use href="#upper-a" x="432"/><use href="#upper-a" x="460"/>
+      <use href="#upper-b" x="520"/><use href="#upper-b" x="548"/><use href="#upper-b" x="576"/><use href="#upper-b" x="604"/>
+    </g>
+    <g id="lower-pattern">
+      <use href="#lower-a" x="0"/><use href="#lower-a" x="28"/><use href="#lower-a" x="56"/><use href="#lower-a" x="84"/>
+      <use href="#lower-b" x="144"/><use href="#lower-b" x="172"/><use href="#lower-b" x="200"/>
+      <use href="#lower-c" x="260"/><use href="#lower-c" x="288"/><use href="#lower-c" x="316"/>
+      <use href="#lower-a" x="376"/><use href="#lower-a" x="404"/><use href="#lower-a" x="432"/><use href="#lower-a" x="460"/>
+      <use href="#lower-b" x="520"/><use href="#lower-b" x="548"/><use href="#lower-b" x="576"/><use href="#lower-b" x="604"/>
+    </g>
   </defs>
 
   <rect width="1200" height="680" fill="url(#paper)"/>
-  <rect width="1200" height="680" filter="url(#paper-grain)" opacity="0.72"/>
+  <rect width="1200" height="680" filter="url(#grain)" opacity="0.72"/>
 
-  <!-- Earlier and later extents: complete boundaries, displaced rather than accumulated. -->
-  <g fill="none" stroke="#242421" stroke-width="1.15" opacity="0.13">
-    <rect x="462" y="177" width="278" height="302" rx="28"/>
-    <rect x="478" y="194" width="278" height="302" rx="28"/>
-    <rect x="494" y="211" width="278" height="302" rx="28"/>
+  <!-- Five localities: grouping persists even when every surface mark changes. -->
+  <g fill="none" stroke="#292925" stroke-width="1">
+    <path d="M264 184V472M404 184V472M520 184V472M636 184V472M780 184V472M920 184V472" opacity="0.1"/>
+    <path d="M264 205C264 188 278 174 295 174H373C390 174 404 188 404 205M404 205C404 188 418 174 435 174H489C506 174 520 188 520 205M520 205C520 188 534 174 551 174H605C622 174 636 188 636 205M636 205C636 188 650 174 667 174H749C766 174 780 188 780 205M780 205C780 188 794 174 811 174H889C906 174 920 188 920 205" opacity="0.28"/>
+    <path d="M264 451C264 468 278 482 295 482H373C390 482 404 468 404 451M404 451C404 468 418 482 435 482H489C506 482 520 468 520 451M520 451C520 468 534 482 551 482H605C622 482 636 468 636 451M636 451C636 468 650 482 667 482H749C766 482 780 468 780 451M780 451C780 468 794 482 811 482H889C906 482 920 468 920 451" opacity="0.28"/>
   </g>
 
-  <!-- The declaration field ends at the marked place; no hidden line crosses it. -->
-  <g mask="url(#field-fade)">
-    <g clip-path="url(#line-field)" mask="url(#marked-absence)" fill="none" stroke="url(#line-fade)" stroke-linecap="round" filter="url(#edge-fray)">
-      <use href="#declaration" transform="matrix(1 0 0 1 0 91)" stroke-width="0.85" opacity="0.28"/>
-      <use href="#declaration" transform="matrix(1 0 0 1.4 0 108)" stroke-width="0.9" opacity="0.32"/>
-      <use href="#declaration" transform="matrix(1 0 0 1.9 0 126)" stroke-width="0.95" opacity="0.36"/>
-      <use href="#declaration" transform="matrix(1 0 0 2.5 0 145)" stroke-width="1" opacity="0.41"/>
-      <use href="#declaration" transform="matrix(1 0 0 3.2 0 165)" stroke-width="1.05" opacity="0.46"/>
-      <use href="#declaration" transform="matrix(1 0 0 4 0 186)" stroke-width="1.1" opacity="0.52"/>
-      <use href="#declaration" transform="matrix(1 0 0 4.9 0 208)" stroke-width="1.15" opacity="0.58"/>
-      <use href="#declaration" transform="matrix(1 0 0 5.9 0 231)" stroke-width="1.2" opacity="0.64"/>
-      <use href="#declaration" transform="matrix(1 0 0 7 0 255)" stroke-width="1.25" opacity="0.7"/>
-      <use href="#declaration" transform="matrix(1 0 0 8.2 0 280)" stroke-width="1.3" opacity="0.76"/>
-      <use href="#declaration" transform="matrix(1 0 0 9.5 0 306)" stroke-width="1.35" opacity="0.82"/>
-      <use href="#declaration" transform="matrix(1 0 0 10.9 0 333)" stroke-width="1.4" opacity="0.87"/>
-      <use href="#declaration" transform="matrix(1 0 0 12.4 0 361)" stroke-width="1.45" opacity="0.91"/>
-      <use href="#declaration" transform="matrix(1 0 0 14 0 390)" stroke-width="1.5" opacity="0.94"/>
-      <use href="#declaration" transform="matrix(1 0 0 15.7 0 420)" stroke-width="1.55" opacity="0.96"/>
-      <use href="#declaration" transform="matrix(1 0 0 17.5 0 451)" stroke-width="1.6" opacity="0.98"/>
-      <use href="#declaration" transform="matrix(1 0 0 19.4 0 483)" stroke-width="1.7"/>
-    </g>
+  <!-- Relations, not glyphs, carry through the open field. -->
+  <g fill="none" stroke="#191917" stroke-width="1.1" opacity="0.22">
+    <path d="M334 260C318 303 318 353 334 396"/>
+    <path d="M462 260C478 303 478 353 462 396"/>
+    <path d="M578 260C562 303 562 353 578 396"/>
+    <path d="M708 260C724 303 724 353 708 396"/>
+    <path d="M850 260C834 303 834 353 850 396"/>
+  </g>
+  <g fill="#171715" opacity="0.36">
+    <circle cx="334" cy="328" r="2.2"/><circle cx="462" cy="328" r="2.2"/><circle cx="578" cy="328" r="2.2"/><circle cx="708" cy="328" r="2.2"/><circle cx="850" cy="328" r="2.2"/>
   </g>
 
-  <!-- One dense mark: an empty position made explicit, not a container with contents. -->
-  <path fill="url(#core)" filter="url(#edge-fray)" d="M443 191c0-18 15-33 33-33h248c18 0 33 15 33 33v270c0 18-15 33-33 33H476c-18 0-33-15-33-33Z"/>
-  <path d="M474 189h252M474 463h252" fill="none" stroke="#f7f5ee" stroke-width="1.2" opacity="0.28"/>
-  <path d="M600 174v-28M600 506v-28M427 326h-28M801 326h-28" fill="none" stroke="#171715" stroke-width="1.15" opacity="0.5"/>
+  <g transform="translate(288 244)" filter="url(#fray)"><use href="#upper-pattern"/></g>
+  <g transform="translate(288 412)" filter="url(#fray)"><use href="#lower-pattern"/></g>
 
-  <!-- The field resumes as evidence, never as a continuation through the core. -->
-  <g fill="none" stroke="url(#graphite)" stroke-linecap="round" mask="url(#field-fade)" opacity="0.58">
-    <use href="#quiet-rule" transform="matrix(.76 0 0 1 144 530)" stroke-width="1.7"/>
-    <use href="#quiet-rule" transform="matrix(.66 0 0 1 204 543)" stroke-width="1.45" opacity="0.72"/>
-    <use href="#quiet-rule" transform="matrix(.56 0 0 1 264 555)" stroke-width="1.2" opacity="0.48"/>
-  </g>
+  <!-- A quiet double trace says sameness without installing an equals sign. -->
+  <path d="M226 328C374 321 468 335 600 328S826 321 974 328" fill="none" stroke="url(#fade)" stroke-width="1.3"/>
+  <path d="M250 339C382 334 482 344 600 339S818 334 950 339" fill="none" stroke="url(#fade)" stroke-width="0.7" opacity="0.44"/>
 
-  <text x="600" y="635" text-anchor="middle" fill="#242421" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" letter-spacing="15">KENOGRAM</text>
-  <rect x="312" y="654" width="576" height="1" fill="url(#graphite)" opacity="0.34"/>
+  <text x="600" y="591" text-anchor="middle" fill="#242421" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" letter-spacing="15">KENOGRAM</text>
+  <rect x="312" y="615" width="576" height="1" fill="url(#fade)" opacity="0.46"/>
 </svg>

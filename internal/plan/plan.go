@@ -188,7 +188,7 @@ func resolve(dir, source string) string {
 	return filepath.Clean(filepath.Join(dir, source))
 }
 
-// Canonical returns the fixed-field JSON encoding used for plan identity.
+// Canonical returns the fixed-field JSON encoding used for the plan fingerprint.
 func Canonical(p Plan) ([]byte, error) {
 	var out bytes.Buffer
 	encoder := json.NewEncoder(&out)

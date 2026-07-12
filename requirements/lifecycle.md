@@ -14,6 +14,11 @@ workspace drift. Rootless operation, private namespaces, capability reduction,
 seccomp, device allowlisting, cgroups v2, and absence of the runtime socket are
 mandatory.
 
+A generation is one material inscription of the declared world-pattern, not the
+persistent substance of the world. Replacement is correct when provenance is
+preserved, carried state is handled explicitly, and the successor satisfies the
+same observable contracts.
+
 Rootless Podman, cgroups v2, and subordinate UID/GID mappings are hard
 preflight requirements. Generated `/KENOGRAM.md`, `world.json`, and service
 supervisors are configuration state. Matching surviving generations are adopted;

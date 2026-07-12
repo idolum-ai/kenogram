@@ -6,6 +6,9 @@ Requirements describe observable contracts. Each implemented contract is tested
 directly or checked by `make check`. Planned documents constrain later work but do
 not imply that behavior exists.
 
+The project's name and its carefully limited relationship to Rudolf Kaehr's
+work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
+
 ## Implemented contracts
 
 1. [`declaration.md`](declaration.md) — accepted syntax, schema, and validation.
