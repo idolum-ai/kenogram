@@ -124,10 +124,7 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	writeDeclaration(t, declaration, world, pinnedImage, user, engram, envSource, revisionSource)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	first := containerName(world, 1)
-	waitFor(t, 10*time.Second, func() (bool, string) {
-		out, err := runResult(ctx, tmp, testEnv, "podman", "exec", first, "tmux", "has-session", "-t", "main")
-		return err == nil, out
-	})
+	waitForTmux(t, ctx, tmp, testEnv, first)
 
 	assertEngramOffline(t, ctx, tmp, testEnv, first, lock)
 	firstStateDigest := inWorldSHA256(t, ctx, tmp, testEnv, first, "/workspace/.engram/state.json")
@@ -165,10 +162,7 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	assertGeneration(t, filepath.Join(stateRoot, world, "state.json"), 2, "down")
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	assertGeneration(t, filepath.Join(stateRoot, world, "state.json"), 2, "running")
-	waitFor(t, 10*time.Second, func() (bool, string) {
-		out, err := runResult(ctx, tmp, testEnv, "podman", "exec", second, "tmux", "has-session", "-t", "main")
-		return err == nil, out
-	})
+	waitForTmux(t, ctx, tmp, testEnv, second)
 	if got := strings.TrimSpace(run(t, ctx, tmp, testEnv, "podman", "exec", second, "cat", "/workspace/sentinel")); got != "carried" {
 		t.Fatalf("workspace sentinel after restart = %q", got)
 	}
@@ -465,6 +459,35 @@ func waitFor(t *testing.T, timeout time.Duration, probe func() (bool, string)) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("condition not met within %s; last evidence:\n%s", timeout, last)
+}
+
+func waitForTmux(t *testing.T, ctx context.Context, dir string, env []string, container string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	last := ""
+	for time.Now().Before(deadline) {
+		out, err := runResult(ctx, dir, env, "podman", "exec", container, "tmux", "has-session", "-t", "main")
+		if err == nil {
+			return
+		}
+		last = out
+		time.Sleep(50 * time.Millisecond)
+	}
+	commands := [][]string{
+		{"id"},
+		{"tmux", "-V"},
+		{"cat", "/etc/kenogram/services/tmux.sh"},
+		{"ls", "-ld", "/tmp", "/workspace", "/etc/kenogram/services/tmux.sh"},
+		{"find", "/tmp", "-maxdepth", "3", "-type", "s", "-o", "-type", "d"},
+		{"ps", "-ef"},
+		{"timeout", "3", "/bin/sh", "-x", "/etc/kenogram/services/tmux.sh"},
+	}
+	var diagnostics strings.Builder
+	for _, command := range commands {
+		out, err := runResult(ctx, dir, env, "podman", append([]string{"exec", container}, command...)...)
+		fmt.Fprintf(&diagnostics, "$ %s\nerror: %v\n%s\n", strings.Join(command, " "), err, out)
+	}
+	t.Fatalf("tmux service unavailable; last probe:\n%s\ndiagnostics:\n%s", last, diagnostics.String())
 }
 
 func run(t *testing.T, ctx context.Context, dir string, env []string, name string, args ...string) string {
