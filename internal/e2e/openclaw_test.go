@@ -134,6 +134,13 @@ USER node
 	run(t, ctx, tmp, testEnv, "podman", "exec", first, "/bin/sh", "-c", "printf carried > /workspace/openclaw-carry")
 	assertSecretAbsentOutsideWorkspace(t, filepath.Join(stateRoot, world), openClawSecretCanary)
 
+	// An unchanged declaration must adopt the running generation rather than
+	// replacing it. This proves the idempotent path before forcing a successor.
+	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
+	if _, err := runResult(ctx, tmp, testEnv, "podman", "inspect", first); err != nil {
+		t.Fatalf("OpenClaw generation was not adopted: %v", err)
+	}
+
 	mustWrite(t, revisionSource, []byte("two\n"), 0o600)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	second := containerName(world, 2)
