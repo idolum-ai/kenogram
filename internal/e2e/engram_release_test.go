@@ -347,7 +347,7 @@ target = "/etc/engram-revision"
 mode = "0644"
 [[services]]
 name = "tmux"
-command = ["/usr/bin/tmux", "new-session", "-d", "-s", "main"]
+command = ["/bin/sh", "-c", "/usr/bin/tmux new-session -d -s main && exec /usr/bin/tmux wait-for kenogram-service-stop"]
 autostart = true
 restart = "never"
 `, world, image, user, engram, envSource, revisionSource)
