@@ -167,7 +167,7 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 		t.Fatalf("workspace sentinel after restart = %q", got)
 	}
 	run(t, ctx, tmp, testEnv, kenogram, "status", world)
-	run(t, ctx, tmp, testEnv, kenogram, "destroy", world)
+	run(t, ctx, tmp, testEnv, kenogram, "destroy", "--yes", world)
 	if _, err := runResult(ctx, tmp, testEnv, "podman", "inspect", second); err == nil {
 		t.Fatal("container survived destroy")
 	}
