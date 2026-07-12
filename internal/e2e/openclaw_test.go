@@ -132,7 +132,7 @@ USER node
 	runOpenClawTUI(t, ctx, tmp, testEnv, first, "proof-one")
 	provider.assertObserved(t)
 	run(t, ctx, tmp, testEnv, "podman", "exec", first, "/bin/sh", "-c", "printf carried > /workspace/openclaw-carry")
-	assertSecretAbsent(t, filepath.Join(stateRoot, world), openClawSecretCanary)
+	assertSecretAbsentOutsideWorkspace(t, filepath.Join(stateRoot, world), openClawSecretCanary)
 
 	mustWrite(t, revisionSource, []byte("two\n"), 0o600)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)

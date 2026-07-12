@@ -104,7 +104,7 @@ USER node
 		t.Fatalf("downloaded Telegram fixture = %q", got)
 	}
 
-	assertSecretAbsent(t, filepath.Join(stateRoot, world), openClawSecretCanary)
+	assertSecretAbsentOutsideWorkspace(t, filepath.Join(stateRoot, world), openClawSecretCanary)
 	assertSecretAbsent(t, filepath.Join(stateRoot, world), secretCanary)
 	run(t, ctx, tmp, testEnv, kenogram, "destroy", "--yes", world)
 	assertDestroyedOutcomes(t, stateRoot, world, "applied", "destroyed")

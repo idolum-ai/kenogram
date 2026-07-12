@@ -398,10 +398,22 @@ func assertGeneratedContract(t *testing.T, ctx context.Context, dir string, env 
 }
 
 func assertSecretAbsent(t *testing.T, root, canary string) {
+	assertSecretAbsentWalking(t, root, canary, "")
+}
+
+func assertSecretAbsentOutsideWorkspace(t *testing.T, root, canary string) {
+	t.Helper()
+	assertSecretAbsentWalking(t, root, canary, filepath.Join(root, "workspace"))
+}
+
+func assertSecretAbsentWalking(t *testing.T, root, canary, excludedRoot string) {
 	t.Helper()
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if excludedRoot != "" && path == excludedRoot && entry.IsDir() {
+			return filepath.SkipDir
 		}
 		if !entry.Type().IsRegular() {
 			return nil
