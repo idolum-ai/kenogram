@@ -45,7 +45,7 @@ func TestEngramControlsOpenClawInsideKenogram(t *testing.T) {
 	containerfile := filepath.Join(tmp, "Containerfile")
 	containerBody := fmt.Sprintf(`FROM %s
 USER root
-RUN apt-get update && apt-get install --no-install-recommends -y tmux curl procps && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install --no-install-recommends -y tmux curl procps strace && rm -rf /var/lib/apt/lists/*
 ARG KENOGRAM_UID
 ARG KENOGRAM_GID
 RUN getent group "$KENOGRAM_GID" >/dev/null || groupadd --gid "$KENOGRAM_GID" kenogram-test; printf 'kenogram:x:%%s:%%s:Kenogram composition:/workspace:/bin/sh\n' "$KENOGRAM_UID" "$KENOGRAM_GID" >> /etc/passwd
@@ -85,25 +85,20 @@ USER node
 	assertOpenClawVersion(t, ctx, tmp, testEnv, container, openClaw.Version)
 	waitForTmuxTarget(t, ctx, tmp, testEnv, container, "main:openclaw")
 	waitForEngramPolling(t, telegram, 20*time.Second)
+	assertOpenClawCompositionVersions(t, ctx, tmp, testEnv, container, openClaw.Version)
 
 	telegram.enqueueText("/attach main:openclaw")
 	telegram.waitOutbound(t, 20*time.Second, "attached existing tmux target")
-	telegram.enqueueText("/text 1 Reply with the proof marker.")
-	waitFor(t, 10*time.Second, func() (bool, string) {
-		out, err := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:openclaw")
-		return err == nil && strings.Contains(out, "Reply with the proof marker."), out
-	})
-	// OpenClaw treats tmux's synthetic Enter as an editor newline while Kitty
-	// keyboard mode is active. KPEnter preserves the supported SS3 submit key.
-	telegram.enqueueText("/key 1 KPEnter")
+	telegram.enqueueText("/send 1 Reply with the proof marker.")
 	if !provider.observedWithin(30 * time.Second) {
 		pane, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:openclaw")
 		audit, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "cat", "/workspace/.engram/audit.jsonl")
 		state, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "cat", "/workspace/.engram/state.json")
+		diagnostics := openClawTerminalDiagnostics(ctx, tmp, testEnv, container)
 		telegram.mu.Lock()
 		outbound := append([]telegramOutbound(nil), telegram.outbound...)
 		telegram.mu.Unlock()
-		t.Fatalf("OpenClaw never reached the declared provider\npane:\n%s\nEngram state:\n%s\nEngram audit:\n%s\nTelegram outbound: %#v", pane, state, audit, outbound)
+		t.Fatalf("OpenClaw never reached the declared provider\npane:\n%s\nEngram state:\n%s\nEngram audit:\n%s\nTerminal boundary:\n%s\nTelegram outbound: %#v", pane, state, audit, diagnostics, outbound)
 	}
 	waitFor(t, 30*time.Second, func() (bool, string) {
 		out, err := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:openclaw")
@@ -162,7 +157,8 @@ func writeEngramOpenClawDeclaration(t *testing.T, path, world, image, engram, op
 		t.Fatal(err)
 	}
 	tuiShell := strings.Join(openClawEnvCommand("/usr/local/bin/openclaw", "tui", "--url", "ws://127.0.0.1:18789", "--token", openClawGatewayToken, "--session", "engram-composition", "--timeout-ms", "20000"), " ")
-	tmuxCommand := []string{"/bin/sh", "-c", "until /usr/bin/curl --fail --silent http://127.0.0.1:18789/readyz >/dev/null; do sleep 0.1; done; /usr/bin/tmux new-session -d -x 120 -y 40 -s main -n openclaw " + shellQuote(tuiShell) + " && exec /usr/bin/tmux wait-for kenogram-service-stop"}
+	tracedTUI := "/usr/bin/strace -ff -tt -xx -s 256 -e trace=read -e read=0 -o /workspace/openclaw-stdin.trace " + tuiShell
+	tmuxCommand := []string{"/bin/sh", "-c", "until /usr/bin/curl --fail --silent http://127.0.0.1:18789/readyz >/dev/null; do sleep 0.1; done; cd /workspace && /usr/bin/tmux -vv new-session -d -x 120 -y 40 -s main -n openclaw " + shellQuote(tracedTUI) + " && exec /usr/bin/tmux wait-for kenogram-service-stop"}
 	tmuxJSON, err := json.Marshal(tmuxCommand)
 	if err != nil {
 		t.Fatal(err)
@@ -229,6 +225,49 @@ func waitForTmuxTarget(t *testing.T, ctx context.Context, dir string, env []stri
 		out, err := runResult(ctx, dir, env, "podman", "exec", container, "tmux", "display-message", "-p", "-t", target, "#{pane_id}")
 		return err == nil && strings.HasPrefix(strings.TrimSpace(out), "%"), out
 	})
+}
+
+func assertOpenClawCompositionVersions(t *testing.T, ctx context.Context, dir string, env []string, container, openClawVersion string) {
+	t.Helper()
+	command := `printf 'tmux='; tmux -V; printf 'openclaw='; /usr/local/bin/openclaw --version; printf 'pi-tui='; node -p "require('/app/node_modules/@earendil-works/pi-tui/package.json').version"`
+	out := run(t, ctx, dir, env, "podman", "exec", container, "/bin/sh", "-c", command)
+	if !strings.Contains(out, "openclaw="+openClawVersion) || !strings.Contains(out, "pi-tui=0.78.0") {
+		t.Fatalf("unexpected composition versions:\n%s", out)
+	}
+	t.Logf("composition versions:\n%s", strings.TrimSpace(out))
+}
+
+func openClawTerminalDiagnostics(ctx context.Context, dir string, env []string, container string) string {
+	command := `
+printf '%s\n' '--- versions ---'
+tmux -V
+/usr/local/bin/openclaw --version
+printf 'pi-tui '
+node -p "require('/app/node_modules/@earendil-works/pi-tui/package.json').version"
+printf '%s\n' '--- tmux options ---'
+tmux show-options -g | grep -E '^(default-terminal|extended-keys|extended-keys-format|terminal-features|terminal-overrides)' || true
+tmux display-message -p -t main:openclaw 'pane=#{pane_id} tty=#{pane_tty} term=#{client_termname} features=#{client_termfeatures}' || true
+printf '%s\n' '--- TUI process terminal state ---'
+for pid in $(pgrep -f 'openclaw.*tui'); do
+  tty=$(readlink "/proc/$pid/fd/0" 2>/dev/null || true)
+  case "$tty" in
+    /dev/pts/*)
+      printf 'pid=%s stdin=%s\n' "$pid" "$tty"
+      tr '\000' '\n' < "/proc/$pid/environ" | grep -E '^(TERM|COLORTERM|TERM_PROGRAM|KITTY_WINDOW_ID|TMUX)=' || true
+      stty -a < "/proc/$pid/fd/0" || true
+      ;;
+  esac
+done
+printf '%s\n' '--- OpenClaw stdin reads ---'
+grep -h 'read(0,' /workspace/openclaw-stdin.trace* 2>/dev/null | tail -40 || true
+printf '%s\n' '--- tmux verbose input/key excerpts ---'
+grep -Ehi 'key|input|extended|0d|Enter' /workspace/tmux-*.log 2>/dev/null | tail -80 || true
+`
+	out, err := runResult(ctx, dir, env, "podman", "exec", container, "/bin/sh", "-c", command)
+	if err != nil {
+		return fmt.Sprintf("diagnostic command failed: %v\n%s", err, out)
+	}
+	return out
 }
 
 func waitForEngramPolling(t *testing.T, fixture *telegramFixture, timeout time.Duration) {
