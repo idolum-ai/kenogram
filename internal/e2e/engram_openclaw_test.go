@@ -231,7 +231,7 @@ func assertOpenClawCompositionVersions(t *testing.T, ctx context.Context, dir st
 	t.Helper()
 	command := `printf 'tmux='; tmux -V; printf 'openclaw='; /usr/local/bin/openclaw --version; printf 'pi-tui='; node -p "require('/app/node_modules/@earendil-works/pi-tui/package.json').version"`
 	out := run(t, ctx, dir, env, "podman", "exec", container, "/bin/sh", "-c", command)
-	if !strings.Contains(out, "openclaw="+openClawVersion) || !strings.Contains(out, "pi-tui=0.78.0") {
+	if !strings.Contains(out, "openclaw=OpenClaw "+openClawVersion) || !strings.Contains(out, "pi-tui=0.78.0") {
 		t.Fatalf("unexpected composition versions:\n%s", out)
 	}
 	t.Logf("composition versions:\n%s", strings.TrimSpace(out))
