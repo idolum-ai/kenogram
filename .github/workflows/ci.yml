@@ -55,7 +55,8 @@ jobs:
           cache: false
       - name: Native Apple launcher contract
         run: |
-          go test ./internal/backend -run '^TestAppleMachine' -count=1
+          go test ./internal/backend -run '^(TestAppleMachine|TestExecRunner)' -count=1
+          go test ./cmd/kenogram -run '^TestLauncher' -count=1
           go build -buildvcs=false -o bin/kenogram ./cmd/kenogram
           file bin/kenogram | grep -F 'arm64'
           ./bin/kenogram version

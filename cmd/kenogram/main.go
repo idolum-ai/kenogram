@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/idolum-ai/kenogram/internal/app"
@@ -28,8 +30,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printHelp(stderr)
 		return 2
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	if args[0] == backend.AppleMachineBridgeCommand {
+		if runtime.GOOS != "linux" {
+			fmt.Fprintln(stderr, "runtime: the Apple machine bridge is Linux-only")
+			return 1
+		}
+		decoded, err := backend.DecodeAppleMachineArguments(args[1:])
+		if err != nil {
+			fmt.Fprintln(stderr, "runtime: decode Apple machine arguments:", err)
+			return 1
+		}
+		return run(decoded, stdout, stderr)
+	}
 	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
 		fmt.Fprintln(stdout, version.String())
 		return 0
@@ -38,6 +50,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printHelp(stdout)
 		return 0
 	}
+	ctx, stop := operationContext(context.Background())
+	defer stop()
 	launcher, err := backend.AppleMachineFromEnvironment(runtime.GOOS, os.Getenv, nil)
 	if err != nil {
 		fmt.Fprintln(stderr, "runtime:", err)
@@ -45,8 +59,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if launcher != nil {
 		if err := launcher.Launch(ctx, args); err != nil {
-			fmt.Fprintln(stderr, "runtime:", err)
-			return 1
+			return reportLauncherError(err, stderr)
 		}
 		return 0
 	}
@@ -78,6 +91,37 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printHelp(stderr)
 		return 2
 	}
+}
+
+func operationContext(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	signals := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case received := <-signals:
+			cancel(&backend.SignalCause{Signal: received})
+		case <-done:
+		}
+	}()
+	var once sync.Once
+	return ctx, func() {
+		once.Do(func() {
+			signal.Stop(signals)
+			close(done)
+			cancel(context.Canceled)
+		})
+	}
+}
+
+func reportLauncherError(err error, stderr io.Writer) int {
+	var remote *backend.RemoteExitError
+	if errors.As(err, &remote) {
+		return remote.Code
+	}
+	fmt.Fprintln(stderr, "runtime:", err)
+	return 1
 }
 
 var newApp = func(stdout io.Writer) (*app.App, error) {

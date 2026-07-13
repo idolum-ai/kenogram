@@ -18,9 +18,11 @@ Do not add third-party Go dependencies, generic runtime abstractions, or new
 integration fixtures unless they prove a boundary not already covered. Report
 security issues privately as described in [`.github/SECURITY.md`](.github/SECURITY.md).
 
-`make check` cross-compiles the explicit Apple container-machine launcher. That
-is a compile-time and argv proof, not a substitute for the machine-only proof
-matrix in [`docs/apple-container-machine.md`](docs/apple-container-machine.md).
+`make check` cross-compiles the explicit Apple container-machine launcher and
+proves its shell-inert argv envelope, terminal flags, exit statuses, and bounded
+signal escalation. Those are transport-contract proofs, not a substitute for
+the machine-only matrix in
+[`docs/apple-container-machine.md`](docs/apple-container-machine.md).
 
 Release preparation uses a short-lived `release/vX.Y.Z` branch and the process
 in [`docs/release-strategy.md`](docs/release-strategy.md). Maintainers review

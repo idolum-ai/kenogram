@@ -11,6 +11,9 @@ rg -q 'candidate-reviewed tree' docs/release-strategy.md
 rg -q 'scripts/install-release.sh' README.md docs/release-strategy.md
 rg -q 'macos-26' .github/workflows/ci.yml docs/apple-container-machine.md
 rg -q 'do not support nested virtualization' docs/apple-container-machine.md
+rg -q 'shell-inert argv' README.md CONTRIBUTING.md docs/apple-container-machine.md requirements/INDEX.md
+rg -q 'signal forwarding' CONTRIBUTING.md docs/apple-container-machine.md requirements/INDEX.md
+rg -q 'testRunCommandInShell' docs/apple-container-machine.md
 for evidence in \
   'make e2e-release' \
   'make e2e-openclaw' \

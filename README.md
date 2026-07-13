@@ -57,10 +57,11 @@ in CI and intentionally fails rather than weakening isolation when those host
 prerequisites are absent.
 
 An [experimental Apple container-machine launcher](docs/apple-container-machine.md)
-can forward the complete Linux operation from macOS into an operator-managed
-machine. It preserves the Podman checks rather than treating Apple's container
-CLI as an equivalent isolation backend. The launcher is unit-tested and
-cross-compiled, but still needs real Apple-silicon proof before release support.
+can carry an encoded Linux operation from macOS into an operator-managed
+machine. It preserves argv across Apple's shell-mediated machine command and
+retains the Podman checks rather than treating Apple's container CLI as an
+equivalent isolation backend. The launcher is unit-tested and cross-compiled,
+but still needs real Apple-silicon proof before release support.
 
 `make e2e` runs the release-pinned composition proofs. Kenogram isolates
 OpenClaw `2026.6.11` with deterministic fake Telegram and model services,
