@@ -341,9 +341,11 @@ func assertHermesIsolation(t *testing.T, ctx context.Context, dir string, env []
 
 func runHermesQuery(t *testing.T, ctx context.Context, dir string, env []string, container string, provider *observedProvider, marker string) {
 	t.Helper()
-	args := append([]string{"exec", container}, hermesEnvCommand("/opt/hermes/.venv/bin/hermes", "chat", "--query", "Reply with the proof marker and preserve this request marker: "+marker, "--quiet", "--ignore-rules")...)
+	args := append([]string{"exec", container}, hermesEnvCommand("/opt/hermes/.venv/bin/hermes", "chat", "--cli", "--query", "Reply with the proof marker and preserve this request marker: "+marker, "--quiet", "--ignore-rules")...)
 	out := run(t, ctx, dir, env, "podman", args...)
-	provider.waitObservedContaining(t, 45*time.Second, marker)
+	if !provider.observedContainingWithin(45*time.Second, marker) {
+		t.Fatalf("Hermes direct query did not reach the provider:\n%s", out)
+	}
 	if !strings.Contains(out, hermesProof) {
 		t.Fatalf("Hermes direct query output did not contain proof marker:\n%s", out)
 	}
