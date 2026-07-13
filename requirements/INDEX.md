@@ -47,11 +47,11 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
   isolated Hermes TUI, plus attachment ingestion into its workspace; `make e2e` runs all five.
 - `make e2e-telegram-canary` is an operator-assisted, protected-environment
   proof of the real Telegram path and is never a pull-request gate.
-- Container-heavy E2Es lease random world names, verify container labels and
-  immutable image identities before cleanup, never force image removal, collect
-  cleanup failures, and reject undersized rootless Podman `vfs` stores before
-  pulling. Unmeasured `vfs` lanes require an explicit local floor; unit contracts
-  use fake Podman responses and capacity probes.
+- Container-heavy E2Es lease random world names, snapshot image references and
+  IDs, verify immutable identities before removal or exact untagging, never
+  force image removal, collect bounded cleanup failures, and reject undersized
+  rootless Podman `vfs` stores before pulling. Unmeasured `vfs` lanes require an
+  explicit local floor; unit contracts use fake responses and capacity probes.
 - `make architecture` checks required files and package dependency direction.
 - `make stdlib-only` rejects third-party Go modules.
 - `make check` runs the fast local quality gate; runtime proofs remain separate.

@@ -22,9 +22,15 @@ import (
 const (
 	vfsMinimumFreeHermesGiB = uint64(96)
 	vfsMinimumFreeEnv       = "KENOGRAM_E2E_VFS_MIN_FREE_GIB"
-	cleanupCommandTimeout   = 15 * time.Second
 	imageClaimTimeout       = 30 * time.Second
+	cleanupOverallTimeout   = 2 * time.Minute
 )
+
+var defaultCleanupTimeouts = cleanupTimeouts{
+	observation:     10 * time.Second,
+	containerRemove: 30 * time.Second,
+	imageRemove:     90 * time.Second,
+}
 
 type containerE2ELane string
 
@@ -50,9 +56,10 @@ type containerStorageInfo struct {
 }
 
 type imageLease struct {
-	reference     string
-	existedBefore bool
-	claimedID     string
+	reference       string
+	existedBefore   bool
+	claimedID       string
+	idExistedBefore bool
 }
 
 type containerLease struct {
@@ -62,9 +69,16 @@ type containerLease struct {
 }
 
 type e2eContainerResources struct {
-	runner     podmanRunner
-	containers []containerLease
-	images     []imageLease
+	runner              podmanRunner
+	preexistingImageIDs map[string]struct{}
+	containers          []containerLease
+	images              []imageLease
+}
+
+type cleanupTimeouts struct {
+	observation     time.Duration
+	containerRemove time.Duration
+	imageRemove     time.Duration
 }
 
 func prepareContainerE2E(t *testing.T, ctx context.Context, lane containerE2ELane) *e2eContainerResources {
@@ -95,7 +109,11 @@ func prepareContainerE2E(t *testing.T, ctx context.Context, lane containerE2ELan
 		t.Logf("container storage preflight rootless=%t driver=%s", info.Rootless, info.GraphDriverName)
 	}
 
-	resources := &e2eContainerResources{runner: runner}
+	preexistingImageIDs, err := snapshotImageIDs(ctx, runner)
+	if err != nil {
+		t.Fatalf("snapshot Podman image identities before E2E: %v", err)
+	}
+	resources := &e2eContainerResources{runner: runner, preexistingImageIDs: preexistingImageIDs}
 	registerContainerCleanup(t, resources)
 	return resources
 }
@@ -124,7 +142,7 @@ func validateContainerStorageInfo(info containerStorageInfo) error {
 func registerContainerCleanup(t *testing.T, resources *e2eContainerResources) {
 	t.Helper()
 	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupOverallTimeout)
 		defer cancel()
 		if cleanupErr := resources.cleanup(cleanupCtx); cleanupErr != nil {
 			// Cleanup is a separate test error, so it remains visible without
@@ -180,6 +198,7 @@ func (r *e2eContainerResources) claimImage(t *testing.T, ctx context.Context, re
 			t.Fatalf("claim acquired image %q: %v", reference, err)
 		}
 		lease.claimedID = identity
+		_, lease.idExistedBefore = r.preexistingImageIDs[identity]
 		return
 	}
 	t.Fatalf("claim untracked image %q", reference)
@@ -216,6 +235,7 @@ func (r *e2eContainerResources) claimAppearedImages(ctx context.Context, referen
 			continue
 		}
 		lease.claimedID = identity
+		_, lease.idExistedBefore = r.preexistingImageIDs[identity]
 	}
 	return errors.Join(claimErrors...)
 }
@@ -255,19 +275,24 @@ func runImageAcquisition(t *testing.T, ctx context.Context, resources *e2eContai
 }
 
 func (r *e2eContainerResources) cleanup(ctx context.Context) error {
-	return r.cleanupWithTimeout(ctx, cleanupCommandTimeout)
+	return r.cleanupWithTimeouts(ctx, defaultCleanupTimeouts)
 }
 
-func (r *e2eContainerResources) cleanupWithTimeout(ctx context.Context, commandTimeout time.Duration) error {
+func (r *e2eContainerResources) cleanupWithTimeouts(ctx context.Context, timeouts cleanupTimeouts) error {
 	var cleanupErrors []error
-	runner := func(_ context.Context, args ...string) podmanCommandResult {
-		commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
-		defer cancel()
-		return r.runner(commandCtx, args...)
+	timedRunner := func(commandTimeout time.Duration) podmanRunner {
+		return func(_ context.Context, args ...string) podmanCommandResult {
+			commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+			defer cancel()
+			return r.runner(commandCtx, args...)
+		}
 	}
+	observationRunner := timedRunner(timeouts.observation)
+	containerRemoveRunner := timedRunner(timeouts.containerRemove)
+	imageRemoveRunner := timedRunner(timeouts.imageRemove)
 	for index := len(r.containers) - 1; index >= 0; index-- {
 		lease := r.containers[index]
-		exists, err := podmanObjectExists(ctx, runner, "container", lease.name)
+		exists, err := podmanObjectExists(ctx, observationRunner, "container", lease.name)
 		if err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("inspect tracked container %q: %w", lease.name, err))
 			continue
@@ -275,7 +300,7 @@ func (r *e2eContainerResources) cleanupWithTimeout(ctx context.Context, commandT
 		if !exists {
 			continue
 		}
-		identity, labels, err := podmanContainerIdentity(ctx, runner, lease.name)
+		identity, labels, err := podmanContainerIdentity(ctx, observationRunner, lease.name)
 		if err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("verify tracked container %q: %w", lease.name, err))
 			continue
@@ -285,7 +310,7 @@ func (r *e2eContainerResources) cleanupWithTimeout(ctx context.Context, commandT
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("preserve container %q: ownership labels do not match world %q generation %s", lease.name, lease.world, wantGeneration))
 			continue
 		}
-		result := runner(ctx, "rm", "--force", "--ignore", identity)
+		result := containerRemoveRunner(ctx, "rm", "--force", "--ignore", identity)
 		if result.err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove container %q (%s): %w", lease.name, identity, podmanCommandError(result)))
 		}
@@ -297,7 +322,7 @@ func (r *e2eContainerResources) cleanupWithTimeout(ctx context.Context, commandT
 		if lease.existedBefore {
 			continue
 		}
-		exists, err := podmanImageExists(ctx, runner, lease.reference)
+		exists, err := podmanImageExists(ctx, observationRunner, lease.reference)
 		if err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("inspect test-owned image %q: %w", lease.reference, err))
 			continue
@@ -309,7 +334,7 @@ func (r *e2eContainerResources) cleanupWithTimeout(ctx context.Context, commandT
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("preserve unclaimed image %q: it appeared after the pre-test snapshot", lease.reference))
 			continue
 		}
-		identity, err := podmanImageIdentity(ctx, runner, lease.reference)
+		identity, err := podmanImageIdentity(ctx, observationRunner, lease.reference)
 		if err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("verify test-acquired image %q: %w", lease.reference, err))
 			continue
@@ -318,12 +343,34 @@ func (r *e2eContainerResources) cleanupWithTimeout(ctx context.Context, commandT
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("preserve image %q: identity changed from %s to %s", lease.reference, lease.claimedID, identity))
 			continue
 		}
-		result := runner(ctx, "image", "rm", "--ignore", "--no-prune", lease.claimedID)
+		var result podmanCommandResult
+		if lease.idExistedBefore {
+			// The test added only this name to cached content. Supplying both
+			// immutable ID and reference makes a concurrent rebind fail safely.
+			result = imageRemoveRunner(ctx, "image", "untag", lease.claimedID, lease.reference)
+		} else {
+			result = imageRemoveRunner(ctx, "image", "rm", "--ignore", "--no-prune", lease.claimedID)
+		}
 		if result.err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove test-owned image %q: %w", lease.reference, podmanCommandError(result)))
 		}
 	}
 	return errors.Join(cleanupErrors...)
+}
+
+func snapshotImageIDs(ctx context.Context, runner podmanRunner) (map[string]struct{}, error) {
+	result := runner(ctx, "image", "ls", "--all", "--no-trunc", "--quiet")
+	if result.err != nil {
+		return nil, podmanCommandError(result)
+	}
+	identities := make(map[string]struct{})
+	for _, line := range strings.Split(result.output, "\n") {
+		identity := strings.TrimSpace(line)
+		if identity != "" {
+			identities[identity] = struct{}{}
+		}
+	}
+	return identities, nil
 }
 
 func execPodman(ctx context.Context, args ...string) podmanCommandResult {

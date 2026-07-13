@@ -211,6 +211,58 @@ func TestFailedAcquisitionClaimsAppearedBaseForCleanup(t *testing.T) {
 	}
 }
 
+func TestContainerCleanupUntagsReferenceWhenImageIDPredatesTest(t *testing.T) {
+	fake := &scriptedPodman{responses: map[string][]podmanCommandResult{
+		"image\x00exists\x00new-tag": {
+			{exitCode: 1, err: errors.New("reference absent before build")},
+			{exitCode: 0},
+			{exitCode: 0},
+		},
+		"image\x00inspect\x00new-tag": {
+			imageInspect("sha256:cached"),
+			imageInspect("sha256:cached"),
+		},
+		"image\x00untag\x00sha256:cached\x00new-tag": {{exitCode: 0}},
+	}}
+	resources := &e2eContainerResources{
+		runner:              fake.run,
+		preexistingImageIDs: map[string]struct{}{"sha256:cached": {}},
+	}
+	resources.trackImage(t, context.Background(), "new-tag")
+	if err := resources.claimAppearedImages(context.Background(), "new-tag"); err != nil {
+		t.Fatal(err)
+	}
+	if !resources.images[0].idExistedBefore {
+		t.Fatal("cached image identity was not preserved in lease")
+	}
+	if err := resources.cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantLast := "image\x00untag\x00sha256:cached\x00new-tag"
+	if got := fake.calls[len(fake.calls)-1]; got != wantLast {
+		t.Fatalf("cached image cleanup = %q, want %q", got, wantLast)
+	}
+	for _, call := range fake.calls {
+		if strings.HasPrefix(call, "image\x00rm") {
+			t.Fatalf("cached image content was removed: %q", call)
+		}
+	}
+}
+
+func TestSnapshotImageIDsDeduplicatesFullIdentities(t *testing.T) {
+	fake := &scriptedPodman{responses: map[string][]podmanCommandResult{
+		"image\x00ls\x00--all\x00--no-trunc\x00--quiet": {{output: "sha256:one\nsha256:two\nsha256:one\n"}},
+	}}
+	identities, err := snapshotImageIDs(context.Background(), fake.run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct{}{"sha256:one": {}, "sha256:two": {}}
+	if !reflect.DeepEqual(identities, want) {
+		t.Fatalf("image identity snapshot = %#v, want %#v", identities, want)
+	}
+}
+
 func TestContainerCleanupUsesReverseOrderAndImmutableIDs(t *testing.T) {
 	fake := &scriptedPodman{responses: map[string][]podmanCommandResult{
 		"container\x00exists\x00kenogram-world-g2":  {{exitCode: 0}},
@@ -289,13 +341,71 @@ func TestContainerCleanupPerCommandTimeoutLeavesLaterWork(t *testing.T) {
 		{name: "kenogram-world-g1", world: "world", generation: 1},
 		{name: "kenogram-world-g2", world: "world", generation: 2},
 	}}
-	err := resources.cleanupWithTimeout(context.Background(), 5*time.Millisecond)
+	err := resources.cleanupWithTimeouts(context.Background(), cleanupTimeouts{
+		observation:     5 * time.Millisecond,
+		containerRemove: 20 * time.Millisecond,
+		imageRemove:     30 * time.Millisecond,
+	})
 	if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
 		t.Fatalf("cleanup error = %v", err)
 	}
 	wantLast := "container\x00exists\x00kenogram-world-g1"
 	if got := calls[len(calls)-1]; got != wantLast {
 		t.Fatalf("cleanup did not continue after timeout; last call = %q", got)
+	}
+}
+
+func TestContainerCleanupUsesOperationSpecificTimeouts(t *testing.T) {
+	var observation, containerRemoval, imageRemoval time.Duration
+	runner := func(ctx context.Context, args ...string) podmanCommandResult {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("cleanup command has no deadline")
+		}
+		remaining := time.Until(deadline)
+		call := strings.Join(args, "\x00")
+		switch {
+		case call == "rm\x00--force\x00--ignore\x00container-id":
+			containerRemoval = remaining
+			return podmanCommandResult{}
+		case strings.HasPrefix(call, "image\x00rm"):
+			imageRemoval = remaining
+			return podmanCommandResult{}
+		default:
+			observation = remaining
+		}
+		switch call {
+		case "container\x00exists\x00kenogram-world-g1", "image\x00exists\x00base":
+			return podmanCommandResult{exitCode: 0}
+		case "container\x00inspect\x00kenogram-world-g1":
+			return containerInspect("container-id", "world", 1)
+		case "image\x00inspect\x00base":
+			return imageInspect("sha256:base")
+		default:
+			return podmanCommandResult{exitCode: 125, err: errors.New("unexpected command")}
+		}
+	}
+	resources := &e2eContainerResources{
+		runner:     runner,
+		containers: []containerLease{{name: "kenogram-world-g1", world: "world", generation: 1}},
+		images:     []imageLease{{reference: "base", claimedID: "sha256:base"}},
+	}
+	err := resources.cleanupWithTimeouts(context.Background(), cleanupTimeouts{
+		observation:     50 * time.Millisecond,
+		containerRemove: 500 * time.Millisecond,
+		imageRemove:     2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation <= 0 || observation > 100*time.Millisecond {
+		t.Fatalf("observation deadline = %v", observation)
+	}
+	if containerRemoval < 300*time.Millisecond || containerRemoval > 600*time.Millisecond {
+		t.Fatalf("container removal deadline = %v", containerRemoval)
+	}
+	if imageRemoval < 1500*time.Millisecond || imageRemoval > 2100*time.Millisecond {
+		t.Fatalf("image removal deadline = %v", imageRemoval)
 	}
 }
 

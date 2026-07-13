@@ -44,9 +44,13 @@ replay.
 Every container-heavy proof uses a random world identity and refuses a
 pre-existing container name. Cleanup verifies Kenogram's world/generation
 labels, removes containers by immutable ID newest-first, and preserves label
-mismatches. Images absent from the pre-test snapshot are removed only after the
-test claims and re-verifies their immutable ID. Image removal is never forced;
-an image used by another workload survives as a visible cleanup failure.
+mismatches. The pre-test snapshot includes both references and the complete set
+of image IDs. Newly materialized IDs are removed only after re-verification; if
+the test merely added a tag to cached content, cleanup untags that exact ID/name
+association. Image removal is never forced, so content used by another workload
+survives as a visible cleanup failure. Observation, container-removal, and
+image-removal commands receive 10-, 30-, and 90-second limits respectively
+inside a two-minute overall cleanup budget.
 
 Before artifact downloads or image builds, the Hermes lanes require 96 GiB free
 on rootless Podman `vfs`. This evidence-backed floor adds transient headroom to
