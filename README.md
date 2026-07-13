@@ -49,12 +49,19 @@ their realization, without claiming to implement a morphogrammatic calculus.
 [`docs/kenogrammatics.md`](docs/kenogrammatics.md) records that lineage, the
 engineering analogy, and its limits.
 
-Kenogram is pre-release, Linux-only, and uses the Go standard library
-exclusively. It requires
+Kenogram is pre-release and uses the Go standard library exclusively. Its
+proven runtime is Linux; it requires
 rootless Podman on cgroups v2, `nsenter`, and configured subordinate UID/GID
 ranges. `make integration` verifies the real namespace boundary; it is mandatory
 in CI and intentionally fails rather than weakening isolation when those host
 prerequisites are absent.
+
+An [experimental Apple container-machine launcher](docs/apple-container-machine.md)
+can carry an encoded Linux operation from macOS into an operator-managed
+machine. It preserves argv across Apple's shell-mediated machine command and
+retains the Podman checks rather than treating Apple's container CLI as an
+equivalent isolation backend. The launcher is unit-tested and cross-compiled,
+but still needs real Apple-silicon proof before release support.
 
 `make e2e` runs the release-pinned composition proofs. Kenogram isolates
 OpenClaw `2026.6.11` with deterministic fake Telegram and model services,

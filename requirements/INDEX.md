@@ -30,6 +30,7 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
 | Network | Multi-megabyte CONNECT, per-connection resolution, removal/expiry closure, declaration reconciliation, Git/TLS fixture, and rootless integration | Full ten-invariant replay after every adoption path |
 | Lifecycle | Durable rollback/commit transition, persisted-runtime 14-boundary SIGKILL recovery-only matrix, replay-safe service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Syscall-granular power-loss testing and exhaustive non-`up` action failpoints |
 | History | Tamper/truncated-tail unit tests plus E2E tombstone outcomes | Power-loss testing on multiple filesystems |
+| Experimental Apple transport | Canonical shell-inert argv envelope, explicit stdin/TTY flags, remote exit-status preservation, graceful signal forwarding, Darwin/arm64 cross-build, and native macOS launcher smoke test | Real Apple machine argv/TTY/signal proof, nested rootless Podman, and the full lifecycle/network matrix |
 
 ## Executable checks
 
