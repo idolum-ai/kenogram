@@ -283,27 +283,33 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 	}
 	d := docs[0]
 	e := Evidence{Name: strings.TrimPrefix(d.Name, "/"), Running: d.State.Running, PID: d.State.Pid, NetworkMode: d.HostConfig.NetworkMode, IPCMode: d.HostConfig.IpcMode, PIDMode: d.HostConfig.PidMode, UTSMode: d.HostConfig.UTSMode, UserNSMode: d.HostConfig.UsernsMode, User: d.Config.User, Hostname: d.Config.Hostname, WorkingDir: d.Config.WorkingDir, CapDrop: d.HostConfig.CapDrop, BoundingCaps: d.BoundingCaps, SecurityOpt: d.HostConfig.SecurityOpt, Devices: len(d.HostConfig.Devices), Labels: d.Config.Labels, Memory: d.HostConfig.Memory, NanoCPUs: d.HostConfig.NanoCPUs, PIDs: d.HostConfig.PidsLimit}
-	if e.BoundingCaps == nil && e.PID > 0 {
-		e.BoundingCaps, err = readProcBoundingCaps(e.PID)
+	if e.Running {
+		if e.PID <= 0 {
+			return Evidence{}, fmt.Errorf("runtime holder PID is absent")
+		}
+		if e.BoundingCaps == nil {
+			e.BoundingCaps, err = readProcBoundingCaps(e.PID)
+			if err != nil {
+				return Evidence{}, fmt.Errorf("read runtime capability evidence: %w", err)
+			}
+		}
+		status, statusErr := p.ReadProcStatus(e.PID)
+		if statusErr != nil {
+			return Evidence{}, fmt.Errorf("read runtime seccomp evidence: %w", statusErr)
+		}
+		e.SeccompMode, err = parseProcSeccomp(status)
 		if err != nil {
-			return Evidence{}, fmt.Errorf("read runtime capability evidence: %w", err)
+			return Evidence{}, fmt.Errorf("read runtime seccomp evidence: %w", err)
 		}
 	}
-	if e.PID <= 0 {
-		return Evidence{}, fmt.Errorf("runtime holder PID is absent")
-	}
-	status, err := p.ReadProcStatus(e.PID)
-	if err != nil {
-		return Evidence{}, fmt.Errorf("read runtime seccomp evidence: %w", err)
-	}
-	e.SeccompMode, err = parseProcSeccomp(status)
-	if err != nil {
-		return Evidence{}, fmt.Errorf("read runtime seccomp evidence: %w", err)
-	}
 	for _, m := range d.Mounts {
-		identity, identityErr := p.MountIdentity(e.PID, m.Source, m.Destination)
-		if identityErr != nil {
-			return Evidence{}, fmt.Errorf("verify mount identity at %q: %w", m.Destination, identityErr)
+		identity := false
+		if e.Running {
+			var identityErr error
+			identity, identityErr = p.MountIdentity(e.PID, m.Source, m.Destination)
+			if identityErr != nil {
+				return Evidence{}, fmt.Errorf("verify mount identity at %q: %w", m.Destination, identityErr)
+			}
 		}
 		e.Mounts = append(e.Mounts, EvidenceMount{Source: m.Source, Destination: m.Destination, RW: m.RW, Mode: m.Mode, Options: m.Options, IdentityVerified: identity})
 	}
