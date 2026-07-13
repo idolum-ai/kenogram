@@ -85,7 +85,7 @@ USER node
 		_ = exec.CommandContext(cleanupCtx, "podman", "rmi", "--force", image).Run()
 	})
 
-	writeOpenClawConfig(t, openClawConfig, doorHost, providerPort)
+	writeOpenClawConfig(t, openClawConfig, doorHost, providerPort, "")
 	writeEngramCompositionEnv(t, engramEnv, token, "https://api.telegram.org", allowedUserID, chatID)
 	writeEngramOpenClawDeclaration(t, declaration, world, image+"@"+imageDigest, engram, openClawConfig, engramEnv, doorHost, providerPort, "api.telegram.org", 443)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)

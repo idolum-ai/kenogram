@@ -65,6 +65,10 @@ func newTelegramFixture(t *testing.T, host string) *telegramFixture {
 }
 
 func (f *telegramFixture) enqueueText(text string) int {
+	return f.enqueueTextFrom(telegramFixtureUser, text)
+}
+
+func (f *telegramFixture) enqueueTextFrom(userID int64, text string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	messageID := f.nextUpdateID
@@ -72,8 +76,9 @@ func (f *telegramFixture) enqueueText(text string) int {
 		"update_id": f.nextUpdateID,
 		"message": map[string]any{
 			"message_id": messageID,
-			"from":       map[string]any{"id": telegramFixtureUser, "username": "kenogram_fixture"},
-			"chat":       map[string]any{"id": telegramFixtureUser, "type": "private"},
+			"date":       1_700_000_000,
+			"from":       map[string]any{"id": userID, "username": "kenogram_fixture"},
+			"chat":       map[string]any{"id": userID, "type": "private", "first_name": "Kenogram"},
 			"text":       text,
 		},
 	})
@@ -90,8 +95,9 @@ func (f *telegramFixture) enqueueDocument() int {
 		"update_id": f.nextUpdateID,
 		"message": map[string]any{
 			"message_id": messageID,
+			"date":       1_700_000_000,
 			"from":       map[string]any{"id": telegramFixtureUser, "username": "kenogram_fixture"},
-			"chat":       map[string]any{"id": telegramFixtureUser, "type": "private"},
+			"chat":       map[string]any{"id": telegramFixtureUser, "type": "private", "first_name": "Kenogram"},
 			"document": map[string]any{
 				"file_id":        "fixture-file-id",
 				"file_unique_id": "fixture-file-unique-id",
@@ -168,6 +174,13 @@ func (f *telegramFixture) serveHTTP(response http.ResponseWriter, request *http.
 	f.methodRequests[method]++
 	f.mu.Unlock()
 	switch method {
+	case "getMe":
+		writeTelegramResult(response, map[string]any{
+			"id":         7_770_001,
+			"is_bot":     true,
+			"first_name": "Kenogram Fixture",
+			"username":   "kenogram_fixture_bot",
+		})
 	case "getUpdates":
 		f.serveUpdates(response, request)
 	case "getFile":
@@ -176,7 +189,7 @@ func (f *telegramFixture) serveHTTP(response http.ResponseWriter, request *http.
 			"file_size": len(telegramFixtureFile),
 			"file_path": "documents/proof.txt",
 		})
-	case "setMyCommands", "pinChatMessage", "unpinChatMessage", "deleteMessage", "answerCallbackQuery":
+	case "deleteWebhook", "deleteMyCommands", "setMyCommands", "pinChatMessage", "unpinChatMessage", "deleteMessage", "answerCallbackQuery":
 		writeTelegramResult(response, true)
 	default:
 		f.serveOutbound(response, request, method)

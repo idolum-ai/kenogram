@@ -64,7 +64,7 @@ e2e-release:
 	KENOGRAM_E2E=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/e2e -run TestEngramReleaseInsideKenogram -count=1 -timeout=10m -v
 
 e2e-openclaw:
-	KENOGRAM_OPENCLAW_E2E=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/e2e -run TestOpenClawTUIInsideKenogram -count=1 -timeout=16m -v
+	KENOGRAM_OPENCLAW_E2E=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/e2e -run TestOpenClawInsideKenogram -count=1 -timeout=16m -v
 
 e2e-composition:
 	KENOGRAM_ENGRAM_OPENCLAW_E2E=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/e2e -run TestEngramControlsOpenClawInsideKenogram -count=1 -timeout=16m -v

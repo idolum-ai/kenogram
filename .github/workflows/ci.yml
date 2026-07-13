@@ -88,7 +88,7 @@ jobs:
         env:
           KENOGRAM_ENGRAM_ARCHIVE: /tmp/engram-v0.3.0-linux-amd64.tar.gz
           KENOGRAM_VERIFY_UPSTREAM: ${{ github.event_name == 'schedule' && '1' || '0' }}
-      - name: OpenClaw isolation and TUI E2E
+      - name: OpenClaw isolation, native Telegram, and TUI E2E
         run: make e2e-openclaw
         env:
           KENOGRAM_OPENCLAW_ARCHIVE: /tmp/openclaw-2026.6.11.tgz
