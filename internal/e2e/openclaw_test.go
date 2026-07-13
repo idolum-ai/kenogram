@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -77,6 +76,7 @@ func TestOpenClawInsideKenogram(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 14*time.Minute)
 	defer cancel()
+	resources := prepareContainerE2E(t, ctx)
 	doorHost := hostDoorIPv4(t)
 	provider := newOpenAIProvider(t, doorHost)
 	defer provider.Close()
@@ -87,6 +87,7 @@ func TestOpenClawInsideKenogram(t *testing.T) {
 	root := repositoryRoot(t)
 	tmp := t.TempDir()
 	lock := readOpenClawLock(t)
+	resources.trackImage(t, ctx, lock.Image)
 	t.Logf("evidence openclaw_version=%s npm_sha256=%s image=%s", lock.Version, lock.NPMSHA256, lock.Image)
 	verifyOpenClawArtifact(t, ctx, tmp, lock)
 
@@ -101,6 +102,7 @@ USER node
 `, lock.Image)
 	mustWrite(t, containerfile, []byte(containerBody), 0o600)
 	image := "localhost/kenogram-openclaw-e2e:" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	resources.trackImage(t, ctx, image)
 	run(t, ctx, tmp, nil, "podman", "build", "--pull=missing", "--build-arg", "KENOGRAM_UID="+strconv.Itoa(os.Getuid()), "--build-arg", "KENOGRAM_GID="+strconv.Itoa(os.Getgid()), "-t", image, "-f", containerfile, ".")
 	imageDigest := strings.TrimSpace(run(t, ctx, tmp, nil, "podman", "image", "inspect", "--format", "{{.Digest}}", image))
 	if !strings.HasPrefix(imageDigest, "sha256:") {
@@ -109,6 +111,9 @@ USER node
 	pinnedImage := image + "@" + imageDigest
 
 	world := "openclaw-e2e-" + strconv.Itoa(os.Getpid())
+	for generation := 1; generation <= 3; generation++ {
+		resources.trackContainer(containerName(world, generation))
+	}
 	stateRoot := filepath.Join(tmp, "state")
 	configSource := filepath.Join(tmp, "openclaw.json")
 	revisionSource := filepath.Join(tmp, "revision")
@@ -116,15 +121,6 @@ USER node
 	kenogram := filepath.Join(tmp, "kenogram")
 	run(t, ctx, root, append(os.Environ(), "CGO_ENABLED=0"), "go", "build", "-buildvcs=false", "-o", kenogram, "./cmd/kenogram")
 	testEnv := append(os.Environ(), "KENOGRAM_STATE_DIR="+stateRoot)
-
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cleanupCancel()
-		for generation := 1; generation <= 3; generation++ {
-			_ = exec.CommandContext(cleanupCtx, "podman", "rm", "--force", containerName(world, generation)).Run()
-		}
-		_ = exec.CommandContext(cleanupCtx, "podman", "rmi", "--force", image).Run()
-	})
 
 	writeOpenClawConfig(t, configSource, doorHost, providerPort, telegramAPIBase(telegram.URL, doorHost))
 	mustWrite(t, revisionSource, []byte("one\n"), 0o600)

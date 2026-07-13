@@ -25,7 +25,7 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
 | Contract | Strongest automated evidence | Boundary still open |
 |---|---|---|
 | Declaration and plan | Unit, parser seeds, scheduled fuzzing, canonical digest, strict names, and staged-byte recheck | Snapshot-grade handling of an adversarially mutating source tree |
-| Operations | Signal-aware CLI, transition recovery tests, Engram v0.3.0 lifecycle E2E, and OpenClaw/Hermes compositions | Exhaustive CLI fault matrix and concurrent mutation stress |
+| Operations | Signal-aware CLI, transition recovery tests, ownership-aware E2E image cleanup, rootless-vfs capacity policy, Engram v0.3.0 lifecycle E2E, and OpenClaw/Hermes compositions | Exhaustive CLI fault matrix and concurrent mutation stress |
 | Security | Exact Podman argv/mount-inode/seccomp evidence, rootless preflight, secret failure canaries, OpenClaw/Hermes absence checks, runtime-socket E2E | Seccomp profile identity and a supported Podman/kernel matrix |
 | Network | Multi-megabyte CONNECT, per-connection resolution, removal/expiry closure, declaration reconciliation, Git/TLS fixture, and rootless integration | Full ten-invariant replay after every adoption path |
 | Lifecycle | Durable rollback/commit transition, persisted-runtime 14-boundary SIGKILL recovery-only matrix, replay-safe service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Syscall-granular power-loss testing and exhaustive non-`up` action failpoints |
@@ -46,6 +46,9 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
   isolated Hermes TUI, plus attachment ingestion into its workspace; `make e2e` runs all five.
 - `make e2e-telegram-canary` is an operator-assisted, protected-environment
   proof of the real Telegram path and is never a pull-request gate.
+- Container-heavy E2Es preserve images present before the test, collect cleanup
+  failures, and reject undersized rootless Podman `vfs` stores before pulling;
+  unit contracts use fake Podman responses and filesystem-capacity probes.
 - `make architecture` checks required files and package dependency direction.
 - `make stdlib-only` rejects third-party Go modules.
 - `make check` runs the fast local quality gate; runtime proofs remain separate.

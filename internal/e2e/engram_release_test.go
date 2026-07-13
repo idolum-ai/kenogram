@@ -69,6 +69,7 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 	defer cancel()
+	resources := prepareContainerE2E(t, ctx)
 	root := repositoryRoot(t)
 	tmp := t.TempDir()
 	lock := readReleaseLock(t)
@@ -92,11 +93,13 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	}
 
 	containerfile := filepath.Join(tmp, "Containerfile")
+	resources.trackImage(t, ctx, debianBookwormAMD64)
 	containerBody := "FROM " + debianBookwormAMD64 + "\n" +
 		"RUN apt-get update && apt-get install --no-install-recommends -y tmux=3.3a-3 && rm -rf /var/lib/apt/lists/*\n" +
 		fmt.Sprintf("RUN printf 'kenogram:x:%d:%d:Kenogram E2E:/workspace:/bin/sh\\n' >> /etc/passwd && printf 'kenogram:x:%d:\\n' >> /etc/group\n", os.Getuid(), os.Getgid(), os.Getgid())
 	mustWrite(t, containerfile, []byte(containerBody), 0o600)
 	image := "localhost/kenogram-engram-e2e:" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	resources.trackImage(t, ctx, image)
 	run(t, ctx, tmp, nil, "podman", "build", "--pull=missing", "-t", image, "-f", containerfile, ".")
 	imageDigest := strings.TrimSpace(run(t, ctx, tmp, nil, "podman", "image", "inspect", "--format", "{{.Digest}}", image))
 	if !strings.HasPrefix(imageDigest, "sha256:") || len(imageDigest) != len("sha256:")+sha256.Size*2 {
@@ -105,6 +108,9 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	pinnedImage := image + "@" + imageDigest
 
 	world := "engram-e2e-" + strconv.Itoa(os.Getpid())
+	for generation := 1; generation <= 3; generation++ {
+		resources.trackContainer(containerName(world, generation))
+	}
 	stateRoot := filepath.Join(tmp, "state")
 	declaration := filepath.Join(tmp, "kenogram.toml")
 	envSource := filepath.Join(tmp, "engram.env")
@@ -113,15 +119,6 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	buildEnv := append(os.Environ(), "CGO_ENABLED=0")
 	run(t, ctx, root, buildEnv, "go", "build", "-buildvcs=false", "-o", kenogram, "./cmd/kenogram")
 	testEnv := append(os.Environ(), "KENOGRAM_STATE_DIR="+stateRoot)
-
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cleanupCancel()
-		for generation := 1; generation <= 3; generation++ {
-			_ = exec.CommandContext(cleanupCtx, "podman", "rm", "--force", containerName(world, generation)).Run()
-		}
-		_ = exec.CommandContext(cleanupCtx, "podman", "rmi", "--force", image).Run()
-	})
 
 	writeEngramEnv(t, envSource, 123)
 	mustWrite(t, revisionSource, []byte("one\n"), 0o600)

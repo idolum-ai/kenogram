@@ -63,6 +63,7 @@ func TestHermesInsideKenogram(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Minute)
 	defer cancel()
+	resources := prepareContainerE2E(t, ctx)
 	doorHost := hostDoorIPv4(t)
 	provider := newObservedProvider(t, doorHost, hermesProof)
 	defer provider.Close()
@@ -76,8 +77,12 @@ func TestHermesInsideKenogram(t *testing.T) {
 	t.Logf("evidence hermes_release=%s version=%s commit=%s source_sha256=%s image=%s", lock.Release, lock.Version, lock.Commit, lock.SourceSHA256, lock.Image)
 	verifyHermesArtifact(t, ctx, tmp, lock)
 	image := lock.Image
+	resources.trackImage(t, ctx, image)
 
 	world := "hermes-e2e-" + strconv.Itoa(os.Getpid())
+	for generation := 1; generation <= 3; generation++ {
+		resources.trackContainer(containerName(world, generation))
+	}
 	stateRoot := filepath.Join(tmp, "state")
 	configSource := filepath.Join(tmp, "hermes-config.yaml")
 	revisionSource := filepath.Join(tmp, "revision")
@@ -85,14 +90,6 @@ func TestHermesInsideKenogram(t *testing.T) {
 	kenogram := filepath.Join(tmp, "kenogram")
 	run(t, ctx, root, append(os.Environ(), "CGO_ENABLED=0"), "go", "build", "-buildvcs=false", "-o", kenogram, "./cmd/kenogram")
 	testEnv := append(os.Environ(), "KENOGRAM_STATE_DIR="+stateRoot)
-
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cleanupCancel()
-		for generation := 1; generation <= 3; generation++ {
-			_ = exec.CommandContext(cleanupCtx, "podman", "rm", "--force", containerName(world, generation)).Run()
-		}
-	})
 
 	writeHermesConfig(t, configSource, doorHost, providerPort, hermesTelegramAPIBase(telegram.URL, doorHost))
 	mustWrite(t, revisionSource, []byte("one\n"), 0o600)

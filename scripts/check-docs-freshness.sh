@@ -23,6 +23,8 @@ done
 e2e_count="$(awk '/^e2e:/ { print NF - 1; exit }' Makefile)"
 test "$e2e_count" -eq 5
 rg -Fq '`make e2e` runs all five' requirements/INDEX.md
+rg -Fq 'KENOGRAM_E2E_VFS_MIN_FREE_GIB' CONTRIBUTING.md
+rg -Fq 'preserve images present before the test' requirements/INDEX.md
 lifecycle_checkpoint_count="$(sed -n '/var lifecycleCrashCheckpoints = \[\]string{/,/^}/p' internal/app/lifecycle_crash_test.go | rg -o '"[^"]+"' | wc -l)"
 test "$lifecycle_checkpoint_count" -eq 14
 rg -Fq 'fourteen lifecycle boundaries' requirements/lifecycle.md

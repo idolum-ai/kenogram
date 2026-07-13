@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -31,6 +30,7 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Minute)
 	defer cancel()
+	resources := prepareContainerE2E(t, ctx)
 	doorHost := hostDoorIPv4(t)
 	providerProof := hermesProof + "\n[engram:upstream] " + hermesEngramSignalID + " " + hermesEngramProof
 	provider := newObservedProvider(t, doorHost, providerProof)
@@ -44,10 +44,12 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 	hermes := readHermesLock(t)
 	verifyHermesArtifact(t, ctx, tmp, hermes)
 	image := hermes.Image
+	resources.trackImage(t, ctx, image)
 	engramLock := readReleaseLock(t)
 	engram := materializeEngramRelease(t, ctx, tmp, engramLock)
 
 	world := "engram-hermes-e2e-" + strconv.Itoa(os.Getpid())
+	resources.trackContainer(containerName(world, 1))
 	stateRoot := filepath.Join(tmp, "state")
 	hermesConfig := filepath.Join(tmp, "hermes-config.yaml")
 	engramEnv := filepath.Join(tmp, "engram.env")
@@ -55,12 +57,6 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 	kenogram := filepath.Join(tmp, "kenogram")
 	run(t, ctx, root, append(os.Environ(), "CGO_ENABLED=0"), "go", "build", "-buildvcs=false", "-o", kenogram, "./cmd/kenogram")
 	testEnv := append(os.Environ(), "KENOGRAM_STATE_DIR="+stateRoot)
-
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cleanupCancel()
-		_ = exec.CommandContext(cleanupCtx, "podman", "rm", "--force", containerName(world, 1)).Run()
-	})
 
 	writeHermesConfig(t, hermesConfig, doorHost, providerPort, "")
 	writeEngramCompositionEnv(t, engramEnv, telegramFixtureToken, telegramAPIBase(telegram.URL, doorHost), telegramFixtureUser, telegramFixtureUser)

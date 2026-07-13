@@ -35,6 +35,18 @@ outbound artifact/image access, and substantial temporary disk. Run the target
 relevant to your change; reserve `make e2e` for a complete 10–20 minute-per-lane
 replay.
 
+Every container-heavy proof records whether each pinned base and derived image
+existed before the test. Cleanup always attempts every tracked container, then
+removes only images the test caused Podman to acquire; operator-owned images are
+preserved, and cleanup failures are reported separately from the primary test
+failure. Before artifact downloads or image builds, rootless Podman `vfs` stores
+must have 96 GiB free. That default rounds an observed 68 GiB expanded Hermes
+footprint up with roughly 40% transient build headroom; rootless `overlay` is not
+subject to this amplification guard. Operators with a measured local footprint
+may set `KENOGRAM_E2E_VFS_MIN_FREE_GIB` to a positive whole-GiB threshold. Use
+`podman system df` and the preflight's graph-root path to validate an override;
+the setting does not delete or prune storage.
+
 | Command | Evidence |
 |---|---|
 | `make e2e-release` | Engram v0.3.0 materialization, replacement, restart, and destruction |
