@@ -3,9 +3,11 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -24,9 +26,11 @@ const (
 )
 
 type telegramOutbound struct {
-	Method    string
-	Text      string
-	MessageID int
+	Method     string
+	Text       string
+	MessageID  int
+	Filename   string
+	Attachment []byte
 }
 
 type telegramFixture struct {
@@ -65,6 +69,10 @@ func newTelegramFixture(t *testing.T, host string) *telegramFixture {
 }
 
 func (f *telegramFixture) enqueueText(text string) int {
+	return f.enqueueTextFrom(telegramFixtureUser, text)
+}
+
+func (f *telegramFixture) enqueueTextFrom(userID int64, text string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	messageID := f.nextUpdateID
@@ -72,8 +80,9 @@ func (f *telegramFixture) enqueueText(text string) int {
 		"update_id": f.nextUpdateID,
 		"message": map[string]any{
 			"message_id": messageID,
-			"from":       map[string]any{"id": telegramFixtureUser, "username": "kenogram_fixture"},
-			"chat":       map[string]any{"id": telegramFixtureUser, "type": "private"},
+			"date":       1_700_000_000,
+			"from":       map[string]any{"id": userID, "is_bot": false, "first_name": "Kenogram", "username": "kenogram_fixture", "language_code": "en"},
+			"chat":       map[string]any{"id": userID, "type": "private", "first_name": "Kenogram"},
 			"text":       text,
 		},
 	})
@@ -90,8 +99,9 @@ func (f *telegramFixture) enqueueDocument() int {
 		"update_id": f.nextUpdateID,
 		"message": map[string]any{
 			"message_id": messageID,
-			"from":       map[string]any{"id": telegramFixtureUser, "username": "kenogram_fixture"},
-			"chat":       map[string]any{"id": telegramFixtureUser, "type": "private"},
+			"date":       1_700_000_000,
+			"from":       map[string]any{"id": telegramFixtureUser, "is_bot": false, "first_name": "Kenogram", "username": "kenogram_fixture", "language_code": "en"},
+			"chat":       map[string]any{"id": telegramFixtureUser, "type": "private", "first_name": "Kenogram"},
 			"document": map[string]any{
 				"file_id":        "fixture-file-id",
 				"file_unique_id": "fixture-file-unique-id",
@@ -119,7 +129,7 @@ func (f *telegramFixture) waitOutbound(t *testing.T, timeout time.Duration, frag
 	for time.Now().Before(deadline) {
 		f.mu.Lock()
 		for _, message := range f.outbound {
-			if strings.Contains(message.Text, fragment) {
+			if strings.Contains(message.Text, fragment) || strings.Contains(telegramMarkdownText(message.Text), fragment) {
 				f.mu.Unlock()
 				return message
 			}
@@ -131,6 +141,57 @@ func (f *telegramFixture) waitOutbound(t *testing.T, timeout time.Duration, frag
 	defer f.mu.Unlock()
 	t.Fatalf("Telegram output did not contain %q; observed: %#v", fragment, f.outbound)
 	return telegramOutbound{}
+}
+
+func (f *telegramFixture) waitOutboundAttachment(t *testing.T, timeout time.Duration, method, fragment string) telegramOutbound {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		f.mu.Lock()
+		for _, message := range f.outbound {
+			if message.Method == method && strings.Contains(string(message.Attachment), fragment) {
+				f.mu.Unlock()
+				return message
+			}
+		}
+		f.mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	observed := make([]string, 0, len(f.outbound))
+	for _, message := range f.outbound {
+		observed = append(observed, fmt.Sprintf("%s filename=%q bytes=%d", message.Method, message.Filename, len(message.Attachment)))
+	}
+	t.Fatalf("Telegram %s attachment did not contain %q; observed: %v", method, fragment, observed)
+	return telegramOutbound{}
+}
+
+func telegramMarkdownText(text string) string {
+	var plain strings.Builder
+	plain.Grow(len(text))
+	for index := 0; index < len(text); index++ {
+		if text[index] == '\\' && index+1 < len(text) && strings.ContainsRune(`_*[]()~`+"`"+`>#+-=|{}.!\\`, rune(text[index+1])) {
+			index++
+		}
+		plain.WriteByte(text[index])
+	}
+	return plain.String()
+}
+
+func TestTelegramMarkdownText(t *testing.T) {
+	for _, test := range []struct {
+		wire string
+		want string
+	}{
+		{wire: `KENOGRAM\_HERMES\_PROOF`, want: "KENOGRAM_HERMES_PROOF"},
+		{wire: `literal\\path`, want: `literal\path`},
+		{wire: `ordinary\q`, want: `ordinary\q`},
+	} {
+		if got := telegramMarkdownText(test.wire); got != test.want {
+			t.Fatalf("telegramMarkdownText(%q) = %q, want %q", test.wire, got, test.want)
+		}
+	}
 }
 
 func (f *telegramFixture) waitForFileRequest(t *testing.T, timeout time.Duration) {
@@ -168,6 +229,13 @@ func (f *telegramFixture) serveHTTP(response http.ResponseWriter, request *http.
 	f.methodRequests[method]++
 	f.mu.Unlock()
 	switch method {
+	case "getMe":
+		writeTelegramResult(response, map[string]any{
+			"id":         7_770_001,
+			"is_bot":     true,
+			"first_name": "Kenogram Fixture",
+			"username":   "kenogram_fixture_bot",
+		})
 	case "getUpdates":
 		f.serveUpdates(response, request)
 	case "getFile":
@@ -176,7 +244,9 @@ func (f *telegramFixture) serveHTTP(response http.ResponseWriter, request *http.
 			"file_size": len(telegramFixtureFile),
 			"file_path": "documents/proof.txt",
 		})
-	case "setMyCommands", "pinChatMessage", "unpinChatMessage", "deleteMessage", "answerCallbackQuery":
+	case "getWebhookInfo":
+		writeTelegramResult(response, map[string]any{"url": "", "has_custom_certificate": false, "pending_update_count": 0})
+	case "deleteWebhook", "deleteMyCommands", "setMyCommands", "pinChatMessage", "unpinChatMessage", "deleteMessage", "answerCallbackQuery":
 		writeTelegramResult(response, true)
 	default:
 		f.serveOutbound(response, request, method)
@@ -214,6 +284,10 @@ func (f *telegramFixture) updatesAtOrAfter(offset int) []map[string]any {
 
 func (f *telegramFixture) serveOutbound(response http.ResponseWriter, request *http.Request, method string) {
 	text, chatID, messageID := telegramRequestFields(request)
+	if request.MultipartForm != nil {
+		defer request.MultipartForm.RemoveAll()
+	}
+	filename, attachment := telegramRequestAttachment(request)
 	f.mu.Lock()
 	if chatID == 0 {
 		chatID = telegramFixtureUser
@@ -222,13 +296,61 @@ func (f *telegramFixture) serveOutbound(response http.ResponseWriter, request *h
 		messageID = f.nextMessageID
 		f.nextMessageID++
 	}
-	f.outbound = append(f.outbound, telegramOutbound{Method: method, Text: text, MessageID: messageID})
+	f.outbound = append(f.outbound, telegramOutbound{Method: method, Text: text, MessageID: messageID, Filename: filename, Attachment: attachment})
 	f.mu.Unlock()
 	writeTelegramResult(response, map[string]any{
 		"message_id": messageID,
+		"date":       1_700_000_000,
+		"from":       map[string]any{"id": 7_770_001, "is_bot": true, "first_name": "Kenogram Fixture", "username": "kenogram_fixture_bot"},
 		"chat":       map[string]any{"id": chatID, "type": "private"},
 		"text":       text,
 	})
+}
+
+func telegramRequestAttachment(request *http.Request) (string, []byte) {
+	if request.MultipartForm == nil {
+		return "", nil
+	}
+	for _, files := range request.MultipartForm.File {
+		for _, header := range files {
+			file, err := header.Open()
+			if err != nil {
+				continue
+			}
+			data, readErr := io.ReadAll(io.LimitReader(file, 2<<20))
+			_ = file.Close()
+			if readErr == nil {
+				return header.Filename, data
+			}
+		}
+	}
+	return "", nil
+}
+
+func TestTelegramRequestAttachment(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("chat_id", strconv.FormatInt(telegramFixtureUser, 10)); err != nil {
+		t.Fatal(err)
+	}
+	part, err := writer.CreateFormFile("document", "proof.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(part, telegramFixtureFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/sendDocument", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	_, chatID, _ := telegramRequestFields(request)
+	defer request.MultipartForm.RemoveAll()
+	filename, attachment := telegramRequestAttachment(request)
+	if chatID != telegramFixtureUser || filename != "proof.txt" || string(attachment) != telegramFixtureFile {
+		t.Fatalf("multipart request = chat %d, filename %q, attachment %q", chatID, filename, attachment)
+	}
 }
 
 func telegramRequestFields(request *http.Request) (string, int64, int) {
@@ -287,15 +409,23 @@ func telegramAPIBase(rawURL, host string) string {
 
 func (f *telegramFixture) waitForMethod(t *testing.T, timeout time.Duration, method string) {
 	t.Helper()
+	f.waitForMethodAfter(t, timeout, method, 0)
+}
+
+func (f *telegramFixture) methodCount(method string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.methodRequests[method]
+}
+
+func (f *telegramFixture) waitForMethodAfter(t *testing.T, timeout time.Duration, method string, previous int) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		f.mu.Lock()
-		count := f.methodRequests[method]
-		f.mu.Unlock()
-		if count > 0 {
+		if f.methodCount(method) > previous {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("Engram did not call Telegram method %s", method)
+	t.Fatalf("Telegram method %s did not advance beyond %d calls", method, previous)
 }

@@ -18,8 +18,9 @@ import (
 )
 
 type runtimeRunner struct {
-	calls   []string
-	network string
+	calls       []string
+	network     string
+	mountSource string
 }
 
 type destroyFailRunner struct{ runtimeRunner }
@@ -49,6 +50,17 @@ func (r *destroyFailRunner) Run(ctx context.Context, name string, args ...string
 
 func (r *runtimeRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
 	r.calls = append(r.calls, strings.Join(args, " "))
+	if len(args) > 0 && args[0] == "create" {
+		for _, argument := range args {
+			if strings.HasPrefix(argument, "type=bind,src=") {
+				for _, field := range strings.Split(argument, ",") {
+					if strings.HasPrefix(field, "src=") {
+						r.mountSource = strings.TrimPrefix(field, "src=")
+					}
+				}
+			}
+		}
+	}
 	if len(args) > 0 && args[0] == "info" {
 		return []byte(`{"host":{"security":{"rootless":true},"cgroupVersion":"v2","idMappings":{"uidmap":[{"size":65536}],"gidmap":[{"size":65536}]}}}`), nil
 	}
@@ -57,7 +69,7 @@ func (r *runtimeRunner) Run(_ context.Context, _ string, args ...string) ([]byte
 		if network == "" {
 			network = "none"
 		}
-		return []byte(fmt.Sprintf(`[{"Name":"kenogram-w-g1","BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":"1","io.kenogram.plan-digest":"pd","io.kenogram.declaration-digest":"dd"}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), network)), nil
+		return []byte(fmt.Sprintf(`[{"Name":"kenogram-w-g1","BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":"1","io.kenogram.plan-digest":"pd","io.kenogram.declaration-digest":"dd"}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), network, r.mountSource)), nil
 	}
 	if len(args) > 0 && args[0] == "ps" {
 		return []byte("kenogram-w-g1\n"), nil
@@ -67,6 +79,13 @@ func (r *runtimeRunner) Run(_ context.Context, _ string, args ...string) ([]byte
 func (r *runtimeRunner) Start(context.Context, string, ...string) error       { return nil }
 func (r *runtimeRunner) Interactive(context.Context, string, ...string) error { return nil }
 
+func testBackend(r backend.Runner) *backend.Podman {
+	podman := backend.New(r)
+	podman.ReadProcStatus = func(int) ([]byte, error) { return []byte("Seccomp:\t2\n"), nil }
+	podman.MountIdentity = func(int, string, string) (bool, error) { return true, nil }
+	return podman
+}
+
 func preparedFixture() Prepared {
 	return Prepared{Raw: []byte("version = 1\n"), Result: plan.Result{PlanDigest: "pd", DeclarationDigest: "dd", Plan: plan.Plan{Version: 1, Name: "w", World: plan.World{Hostname: "w", Base: "base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workdir: "/workspace", User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}, Workspace: []string{"/workspace"}}}, Declaration: decl.Declaration{Name: "w"}}
 }
@@ -74,7 +93,7 @@ func TestUpRecordsAppliedOnlyAfterEvidence(t *testing.T) {
 	base := t.TempDir()
 	runner := &runtimeRunner{}
 	var out bytes.Buffer
-	a := &App{Backend: backend.New(runner), BaseDir: base, Out: &out, Now: func() time.Time { return time.Unix(1, 0) }, Executable: "kenogram"}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &out, Now: func() time.Time { return time.Unix(1, 0) }, Executable: "kenogram"}
 	if err := a.Up(context.Background(), preparedFixture()); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +126,7 @@ func TestMaterializeCreatesWorldUserServiceStatusDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &runtimeRunner{}
-	a := &App{Backend: backend.New(runner)}
+	a := &App{Backend: testBackend(runner)}
 	if err := a.materialize(context.Background(), layout, "kenogram-w-g1", 1, preparedFixture()); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +146,7 @@ func TestUpRecoversRollbackTransitionBeforeCreating(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &runtimeRunner{}
-	a := &App{Backend: backend.New(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
 	if err := a.Up(context.Background(), preparedFixture()); err != nil {
 		t.Fatal(err)
 	}
@@ -187,8 +206,10 @@ func TestRecoveryPlanDoesNotRereadCopySource(t *testing.T) {
 func TestUpRejectsBadRuntimeEvidence(t *testing.T) {
 	base := t.TempDir()
 	runner := &runtimeRunner{network: "bridge"}
-	a := &App{Backend: backend.New(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
-	err := a.Up(context.Background(), preparedFixture())
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	prepared := preparedFixture()
+	prepared.Result.Plan.Services = []plan.Service{{Name: "canary", Command: []string{"/bin/true"}, Autostart: true, Restart: "never"}}
+	err := a.Up(context.Background(), prepared)
 	if err == nil || !strings.Contains(err.Error(), "network mode") {
 		t.Fatalf("err=%v", err)
 	}
@@ -203,6 +224,93 @@ func TestUpRejectsBadRuntimeEvidence(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(base, "w", "state.json")); !os.IsNotExist(err) {
 		t.Fatal("state recorded")
 	}
+	if countCalls(runner.calls, "exec ") != 0 {
+		t.Fatalf("service executed before bad runtime evidence was rejected: %v", runner.calls)
+	}
+}
+
+func TestUpClearsStagedSecretAfterCopyFailure(t *testing.T) {
+	base := t.TempDir()
+	secret := filepath.Join(t.TempDir(), "secret")
+	canary := "KENOGRAM_FAILED_STAGE_SECRET_7f04681c"
+	if err := os.WriteFile(secret, []byte(canary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := plan.DigestSource(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared := preparedFixture()
+	prepared.Result.Plan.Copies = []plan.Copy{{Source: secret, SourceDigest: digest, Target: "/run/secret", Mode: "0600", Secret: true}}
+	runner := &failOnceRunner{prefix: "cp "}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err == nil {
+		t.Fatal("copy failure was accepted")
+	}
+	if err := filepath.Walk(base, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.Mode().IsRegular() {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if strings.Contains(string(raw), canary) {
+				t.Fatalf("failed staging retained secret at %s", path)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpRejectsMountsOverlappingControlAndState(t *testing.T) {
+	root := t.TempDir()
+	stateRoot := filepath.Join(root, "state")
+	runtimeRoot := filepath.Join(root, "runtime")
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "podman"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeRoot)
+	for name, source := range map[string]string{
+		"runtime socket parent": runtimeRoot,
+		"state root parent":     root,
+	} {
+		t.Run(name, func(t *testing.T) {
+			prepared := preparedFixture()
+			prepared.Result.Plan.Mounts = []plan.Mount{{Source: source, Target: "/host", Mode: "ro"}}
+			runner := &runtimeRunner{}
+			a := &App{Backend: testBackend(runner), BaseDir: stateRoot, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+			err := a.Up(context.Background(), prepared)
+			if err == nil || !strings.Contains(err.Error(), "protected host path") {
+				t.Fatalf("err=%v", err)
+			}
+			if countCalls(runner.calls, "create ") != 0 || countCalls(runner.calls, "exec ") != 0 {
+				t.Fatalf("runtime mutation preceded mount rejection: %v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestReplacementRejectsSourceBeneathPredecessorWritableMount(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "child")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prior := preparedFixture().Result
+	prior.Plan.Mounts = []plan.Mount{{Source: root, Target: "/host", Mode: "rw"}}
+	next := preparedFixture().Result
+	next.Plan.Mounts = []plan.Mount{{Source: child, Target: "/project", Mode: "ro"}}
+	if err := validateReplacementMountSources(prior, next); err == nil || !strings.Contains(err.Error(), "predecessor-writable") {
+		t.Fatalf("mutable descendant source = %v", err)
+	}
+	next.Plan.Mounts[0].Source = root
+	if err := validateReplacementMountSources(prior, next); err != nil {
+		t.Fatalf("stable mount root rejected: %v", err)
+	}
 }
 
 func TestFirstUpFaultsDoNotCreateAuthority(t *testing.T) {
@@ -210,7 +318,7 @@ func TestFirstUpFaultsDoNotCreateAuthority(t *testing.T) {
 		t.Run(strings.TrimSpace(prefix), func(t *testing.T) {
 			base := t.TempDir()
 			runner := &failOnceRunner{prefix: prefix}
-			a := &App{Backend: backend.New(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+			a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
 			if err := a.Up(context.Background(), preparedFixture()); err == nil {
 				t.Fatal("fault was accepted")
 			}
@@ -227,7 +335,7 @@ func TestFirstUpFaultsDoNotCreateAuthority(t *testing.T) {
 func TestUpAdoptsVerifiedMatchingGeneration(t *testing.T) {
 	base := t.TempDir()
 	runner := &runtimeRunner{}
-	a := &App{Backend: backend.New(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
 	prepared := preparedFixture()
 	if err := a.Up(context.Background(), prepared); err != nil {
 		t.Fatal(err)
@@ -239,6 +347,15 @@ func TestUpAdoptsVerifiedMatchingGeneration(t *testing.T) {
 	after := countCalls(runner.calls, "create ")
 	if before != 1 || after != 1 {
 		t.Fatalf("create calls before=%d after=%d: %v", before, after, runner.calls)
+	}
+}
+
+func TestAdoptionRecordsUnavailableDigestForChangingWorkspace(t *testing.T) {
+	digest, detail, err := adoptionWorkspaceEvidence("workspace", func(string) (worldfs.DigestTree, error) {
+		return worldfs.DigestTree{}, fmt.Errorf("digest retries exhausted: %w", worldfs.ErrWorkspaceChanging)
+	})
+	if err != nil || digest != "" || !strings.Contains(detail, "live workspace was changing") {
+		t.Fatalf("digest=%q detail=%q err=%v", digest, detail, err)
 	}
 }
 
@@ -258,7 +375,7 @@ func TestUpRejectsCopyDriftBeforeCutover(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &runtimeRunner{}
-	a := &App{Backend: backend.New(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
 	err = a.Up(context.Background(), prepared)
 	if err == nil || !strings.Contains(err.Error(), "changed after planning") {
 		t.Fatalf("err=%v", err)
@@ -278,7 +395,7 @@ func TestDestroyFailurePreservesWorldState(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &destroyFailRunner{}
-	a := &App{Backend: backend.New(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
 	if err := a.Destroy(context.Background(), "w"); err == nil || !strings.Contains(err.Error(), "injected destroy failure") {
 		t.Fatalf("err=%v", err)
 	}
@@ -299,7 +416,7 @@ func TestDestroyRenamesWorldAndPreservesOnlyHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &runtimeRunner{}
-	a := &App{Backend: backend.New(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(2, 0) }, Executable: "kenogram"}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(2, 0) }, Executable: "kenogram"}
 	if err := a.Destroy(context.Background(), "w"); err != nil {
 		t.Fatal(err)
 	}

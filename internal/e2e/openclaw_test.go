@@ -31,6 +31,8 @@ const openClawSecretCanary = "sk-kenogram-openclaw-canary-12c23bb884e94f89"
 const openClawGatewayToken = "kenogram-gateway-token-c91366fb"
 const openClawSignalID = "89abcdef0123456789abcdef01234567"
 const openClawTelegramProof = "KENOGRAM_ENGRAM_OPENCLAW_PROOF_71c94f26"
+const openClawNativeTelegramPrompt = "KENOGRAM_OPENCLAW_TELEGRAM_PROMPT_621c8d4a"
+const openClawDeniedTelegramPrompt = "KENOGRAM_OPENCLAW_TELEGRAM_DENIED_15249e63"
 
 type openClawLock struct {
 	Version      string `json:"version"`
@@ -63,7 +65,7 @@ func TestOpenClawReleaseLock(t *testing.T) {
 	}
 }
 
-func TestOpenClawTUIInsideKenogram(t *testing.T) {
+func TestOpenClawInsideKenogram(t *testing.T) {
 	if os.Getenv("KENOGRAM_OPENCLAW_E2E") != "1" {
 		t.Skip("set KENOGRAM_OPENCLAW_E2E=1 to run the OpenClaw composition proof")
 	}
@@ -78,7 +80,10 @@ func TestOpenClawTUIInsideKenogram(t *testing.T) {
 	doorHost := hostDoorIPv4(t)
 	provider := newOpenAIProvider(t, doorHost)
 	defer provider.Close()
+	telegram := newTelegramFixture(t, doorHost)
+	defer telegram.Close()
 	providerPort := mustPort(t, provider.URL)
+	telegramPort := mustPort(t, telegram.URL)
 	root := repositoryRoot(t)
 	tmp := t.TempDir()
 	lock := readOpenClawLock(t)
@@ -121,18 +126,25 @@ USER node
 		_ = exec.CommandContext(cleanupCtx, "podman", "rmi", "--force", image).Run()
 	})
 
-	writeOpenClawConfig(t, configSource, doorHost, providerPort)
+	writeOpenClawConfig(t, configSource, doorHost, providerPort, telegramAPIBase(telegram.URL, doorHost))
 	mustWrite(t, revisionSource, []byte("one\n"), 0o600)
-	writeOpenClawDeclaration(t, declaration, world, pinnedImage, configSource, revisionSource, doorHost, providerPort)
+	writeOpenClawDeclaration(t, declaration, world, pinnedImage, configSource, revisionSource, doorHost, providerPort, doorHost, telegramPort)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	first := containerName(world, 1)
 	waitForOpenClaw(t, ctx, tmp, testEnv, first)
 	assertOpenClawVersion(t, ctx, tmp, testEnv, first, lock.Version)
 	assertOpenClawIsolation(t, ctx, tmp, testEnv, first, doorHost, providerPort)
+	waitForOpenClawTelegramPolling(t, telegram, 30*time.Second)
+	telegram.enqueueTextFrom(telegramFixtureUser+1, openClawDeniedTelegramPrompt)
+	telegram.enqueueText("Reply with the proof marker and preserve this request marker: " + openClawNativeTelegramPrompt)
+	provider.waitObservedContaining(t, 30*time.Second, openClawNativeTelegramPrompt)
+	provider.assertNotObservedContaining(t, openClawDeniedTelegramPrompt)
+	telegram.waitOutbound(t, 30*time.Second, openClawProof)
 	runOpenClawTUI(t, ctx, tmp, testEnv, first, "proof-one")
 	provider.assertObserved(t)
 	run(t, ctx, tmp, testEnv, "podman", "exec", first, "/bin/sh", "-c", "printf carried > /workspace/openclaw-carry")
 	assertSecretAbsentOutsideWorkspace(t, filepath.Join(stateRoot, world), openClawSecretCanary)
+	assertSecretAbsentOutsideWorkspace(t, filepath.Join(stateRoot, world), telegramFixtureToken)
 
 	// An unchanged declaration must adopt the running generation rather than
 	// replacing it. This proves the idempotent path before forcing a successor.
@@ -163,6 +175,7 @@ USER node
 	run(t, ctx, tmp, testEnv, kenogram, "destroy", "--yes", world)
 	assertDestroyedHistory(t, stateRoot, world)
 	assertSecretAbsent(t, filepath.Join(stateRoot, ".destroyed"), openClawSecretCanary)
+	assertSecretAbsent(t, filepath.Join(stateRoot, ".destroyed"), telegramFixtureToken)
 }
 
 type observedProvider struct {
@@ -173,11 +186,21 @@ type observedProvider struct {
 }
 
 func newOpenAIProvider(t *testing.T, host string) *observedProvider {
+	proof := openClawProof + "\n[engram:upstream] " + openClawSignalID + " " + openClawTelegramProof
+	return newObservedProvider(t, host, proof)
+}
+
+func newObservedProvider(t *testing.T, host, proof string) *observedProvider {
 	t.Helper()
 	provider := &observedProvider{}
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/healthz" {
 			response.WriteHeader(http.StatusOK)
+			return
+		}
+		if request.URL.Path == "/v1/models" {
+			response.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(response, `{"object":"list","data":[{"id":"proof","object":"model","owned_by":"kenogram"}]}`)
 			return
 		}
 		if request.URL.Path != "/v1/chat/completions" {
@@ -200,7 +223,6 @@ func newOpenAIProvider(t *testing.T, host string) *observedProvider {
 		provider.requests++
 		provider.bodies = append(provider.bodies, string(raw))
 		provider.mu.Unlock()
-		proof := openClawProof + "\n[engram:upstream] " + openClawSignalID + " " + openClawTelegramProof
 		if body.Stream {
 			response.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprintf(response, "data: {\"id\":\"proof\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":%q},\"finish_reason\":null}]}\n\n", proof)
@@ -228,14 +250,14 @@ func (p *observedProvider) assertObserved(t *testing.T) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.requests == 0 {
-		t.Fatal("OpenClaw never reached the declared provider")
+		t.Fatal("agent never reached the declared provider")
 	}
 }
 
 func (p *observedProvider) waitObserved(t *testing.T, timeout time.Duration) {
 	t.Helper()
 	if !p.observedWithin(timeout) {
-		t.Fatal("OpenClaw never reached the declared provider")
+		t.Fatal("agent never reached the declared provider")
 	}
 }
 
@@ -267,7 +289,18 @@ func (p *observedProvider) waitObservedContaining(t *testing.T, timeout time.Dur
 		p.mu.Unlock()
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("OpenClaw provider request did not contain canary marker %q", fragment)
+	t.Fatalf("provider request did not contain canary marker %q", fragment)
+}
+
+func (p *observedProvider) assertNotObservedContaining(t *testing.T, fragment string) {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, body := range p.bodies {
+		if strings.Contains(body, fragment) {
+			t.Fatalf("provider unexpectedly received denied marker %q", fragment)
+		}
+	}
 }
 
 func readOpenClawLock(t *testing.T) openClawLock {
@@ -326,19 +359,24 @@ func mustPort(t *testing.T, rawURL string) int {
 	return port
 }
 
-func writeOpenClawConfig(t *testing.T, path, providerHost string, providerPort int) {
+func writeOpenClawConfig(t *testing.T, path, providerHost string, providerPort int, telegramBase string) {
 	t.Helper()
+	telegramConfig := ""
+	if telegramBase != "" {
+		telegramConfig = fmt.Sprintf(`,
+  "channels": {"telegram":{"enabled":true,"botToken":%q,"apiRoot":%q,"dmPolicy":"allowlist","allowFrom":[%q],"groupPolicy":"disabled","configWrites":false,"commands":{"native":false},"streaming":{"mode":"off"}}}`, telegramFixtureToken, telegramBase, strconv.FormatInt(telegramFixtureUser, 10))
+	}
 	body := fmt.Sprintf(`{
   "gateway": {"mode":"local","bind":"loopback","auth":{"mode":"token","token":%q}},
   "proxy": {"enabled":true,"proxyUrl":"http://127.0.0.1:3128","loopbackMode":"gateway-only"},
   "models": {"mode":"merge","providers":{"kenogram-proof":{"baseUrl":"http://%s:%d/v1","apiKey":%q,"api":"openai-completions","models":[{"id":"proof","name":"Kenogram proof","reasoning":false,"input":["text"],"contextWindow":32768,"maxTokens":256}]}}},
-  "agents": {"defaults":{"workspace":"/workspace/openclaw","model":{"primary":"kenogram-proof/proof"},"models":{"kenogram-proof/proof":{"params":{"stream":true}}},"memorySearch":{"enabled":false},"sandbox":{"mode":"off"}}}
+  "agents": {"defaults":{"workspace":"/workspace/openclaw","model":{"primary":"kenogram-proof/proof"},"models":{"kenogram-proof/proof":{"params":{"stream":true}}},"memorySearch":{"enabled":false},"sandbox":{"mode":"off"}}}%s
 }
-`, openClawGatewayToken, providerHost, providerPort, openClawSecretCanary)
+`, openClawGatewayToken, providerHost, providerPort, openClawSecretCanary, telegramConfig)
 	mustWrite(t, path, []byte(body), 0o600)
 }
 
-func writeOpenClawDeclaration(t *testing.T, path, world, image, configSource, revisionSource, providerHost string, providerPort int) {
+func writeOpenClawDeclaration(t *testing.T, path, world, image, configSource, revisionSource, providerHost string, providerPort int, telegramHost string, telegramPort int) {
 	t.Helper()
 	service := []string{"/usr/bin/env", "HOME=/workspace/home", "OPENCLAW_HOME=/workspace/home", "OPENCLAW_STATE_DIR=/workspace/.openclaw", "OPENCLAW_CONFIG_PATH=/etc/openclaw.json", "OPENCLAW_WORKSPACE_DIR=/workspace/openclaw", "OPENCLAW_GATEWAY_TOKEN=" + openClawGatewayToken, "OPENCLAW_PROXY_URL=http://127.0.0.1:3128", "OPENCLAW_DISABLE_BONJOUR=1", "/usr/local/bin/openclaw", "gateway", "--port", "18789", "--verbose"}
 	commandJSON, err := json.Marshal(service)
@@ -370,13 +408,22 @@ mode = "0644"
 [[network.allow]]
 host = %q
 port = %d
+[[network.allow]]
+host = %q
+port = %d
 [[services]]
 name = "openclaw-gateway"
 command = %s
 autostart = true
 restart = "never"
-`, world, image, fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), configSource, revisionSource, providerHost, providerPort, commandJSON)
+`, world, image, fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), configSource, revisionSource, providerHost, providerPort, telegramHost, telegramPort, commandJSON)
 	mustWrite(t, path, []byte(body), 0o600)
+}
+
+func waitForOpenClawTelegramPolling(t *testing.T, fixture *telegramFixture, timeout time.Duration) {
+	t.Helper()
+	fixture.waitForMethod(t, timeout, "getMe")
+	fixture.waitForMethod(t, timeout, "getUpdates")
 }
 
 func openClawEnvCommand(args ...string) []string {

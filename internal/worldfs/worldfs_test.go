@@ -1,6 +1,7 @@
 package worldfs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,6 +58,47 @@ func TestDigestDeterministicAndDrift(t *testing.T) {
 	}
 	if ChangedFiles(first, third) != 1 {
 		t.Fatalf("changed=%d", ChangedFiles(first, third))
+	}
+}
+
+func TestDigestRetriesAChangingWorkspace(t *testing.T) {
+	want := DigestTree{Root: "stable"}
+	attempts := 0
+	got, err := digestRetry("workspace", func(root string) (DigestTree, error) {
+		attempts++
+		if root != "workspace" {
+			t.Fatalf("root = %q", root)
+		}
+		if attempts < 3 {
+			return DigestTree{}, &treeChangedError{path: "state.sqlite-wal"}
+		}
+		return want, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Root != want.Root || attempts != 3 {
+		t.Fatalf("digest = %#v after %d attempts", got, attempts)
+	}
+}
+
+func TestDigestClassifiesChangingWorkspace(t *testing.T) {
+	_, err := digestRetry("workspace", func(string) (DigestTree, error) {
+		return DigestTree{}, &treeChangedError{path: "workspace/live.db-wal"}
+	})
+	if !IsChanging(err) || !errors.Is(err, ErrWorkspaceChanging) {
+		t.Fatalf("changing workspace error was not classified: %v", err)
+	}
+}
+
+func TestDigestDoesNotRetryPermanentErrors(t *testing.T) {
+	attempts := 0
+	_, err := digestRetry("workspace", func(string) (DigestTree, error) {
+		attempts++
+		return DigestTree{}, os.ErrPermission
+	})
+	if !errors.Is(err, os.ErrPermission) || attempts != 1 {
+		t.Fatalf("err = %v after %d attempts", err, attempts)
 	}
 }
 

@@ -76,7 +76,7 @@ USER node
 		_ = exec.CommandContext(cleanupCtx, "podman", "rmi", "--force", image).Run()
 	})
 
-	writeOpenClawConfig(t, openClawConfig, doorHost, providerPort)
+	writeOpenClawConfig(t, openClawConfig, doorHost, providerPort, "")
 	writeEngramCompositionEnv(t, engramEnv, telegramFixtureToken, telegramAPIBase(telegram.URL, doorHost), telegramFixtureUser, telegramFixtureUser)
 	writeEngramOpenClawDeclaration(t, declaration, world, pinnedImage, engram, openClawConfig, engramEnv, doorHost, providerPort, doorHost, telegramPort)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
@@ -84,7 +84,9 @@ USER node
 	waitForOpenClaw(t, ctx, tmp, testEnv, container)
 	assertOpenClawVersion(t, ctx, tmp, testEnv, container, openClaw.Version)
 	waitForTmuxTarget(t, ctx, tmp, testEnv, container, "main:openclaw")
+	waitForOpenClawTUIReady(t, ctx, tmp, testEnv, container, "main:openclaw")
 	waitForEngramPolling(t, telegram, 20*time.Second)
+	assertOpenClawCompositionVersions(t, ctx, tmp, testEnv, container, openClaw.Version)
 
 	telegram.enqueueText("/attach main:openclaw")
 	telegram.waitOutbound(t, 20*time.Second, "attached existing tmux target")
@@ -93,10 +95,11 @@ USER node
 		pane, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:openclaw")
 		audit, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "cat", "/workspace/.engram/audit.jsonl")
 		state, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "cat", "/workspace/.engram/state.json")
+		diagnostics := openClawTerminalDiagnostics(ctx, tmp, testEnv, container)
 		telegram.mu.Lock()
 		outbound := append([]telegramOutbound(nil), telegram.outbound...)
 		telegram.mu.Unlock()
-		t.Fatalf("OpenClaw never reached the declared provider\npane:\n%s\nEngram state:\n%s\nEngram audit:\n%s\nTelegram outbound: %#v", pane, state, audit, outbound)
+		t.Fatalf("OpenClaw never reached the declared provider\npane:\n%s\nEngram state:\n%s\nEngram audit:\n%s\nTerminal boundary:\n%s\nTelegram outbound: %#v", pane, state, audit, diagnostics, outbound)
 	}
 	waitFor(t, 30*time.Second, func() (bool, string) {
 		out, err := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:openclaw")
@@ -155,7 +158,7 @@ func writeEngramOpenClawDeclaration(t *testing.T, path, world, image, engram, op
 		t.Fatal(err)
 	}
 	tuiShell := strings.Join(openClawEnvCommand("/usr/local/bin/openclaw", "tui", "--url", "ws://127.0.0.1:18789", "--token", openClawGatewayToken, "--session", "engram-composition", "--timeout-ms", "20000"), " ")
-	tmuxCommand := []string{"/bin/sh", "-c", "until /usr/bin/curl --fail --silent http://127.0.0.1:18789/readyz >/dev/null; do sleep 0.1; done; /usr/bin/tmux new-session -d -x 120 -y 40 -s main -n openclaw " + shellQuote(tuiShell) + " && exec /usr/bin/tmux wait-for kenogram-service-stop"}
+	tmuxCommand := []string{"/bin/sh", "-c", "until /usr/bin/curl --fail --silent http://127.0.0.1:18789/readyz >/dev/null; do sleep 0.1; done; cd /workspace && /usr/bin/tmux new-session -d -x 120 -y 40 -s main -n openclaw " + shellQuote(tuiShell) + " && exec /usr/bin/tmux wait-for kenogram-service-stop"}
 	tmuxJSON, err := json.Marshal(tmuxCommand)
 	if err != nil {
 		t.Fatal(err)
@@ -222,6 +225,75 @@ func waitForTmuxTarget(t *testing.T, ctx context.Context, dir string, env []stri
 		out, err := runResult(ctx, dir, env, "podman", "exec", container, "tmux", "display-message", "-p", "-t", target, "#{pane_id}")
 		return err == nil && strings.HasPrefix(strings.TrimSpace(out), "%"), out
 	})
+}
+
+func waitForOpenClawTUIReady(t *testing.T, ctx context.Context, dir string, env []string, container, target string) {
+	t.Helper()
+	waitFor(t, 45*time.Second, func() (bool, string) {
+		pane, err := runResult(ctx, dir, env, "podman", "exec", container, "tmux", "capture-pane", "-p", "-t", target)
+		if err != nil {
+			return false, pane
+		}
+		paneTTY, err := runResult(ctx, dir, env, "podman", "exec", container, "tmux", "display-message", "-p", "-t", target, "#{pane_tty}")
+		if err != nil {
+			return false, paneTTY
+		}
+		paneTTY = strings.TrimSpace(paneTTY)
+		modes, err := runResult(ctx, dir, env, "podman", "exec", container, "stty", "-F", paneTTY, "-a")
+		if err != nil {
+			return false, modes
+		}
+		ready := strings.Contains(pane, "gateway connected | idle") &&
+			strings.Contains(modes, "-icanon") &&
+			strings.Contains(modes, "-icrnl")
+		return ready, fmt.Sprintf("pane tty: %s\nterminal modes:\n%s\npane:\n%s", paneTTY, modes, pane)
+	})
+}
+
+func assertOpenClawCompositionVersions(t *testing.T, ctx context.Context, dir string, env []string, container, openClawVersion string) {
+	t.Helper()
+	command := `printf 'tmux='; tmux -V; printf 'openclaw='; /usr/local/bin/openclaw --version; printf 'pi-tui='; node -p "require('/app/node_modules/@earendil-works/pi-tui/package.json').version"`
+	out := run(t, ctx, dir, env, "podman", "exec", container, "/bin/sh", "-c", command)
+	if !strings.Contains(out, "openclaw=OpenClaw "+openClawVersion) || !strings.Contains(out, "pi-tui=0.78.0") {
+		t.Fatalf("unexpected composition versions:\n%s", out)
+	}
+	t.Logf("composition versions:\n%s", strings.TrimSpace(out))
+}
+
+func openClawTerminalDiagnostics(ctx context.Context, dir string, env []string, container string) string {
+	command := `
+printf '%s\n' '--- versions ---'
+tmux -V
+/usr/local/bin/openclaw --version
+printf 'pi-tui '
+node -p "require('/app/node_modules/@earendil-works/pi-tui/package.json').version"
+printf '%s\n' '--- tmux options ---'
+for option in default-terminal extended-keys extended-keys-format terminal-features terminal-overrides; do
+  value=$(tmux show-options -Agv "$option" 2>/dev/null || tmux show-options -Asgv "$option" 2>/dev/null || true)
+  printf '%s=%s\n' "$option" "$value"
+done
+tmux display-message -p -t main:openclaw 'pane=#{pane_id} tty=#{pane_tty} term=#{client_termname} features=#{client_termfeatures}' || true
+printf '%s\n' '--- TUI process terminal state ---'
+for pid in $(pgrep -f 'openclaw.*tui'); do
+  tty=$(readlink "/proc/$pid/fd/0" 2>/dev/null || true)
+  case "$tty" in
+    /dev/pts/*)
+      printf 'pid=%s stdin=%s\n' "$pid" "$tty"
+      tr '\000' '\n' < "/proc/$pid/environ" | grep -E '^(TERM|COLORTERM|TERM_PROGRAM|KITTY_WINDOW_ID|TMUX)=' || true
+      stty -a < "/proc/$pid/fd/0" || true
+      for fd in "/proc/$pid/fd"/*; do
+        target=$(readlink "$fd" 2>/dev/null || true)
+        case "$target" in /dev/pts/*) printf 'tty-fd=%s target=%s\n' "${fd##*/}" "$target";; esac
+      done
+      ;;
+  esac
+done
+`
+	out, err := runResult(ctx, dir, env, "podman", "exec", container, "/bin/sh", "-c", command)
+	if err != nil {
+		return fmt.Sprintf("diagnostic command failed: %v\n%s", err, out)
+	}
+	return out
 }
 
 func waitForEngramPolling(t *testing.T, fixture *telegramFixture, timeout time.Duration) {

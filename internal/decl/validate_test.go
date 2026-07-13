@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -54,6 +55,40 @@ func TestValidateRejectsPermissiveSecret(t *testing.T) {
 	}
 	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "group or other") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestValidateChecksEverySecretTreeNode(t *testing.T) {
+	d, dir := validForValidation(t)
+	secretDir := filepath.Join(dir, "secret-dir")
+	if err := os.Mkdir(secretDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(secretDir, "token")
+	if err := os.WriteFile(nested, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d.Copies[0].Source = "secret-dir"
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "group or other") {
+		t.Fatalf("permissive nested secret = %v", err)
+	}
+	if err := os.Chmod(nested, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(d, dir); err != nil {
+		t.Fatalf("private secret tree rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsSpecialMountSource(t *testing.T) {
+	d, dir := validForValidation(t)
+	special := filepath.Join(dir, "runtime.sock")
+	if err := syscall.Mkfifo(special, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.Mounts[0].Source = "runtime.sock"
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "regular file or directory") {
+		t.Fatalf("special mount source = %v", err)
 	}
 }
 

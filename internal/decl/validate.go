@@ -60,12 +60,8 @@ func Validate(d Declaration, declarationDir string) error {
 			return fmt.Errorf("copies[%d].target %q overlaps a reserved path", i, c.Target)
 		}
 		if c.Secret {
-			info, err := os.Stat(resolveSource(declarationDir, c.Source))
-			if err != nil {
-				return fmt.Errorf("copies[%d]: stat secret: %w", i, err)
-			}
-			if info.Mode().Perm()&0o077 != 0 {
-				return fmt.Errorf("copies[%d].source secret permissions %04o grant group or other access", i, info.Mode().Perm())
+			if err := validateSecretSource(resolveSource(declarationDir, c.Source)); err != nil {
+				return fmt.Errorf("copies[%d].source: %w", i, err)
 			}
 		}
 	}
@@ -134,9 +130,15 @@ func sourceExists(dir, source string) error {
 		return fmt.Errorf("source must not be empty")
 	}
 	resolved := resolveSource(dir, source)
-	_, err := os.Lstat(resolved)
+	info, err := os.Lstat(resolved)
 	if err != nil {
 		return fmt.Errorf("source %q: %w", source, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("source %q contains a symlink; symlinked host sources are not accepted", source)
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return fmt.Errorf("source %q must be a regular file or directory", source)
 	}
 	evaluated, err := filepath.EvalSymlinks(resolved)
 	if err != nil {
@@ -146,6 +148,24 @@ func sourceExists(dir, source string) error {
 		return fmt.Errorf("source %q contains a symlink; symlinked host sources are not accepted", source)
 	}
 	return nil
+}
+
+func validateSecretSource(root string) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("secret tree contains symlink %q", path)
+		}
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			return fmt.Errorf("secret tree contains unsupported node %q", path)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return fmt.Errorf("secret permissions %04o on %q grant group or other access", info.Mode().Perm(), path)
+		}
+		return nil
+	})
 }
 func absoluteClean(label, path string) error {
 	if !filepath.IsAbs(path) {

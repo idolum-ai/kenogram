@@ -4,12 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 type DigestEntry struct {
@@ -26,9 +28,61 @@ type DigestTree struct {
 }
 
 func Digest(root string) (DigestTree, error) {
+	return digestRetry(root, digestOnce)
+}
+
+const digestAttempts = 8
+
+// ErrWorkspaceChanging identifies a digest that could not observe one stable
+// point-in-time view of a live workspace.
+var ErrWorkspaceChanging = errors.New("workspace is changing")
+
+type treeChangedError struct {
+	path  string
+	cause error
+}
+
+func (e *treeChangedError) Error() string {
+	if e.cause != nil {
+		return fmt.Sprintf("workspace changed while hashing %s: %v", e.path, e.cause)
+	}
+	return fmt.Sprintf("file changed while hashing: %s", e.path)
+}
+
+func (e *treeChangedError) Unwrap() error { return e.cause }
+
+func (e *treeChangedError) Is(target error) bool { return target == ErrWorkspaceChanging }
+
+// IsChanging reports whether a digest failed only because the tree mutated
+// while it was being read.
+func IsChanging(err error) bool { return errors.Is(err, ErrWorkspaceChanging) }
+
+func digestRetry(root string, digest func(string) (DigestTree, error)) (DigestTree, error) {
+	var last error
+	for attempt := 0; attempt < digestAttempts; attempt++ {
+		tree, err := digest(root)
+		if err == nil {
+			return tree, nil
+		}
+		var changed *treeChangedError
+		if !errors.As(err, &changed) {
+			return DigestTree{}, fmt.Errorf("digest workspace: %w", err)
+		}
+		last = err
+		if attempt+1 < digestAttempts {
+			time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+		}
+	}
+	return DigestTree{}, fmt.Errorf("digest workspace after %d attempts: %w", digestAttempts, last)
+}
+
+func digestOnce(root string) (DigestTree, error) {
 	entries := []DigestEntry{}
 	err := filepath.WalkDir(root, func(path string, item os.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if path != root && os.IsNotExist(walkErr) {
+				return &treeChangedError{path: path, cause: walkErr}
+			}
 			return walkErr
 		}
 		rel, err := filepath.Rel(root, path)
@@ -41,6 +95,9 @@ func Digest(root string) (DigestTree, error) {
 		}
 		info, err := item.Info()
 		if err != nil {
+			if path != root && os.IsNotExist(err) {
+				return &treeChangedError{path: path, cause: err}
+			}
 			return err
 		}
 		entry := DigestEntry{Path: rel, Mode: uint32(info.Mode().Perm()), Size: info.Size()}
@@ -77,7 +134,7 @@ func Digest(root string) (DigestTree, error) {
 		return nil
 	})
 	if err != nil {
-		return DigestTree{}, fmt.Errorf("digest workspace: %w", err)
+		return DigestTree{}, err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
 	raw, err := json.Marshal(entries)
@@ -102,7 +159,7 @@ func hashFile(path string, before os.FileInfo) (string, error) {
 		return "", err
 	}
 	if before.Size() != after.Size() || before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) {
-		return "", fmt.Errorf("file changed while hashing: %s", path)
+		return "", &treeChangedError{path: path}
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }

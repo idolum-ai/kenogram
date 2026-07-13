@@ -13,8 +13,26 @@ make build
 ./bin/kenogram up --dry-run ./kenogram.example.toml
 ```
 
-This first command is read-only. Before applying a real declaration, replace the
-example image digest and review its mounts and destinations. Durable state lives
+The dry run is read-only; `kenogram.example.toml` is a planning/schema example,
+not an apply-ready world. Before start, the materialized world must provide
+`/usr/bin/tail`, `/bin/sh`, the declared user, and every declared service
+binary; executables may come from the base or declared copies. Normal
+`kenogram enter` also expects `/usr/bin/tmux` and a `main` session;
+`enter --repair` needs only `/bin/sh`.
+
+After authoring and dry-running a real declaration, the lifecycle follows this
+illustrative sequence:
+
+```sh
+./bin/kenogram up --yes ./world.toml
+./bin/kenogram status engineering
+./bin/kenogram enter engineering       # or: ./bin/kenogram enter --repair engineering
+./bin/kenogram down engineering
+./bin/kenogram up --yes ./world.toml   # restart or reconcile
+./bin/kenogram destroy --yes engineering
+```
+
+Replace `engineering` with the declaration's name. Durable state lives
 under `$XDG_DATA_HOME/kenogram/worlds` (normally
 `~/.local/share/kenogram/worlds`); tests and automation may set
 `KENOGRAM_STATE_DIR`.
@@ -38,11 +56,12 @@ ranges. `make integration` verifies the real namespace boundary; it is mandatory
 in CI and intentionally fails rather than weakening isolation when those host
 prerequisites are absent.
 
-`make e2e` runs the release-pinned composition proofs. Kenogram isolates the
-OpenClaw `2026.6.11` TUI with a deterministic fake model, accepts the Engram
-`v0.3.0` release, and proves the hermetic fake-Telegram → Engram → tmux →
-OpenClaw path, including Bot API file download routing. Pull requests require
-the OpenClaw isolation proof; the full composition runs on `main` and nightly.
+`make e2e` runs the release-pinned composition proofs. Kenogram isolates
+OpenClaw `2026.6.11` with deterministic fake Telegram and model services,
+Hermes Agent `v2026.7.7.2` with the same hermetic boundaries, and accepts the
+Engram `v0.3.0` release. Separate proofs cover each agent's native Telegram
+path and fake-Telegram → Engram → tmux → agent path. Pull requests require
+both isolation and Engram composition proofs.
 
 The operator-assisted `make e2e-telegram-canary` is deliberately separate. It
 uses a protected canary bot to prove the real Telegram path and never runs on a
@@ -50,8 +69,8 @@ pull request. Exact commands and secret requirements are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md#composition-proofs). Security reports belong
 in GitHub's private vulnerability-reporting flow.
 
-Published binaries are installed with `./scripts/install-release.sh vX.Y.Z`;
-the installer verifies the release checksum and embedded identity but does not
-install Kenogram's host prerequisites. The reviewed candidate and immutable
-publication contract is documented in
+Once a release exists, a repository checkout can install it with
+`./scripts/install-release.sh vX.Y.Z`. The installer verifies the release
+checksum and embedded identity but does not install Kenogram's host
+prerequisites. The reviewed candidate and immutable publication contract is documented in
 [`docs/release-strategy.md`](docs/release-strategy.md).
