@@ -107,7 +107,7 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 func writeEngramHermesDeclaration(t *testing.T, path, world, image, engram, hermesConfig, engramEnv, providerHost string, providerPort int, telegramHost string, telegramPort int) {
 	t.Helper()
 	tmuxCopies := hermesTmuxCopies(t)
-	tuiShell := shellJoin(hermesEnvCommand("/opt/hermes/.venv/bin/hermes", "--tui", "--ignore-rules", "--provider", "custom", "--model", "proof"))
+	tuiShell := shellJoin(hermesEnvCommand("/opt/hermes/.venv/bin/hermes", "--tui", "--ignore-rules"))
 	bootstrap := "mkdir -p /workspace/.hermes && cp /etc/hermes-config.yaml /workspace/.hermes/config.yaml && chmod 0600 /workspace/.hermes/config.yaml"
 	tmuxCommand := []string{"/bin/sh", "-c", bootstrap + " && cd /workspace && /usr/local/bin/tmux new-session -d -x 120 -y 40 -s main -n hermes " + shellQuote(tuiShell) + " && exec /usr/local/bin/tmux wait-for kenogram-service-stop"}
 	tmuxJSON, err := json.Marshal(tmuxCommand)

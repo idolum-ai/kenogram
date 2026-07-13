@@ -197,13 +197,15 @@ func writeHermesConfig(t *testing.T, path, providerHost string, providerPort int
       base_file_url: %q
 `, strconv.FormatInt(telegramFixtureUser, 10), telegramBase+"/bot", telegramBase+"/file/bot")
 	}
-	body := fmt.Sprintf(`model:
-  provider: custom
-  model: proof
+	body := fmt.Sprintf(`custom_providers:
+  - name: kenogram-proof
+    base_url: http://%s:%d/v1
+    api_key: %q
+    api_mode: chat_completions
+    model: proof
+model:
+  provider: custom:kenogram-proof
   default: proof
-  base_url: http://%s:%d/v1
-  api_key: %q
-  api_mode: chat_completions
 display:
   interface: tui
 %s`, providerHost, providerPort, hermesSecretCanary, telegramConfig)
@@ -339,7 +341,7 @@ func assertHermesIsolation(t *testing.T, ctx context.Context, dir string, env []
 
 func runHermesQuery(t *testing.T, ctx context.Context, dir string, env []string, container string, provider *observedProvider, marker string) {
 	t.Helper()
-	args := append([]string{"exec", container}, hermesEnvCommand("/opt/hermes/.venv/bin/hermes", "chat", "--query", "Reply with the proof marker and preserve this request marker: "+marker, "--quiet", "--ignore-rules", "--provider", "custom", "--model", "proof")...)
+	args := append([]string{"exec", container}, hermesEnvCommand("/opt/hermes/.venv/bin/hermes", "chat", "--query", "Reply with the proof marker and preserve this request marker: "+marker, "--quiet", "--ignore-rules")...)
 	out := run(t, ctx, dir, env, "podman", args...)
 	provider.waitObservedContaining(t, 45*time.Second, marker)
 	if !strings.Contains(out, hermesProof) {
@@ -350,7 +352,7 @@ func runHermesQuery(t *testing.T, ctx context.Context, dir string, env []string,
 func runHermesTUI(t *testing.T, ctx context.Context, dir string, env []string, container string, provider *observedProvider, session, marker string) {
 	t.Helper()
 	_, _ = runResult(ctx, dir, env, "podman", "exec", container, "tmux", "kill-session", "-t", session)
-	command := hermesEnvCommand("/opt/hermes/.venv/bin/hermes", "--tui", "--ignore-rules", "--provider", "custom", "--model", "proof")
+	command := hermesEnvCommand("/opt/hermes/.venv/bin/hermes", "--tui", "--ignore-rules")
 	args := append([]string{"exec", container, "tmux", "new-session", "-d", "-x", "120", "-y", "40", "-s", session}, command...)
 	run(t, ctx, dir, env, "podman", args...)
 	waitForHermesTUIReady(t, ctx, dir, env, container, session)
