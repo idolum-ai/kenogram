@@ -3,16 +3,20 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/idolum-ai/kenogram/internal/app"
+	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/netns"
 	"github.com/idolum-ai/kenogram/internal/plan"
 	"github.com/idolum-ai/kenogram/internal/proxy"
@@ -26,8 +30,39 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printHelp(stderr)
 		return 2
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	if args[0] == backend.AppleMachineBridgeCommand {
+		if runtime.GOOS != "linux" {
+			fmt.Fprintln(stderr, "runtime: the Apple machine bridge is Linux-only")
+			return 1
+		}
+		decoded, err := backend.DecodeAppleMachineArguments(args[1:])
+		if err != nil {
+			fmt.Fprintln(stderr, "runtime: decode Apple machine arguments:", err)
+			return 1
+		}
+		return run(decoded, stdout, stderr)
+	}
+	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
+		fmt.Fprintln(stdout, version.String())
+		return 0
+	}
+	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		printHelp(stdout)
+		return 0
+	}
+	ctx, stop := operationContext(context.Background())
 	defer stop()
+	launcher, err := backend.AppleMachineFromEnvironment(runtime.GOOS, os.Getenv, nil)
+	if err != nil {
+		fmt.Fprintln(stderr, "runtime:", err)
+		return 1
+	}
+	if launcher != nil {
+		if err := launcher.Launch(ctx, args); err != nil {
+			return reportLauncherError(err, stderr)
+		}
+		return 0
+	}
 	switch args[0] {
 	case "_netns-listener":
 		return runNetnsListener(args[1:], stderr)
@@ -51,17 +86,42 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runRepairHistory(args[1:], stdout, stderr)
 	case "worlds":
 		return runWorlds(args[1:], stdout, stderr)
-	case "version", "--version", "-v":
-		fmt.Fprintln(stdout, version.String())
-		return 0
-	case "help", "--help", "-h":
-		printHelp(stdout)
-		return 0
 	default:
 		fmt.Fprintln(stderr, "unknown command:", args[0])
 		printHelp(stderr)
 		return 2
 	}
+}
+
+func operationContext(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	signals := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case received := <-signals:
+			cancel(&backend.SignalCause{Signal: received})
+		case <-done:
+		}
+	}()
+	var once sync.Once
+	return ctx, func() {
+		once.Do(func() {
+			signal.Stop(signals)
+			close(done)
+			cancel(context.Canceled)
+		})
+	}
+}
+
+func reportLauncherError(err error, stderr io.Writer) int {
+	var remote *backend.RemoteExitError
+	if errors.As(err, &remote) {
+		return remote.Code
+	}
+	fmt.Fprintln(stderr, "runtime:", err)
+	return 1
 }
 
 var newApp = func(stdout io.Writer) (*app.App, error) {
