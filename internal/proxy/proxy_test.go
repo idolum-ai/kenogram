@@ -154,6 +154,9 @@ func TestGrantExpiryClosesAdmittedConnection(t *testing.T) {
 	}
 	client, server := net.Pipe()
 	defer client.Close()
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	p.track(server, admission)
 	client.SetReadDeadline(time.Now().Add(time.Second))
 	buffer := make([]byte, 1)
@@ -179,5 +182,48 @@ func TestRemoveClosesAdmittedConnection(t *testing.T) {
 	}
 	if _, ok := p.allowed(d); ok {
 		t.Fatal("destination remained allowed")
+	}
+}
+
+func TestReconcileRestoresDeclarationAndClearsTemporaryPolicy(t *testing.T) {
+	declared := Destination{"declared.example", 443}
+	temporary := Destination{"temporary.example", 8443}
+	p := New([]Destination{declared}, Options{})
+	p.Remove(declared)
+	if _, ok := p.allowed(declared); ok {
+		t.Fatal("removed declaration remained allowed")
+	}
+	if err := p.Grant(temporary, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	admission, ok := p.allowed(temporary)
+	if !ok {
+		t.Fatal("temporary grant absent")
+	}
+	client, server := net.Pipe()
+	defer client.Close()
+	p.track(server, admission)
+	if err := p.Reconcile([]Destination{declared}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.allowed(declared); !ok {
+		t.Fatal("declaration was not restored")
+	}
+	if _, ok := p.allowed(temporary); ok {
+		t.Fatal("temporary grant survived declaration reconciliation")
+	}
+	if _, err := client.Read(make([]byte, 1)); err == nil {
+		t.Fatal("connection admitted by temporary policy survived reconciliation")
+	}
+}
+
+func TestReconcileRejectsInvalidPolicyWithoutChangingCurrentPolicy(t *testing.T) {
+	declared := Destination{"declared.example", 443}
+	p := New([]Destination{declared}, Options{})
+	if err := p.Reconcile([]Destination{{Host: "", Port: 443}}); err == nil {
+		t.Fatal("invalid reconciliation succeeded")
+	}
+	if _, ok := p.allowed(declared); !ok {
+		t.Fatal("invalid reconciliation changed current policy")
 	}
 }

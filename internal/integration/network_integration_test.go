@@ -93,6 +93,16 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 	if !strings.Contains(proxied, "200") {
 		t.Fatalf("proxy=%q", proxied)
 	}
+	run(t, tmp, env, bin, "revoke", "integration", fmt.Sprintf("localhost:%d", port))
+	revoked := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", port))
+	if !strings.Contains(revoked, "403") {
+		t.Fatalf("revoked declaration remained allowed: %q", revoked)
+	}
+	run(t, tmp, env, bin, "up", "--yes", declaration)
+	reconciled := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", port))
+	if !strings.Contains(reconciled, "200") {
+		t.Fatalf("unchanged declaration did not restore policy: %q", reconciled)
+	}
 	direct = run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "dial", fmt.Sprintf("127.0.0.1:%d", port))
 	if !strings.Contains(direct, "unroutable") {
 		t.Fatalf("bypass=%q", direct)

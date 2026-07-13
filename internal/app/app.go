@@ -343,12 +343,26 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 		return false, nil
 	}
 	proxyPID := state.ProxyPID
-	if len(prepared.Result.Plan.NetworkAllow) > 0 && !a.proxyAlive(l) {
-		proxyPID, err = a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
-		if err != nil {
+	if len(prepared.Result.Plan.NetworkAllow) > 0 {
+		if a.proxyAlive(l) {
+			destinations := make([]proxy.Destination, 0, len(prepared.Result.Plan.NetworkAllow))
+			for _, allowed := range prepared.Result.Plan.NetworkAllow {
+				destinations = append(destinations, proxy.Destination{Host: allowed.Host, Port: int(allowed.Port)})
+			}
+			err = proxy.SendControl(l.ProxySocket, proxy.ControlRequest{Operation: "reconcile", Destinations: destinations})
+		}
+		if !a.proxyAlive(l) || err != nil {
+			proxyPID, err = a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
+			if err != nil {
+				return false, err
+			}
+			proxyStarted = true
+		}
+	} else if a.proxyAlive(l) {
+		if err := a.stopProxy(l); err != nil {
 			return false, err
 		}
-		proxyStarted = true
+		proxyPID = 0
 	}
 	if restarted {
 		if err := a.startServices(ctx, state.Container, prepared.Result.Plan.Services); err != nil {

@@ -309,6 +309,33 @@ func (p *Proxy) Remove(d Destination) {
 	}
 	p.mu.Unlock()
 }
+
+// Reconcile restores declaration authority. Temporary grants are intentionally
+// cleared: applying one declaration twice must produce the same network policy.
+func (p *Proxy) Reconcile(destinations []Destination) error {
+	replacement := make(map[string]string, len(destinations))
+	for _, destination := range destinations {
+		if destination.Host == "" || destination.Port < 1 || destination.Port > 65535 {
+			return fmt.Errorf("invalid destination")
+		}
+		key := destination.key()
+		replacement[key] = "declaration:" + key
+	}
+	p.mu.Lock()
+	p.durable = replacement
+	p.grants = map[string]grant{}
+	validAdmissions := map[string]bool{}
+	for _, admission := range replacement {
+		validAdmissions[admission] = true
+	}
+	for _, active := range p.active {
+		if !validAdmissions[active.admission] {
+			_ = active.conn.Close()
+		}
+	}
+	p.mu.Unlock()
+	return nil
+}
 func relay(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
