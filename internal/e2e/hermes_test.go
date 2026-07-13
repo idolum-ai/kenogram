@@ -189,13 +189,14 @@ func writeHermesConfig(t *testing.T, path, providerHost string, providerPort int
 		telegramConfig = fmt.Sprintf(`platforms:
   telegram:
     enabled: true
+    token: %q
     allow_from:
       - %q
     dm_policy: allowlist
     extra:
       base_url: %q
       base_file_url: %q
-`, strconv.FormatInt(telegramFixtureUser, 10), telegramBase+"/bot", telegramBase+"/file/bot")
+`, telegramFixtureToken, strconv.FormatInt(telegramFixtureUser, 10), telegramBase+"/bot", telegramBase+"/file/bot")
 	}
 	body := fmt.Sprintf(`custom_providers:
   - name: kenogram-proof
@@ -310,7 +311,7 @@ func shellJoin(command []string) string {
 }
 
 func hermesEnvCommand(args ...string) []string {
-	command := []string{"/usr/bin/env", "HOME=/workspace/.hermes", "HERMES_HOME=/workspace/.hermes", "HERMES_WRITE_SAFE_ROOT=/workspace", "HERMES_DISABLE_LAZY_INSTALLS=1", "HERMES_TELEGRAM_DISABLE_FALLBACK_IPS=1", "HERMES_YOLO_MODE=1", "HERMES_ACCEPT_HOOKS=1", "TELEGRAM_BOT_TOKEN=" + telegramFixtureToken, "TELEGRAM_ALLOWED_USERS=" + strconv.FormatInt(telegramFixtureUser, 10), "TERM=xterm-256color"}
+	command := []string{"/usr/bin/env", "HOME=/workspace/.hermes", "HERMES_HOME=/workspace/.hermes", "HERMES_WRITE_SAFE_ROOT=/workspace", "HERMES_DISABLE_LAZY_INSTALLS=1", "HERMES_TELEGRAM_DISABLE_FALLBACK_IPS=1", "HERMES_YOLO_MODE=1", "HERMES_ACCEPT_HOOKS=1", "TERM=xterm-256color"}
 	return append(command, args...)
 }
 
