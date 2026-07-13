@@ -12,7 +12,7 @@ also reports the byte-sensitive declaration digest.
 | `up --dry-run <file>` | validate and render intent | no |
 | `up --yes <file>` | reconcile and apply one generation | yes |
 | `down <world>` | stop the active generation | yes |
-| `destroy --yes <world>` | remove runtime and tombstone history | yes |
+| `destroy --yes <world>` | remove all recorded generations and tombstone history | yes |
 | `enter [--repair] <world>` | attach to the world | world processes may |
 | `status <world>` / `worlds` | report recorded and observed state | no |
 | `allow … --for <duration>` | grant temporary destination access | yes |
@@ -35,8 +35,9 @@ evidence. Destinations accepted by `allow` and `revoke` use canonical
 userinfo, path, query, or fragment.
 
 `allow`, `revoke`, and `repair-history` reject mutation while a durable
-transition is unresolved. The operator must first recover it with `up`, `down`,
-or `destroy`. `status --json` preserves the `state` and `runtime_evidence`
+transition is unresolved. `up` and `down` first converge the recorded authority;
+confirmed `destroy` instead removes every generation named by the transition.
+`status --json` preserves the `state` and `runtime_evidence`
 aliases while also reporting authoritative and candidate observations; during
 recovery, its declaration and state provenance is `transition.json`.
 
@@ -48,5 +49,6 @@ Durable state is under `$XDG_DATA_HOME/kenogram/worlds`, normally
 interrupted `up`, run the same `up` again: the transition record is reconciled
 under the world lock before new work begins. If reconciliation cannot establish
 one authority, Kenogram stops and preserves the record rather than guessing.
-Use `status`, then `enter --repair`, to inspect a world; never edit state files
-while an operation is running.
+Use `status`, then `enter --repair`, to inspect a world. If the world is no
+longer wanted, `destroy --yes` remains available without recovery. Never edit
+state files while an operation is running.

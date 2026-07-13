@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,23 @@ import (
 	"testing"
 	"time"
 )
+
+func TestControlPingProvesRoundTrip(t *testing.T) {
+	p := New(nil, Options{})
+	client, server := net.Pipe()
+	go p.control(server)
+	defer client.Close()
+	if err := json.NewEncoder(client).Encode(ControlRequest{Operation: "ping"}); err != nil {
+		t.Fatal(err)
+	}
+	var response ControlResponse
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK || response.Error != "" {
+		t.Fatalf("ping response = %#v", response)
+	}
+}
 
 type resolver struct {
 	mu    sync.Mutex

@@ -20,6 +20,10 @@ binary; executables may come from the base or declared copies. Normal
 `kenogram enter` also expects `/usr/bin/tmux` and a `main` session;
 `enter --repair` needs only `/bin/sh`.
 
+To build, enter, restart, and destroy a minimal live world, follow the
+[first-world guide](https://github.com/idolum-ai/kenogram/blob/main/docs/getting-started.md). It includes the rootless host
+preflight, a small base image, and an apply-ready declaration.
+
 After authoring and dry-running a real declaration, the lifecycle follows this
 illustrative sequence:
 
@@ -56,18 +60,12 @@ ranges. `make integration` verifies the real namespace boundary; it is mandatory
 in CI and intentionally fails rather than weakening isolation when those host
 prerequisites are absent.
 
-`make e2e` runs the release-pinned composition proofs. Kenogram isolates
-OpenClaw `2026.6.11` with deterministic fake Telegram and model services,
-Hermes Agent `v2026.7.7.2` with the same hermetic boundaries, and accepts the
-Engram `v0.3.0` release. Separate proofs cover each agent's native Telegram
-path and fake-Telegram → Engram → tmux → agent path. Pull requests require
-both isolation and Engram composition proofs.
-
-The operator-assisted `make e2e-telegram-canary` is deliberately separate. It
-uses a protected canary bot to prove the real Telegram path and never runs on a
-pull request. Exact commands and secret requirements are in
-[`CONTRIBUTING.md`](CONTRIBUTING.md#composition-proofs). Security reports belong
-in GitHub's private vulnerability-reporting flow.
+`make e2e` runs release-pinned isolation and composition proofs against Engram,
+OpenClaw, and Hermes Agent. The exact fixture versions, boundaries, and separate
+operator-assisted Telegram canary are recorded in the [evidence
+index](requirements/INDEX.md#executable-checks) and [contributor
+contract](CONTRIBUTING.md#composition-proofs). Security reports belong in
+GitHub's private vulnerability-reporting flow.
 
 Once a release exists, a repository checkout can install it with
 `./scripts/install-release.sh vX.Y.Z`. The installer verifies the release

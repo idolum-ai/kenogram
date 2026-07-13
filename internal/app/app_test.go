@@ -287,6 +287,31 @@ func TestStartServicesAdoptsExistingSupervisor(t *testing.T) {
 	}
 }
 
+func TestStartProxyDoesNotAcceptStaleSocketAsReady(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.ProxySocket, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(base, "no-proxy.sh")
+	script := "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile :; do sleep 0.1; done\n"
+	if err := os.WriteFile(executable, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{BaseDir: base, Executable: executable}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if _, err := a.startProxy(ctx, layout, 123, nil); err == nil {
+		t.Fatal("proxy without a control server was accepted as ready")
+	}
+	if _, err := os.Stat(layout.ProxySocket); !os.IsNotExist(err) {
+		t.Fatalf("stale proxy socket remains: %v", err)
+	}
+}
+
 func TestStoppedStatusStillObservesRetainedContainer(t *testing.T) {
 	base := t.TempDir()
 	l := worldfs.For(base, "w")

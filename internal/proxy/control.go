@@ -48,6 +48,8 @@ func (p *Proxy) control(conn net.Conn) {
 		return
 	}
 	switch request.Operation {
+	case "ping":
+		json.NewEncoder(conn).Encode(ControlResponse{OK: true})
 	case "grant":
 		duration, err := time.ParseDuration(request.Duration)
 		if err == nil {

@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 required=(
-  README.md CHANGELOG.md docs/design.md docs/kenogrammatics.md
+  README.md CHANGELOG.md docs/design.md docs/getting-started.md docs/kenogrammatics.md
   docs/release-strategy.md requirements/INDEX.md
   requirements/declaration.md requirements/plan.md requirements/operations.md
   requirements/security.md requirements/network.md requirements/lifecycle.md

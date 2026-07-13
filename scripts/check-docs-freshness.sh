@@ -6,6 +6,8 @@ rg -q 'Status: binding contract' requirements/declaration.md
 rg -q 'Evidence and open boundaries' requirements/INDEX.md
 rg -q 'make integration' README.md requirements/INDEX.md
 rg -q 'make e2e' README.md requirements/INDEX.md
+rg -q 'first-world guide' README.md
+rg -q 'podman unshare true' docs/getting-started.md
 rg -q 'not a morphogrammatic calculus' docs/kenogrammatics.md
 rg -q 'candidate-reviewed tree' docs/release-strategy.md
 rg -q 'scripts/install-release.sh' README.md docs/release-strategy.md

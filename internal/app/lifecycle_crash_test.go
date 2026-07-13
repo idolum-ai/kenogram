@@ -249,7 +249,7 @@ func TestLifecycleSIGKILLHelper(t *testing.T) {
 	layout := worldfs.For(base, "w")
 	prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
 	runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
-	a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(1, 0) }, Executable: crashProxyExecutable(t, base)}
+	a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(1, 0) }, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
 	if err := a.Up(context.Background(), prior); err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestLifecycleRecoversAfterSIGKILLAtCommitBoundaries(t *testing.T) {
 			layout := worldfs.For(base, "w")
 			prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
 			runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
-			a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(3, 0) }, Executable: crashProxyExecutable(t, base)}
+			a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(3, 0) }, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
 			defer func() { _ = a.stopProxy(layout) }()
 			transition, transitionErr := layout.ReadTransition()
 			expectedGeneration := int64(2)
@@ -358,7 +358,7 @@ func TestCommitRecoveryFailureNeverReversesAuthority(t *testing.T) {
 					return true, nil
 				}
 			}
-			a := &App{Backend: podman, BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: crashProxyExecutable(t, base)}
+			a := &App{Backend: podman, BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
 			defer func() { _ = a.stopProxy(layout) }()
 			if err := a.recoverTransition(context.Background(), layout); err == nil || !strings.Contains(err.Error(), "preserving commit transition") {
 				t.Fatalf("first recovery error = %v", err)
@@ -378,6 +378,88 @@ func TestCommitRecoveryFailureNeverReversesAuthority(t *testing.T) {
 	}
 }
 
+func TestCommitRecoveryRestartsStoppedSuccessorAndServices(t *testing.T) {
+	base := t.TempDir()
+	crashAt(t, base, "commit-recorded")
+	layout := worldfs.For(base, "w")
+	prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
+	runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
+	runtime := runner.containers["kenogram-w-g2"]
+	if runtime == nil {
+		t.Fatal("committed successor runtime is absent")
+	}
+	runtime.Running = false
+	runtime.Services = map[string]bool{}
+	if err := runner.save(); err != nil {
+		t.Fatal(err)
+	}
+	proxyBefore, err := os.ReadFile(layout.ProxyPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
+	defer func() { _ = a.stopProxy(layout) }()
+	if err := a.recoverTransition(context.Background(), layout); err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.Running || !runtime.Services["worker"] {
+		t.Fatalf("recovered successor = %#v", runtime)
+	}
+	if !containsCall(runner.calls, "start ", "kenogram-w-g2") {
+		t.Fatalf("recovery did not restart successor: %v", runner.calls)
+	}
+	proxyAfter, err := os.ReadFile(layout.ProxyPID)
+	if err != nil || bytes.Equal(proxyBefore, proxyAfter) {
+		t.Fatalf("network door was not rebound after restart: before=%q after=%q err=%v", proxyBefore, proxyAfter, err)
+	}
+}
+
+func TestDestroyRemovesEveryGenerationWithoutRecoveringMissingSuccessor(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		removeSuccessor bool
+	}{
+		{name: "both-generations-present"},
+		{name: "successor-missing", removeSuccessor: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			crashAt(t, base, "commit-recorded")
+			layout := worldfs.For(base, "w")
+			prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
+			runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
+			if test.removeSuccessor {
+				delete(runner.containers, "kenogram-w-g2")
+				if err := runner.save(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(4, 0) }, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
+			if err := a.Destroy(context.Background(), "w"); err != nil {
+				t.Fatal(err)
+			}
+			if len(runner.containers) != 0 {
+				t.Fatalf("containers survived terminal destroy: %#v", runner.containers)
+			}
+			if _, err := os.Stat(layout.Root); !os.IsNotExist(err) {
+				t.Fatalf("world root survived destroy: %v", err)
+			}
+			matches, err := filepath.Glob(filepath.Join(base, ".destroyed", "w-*", "history.jsonl"))
+			if err != nil || len(matches) != 1 {
+				t.Fatalf("destroyed history = %v, %v", matches, err)
+			}
+			records, err := history.Verify(matches[0])
+			if err != nil || len(records) == 0 {
+				t.Fatalf("destroyed history records = %#v, %v", records, err)
+			}
+			last := records[len(records)-1]
+			if last.Action != "destroy" || last.Outcome != "destroyed" || !strings.Contains(last.Detail, "unresolved commit transition") {
+				t.Fatalf("destroy record = %#v", last)
+			}
+		})
+	}
+}
+
 func TestRollbackRecoveryReplaysServicesAfterStartFailure(t *testing.T) {
 	base := t.TempDir()
 	crashAt(t, base, "predecessor-stopped")
@@ -385,7 +467,7 @@ func TestRollbackRecoveryReplaysServicesAfterStartFailure(t *testing.T) {
 	prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
 	runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
 	runner.failPrefix = "exec --detach kenogram-w-g1"
-	a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: crashProxyExecutable(t, base)}
+	a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
 	defer func() { _ = a.stopProxy(layout) }()
 	if err := a.recoverTransition(context.Background(), layout); err == nil {
 		t.Fatal("first recovery unexpectedly succeeded")
@@ -444,6 +526,11 @@ done
 		t.Fatal(err)
 	}
 	return path
+}
+
+func crashProxyReady(layout worldfs.Layout) bool {
+	_, err := os.Stat(layout.ProxySocket)
+	return err == nil
 }
 
 var lifecycleCrashCheckpoints = []string{
