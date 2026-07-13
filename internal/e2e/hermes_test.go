@@ -83,7 +83,7 @@ func TestHermesInsideKenogram(t *testing.T) {
 	revisionSource := filepath.Join(tmp, "revision")
 	declaration := filepath.Join(tmp, "kenogram.toml")
 	kenogram := filepath.Join(tmp, "kenogram")
-	run(t, ctx, root, append(os.Environ(), "CGO_ENABLED=0"), "go", "build", "-o", kenogram, "./cmd/kenogram")
+	run(t, ctx, root, append(os.Environ(), "CGO_ENABLED=0"), "go", "build", "-buildvcs=false", "-o", kenogram, "./cmd/kenogram")
 	testEnv := append(os.Environ(), "KENOGRAM_STATE_DIR="+stateRoot)
 
 	t.Cleanup(func() {

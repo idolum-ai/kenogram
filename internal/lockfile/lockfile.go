@@ -57,13 +57,21 @@ func ProcessStart(pid int) string {
 	if err != nil {
 		return ""
 	}
-	text := string(raw)
+	return processStartFromStat(string(raw))
+}
+
+func processStartFromStat(text string) string {
 	end := strings.LastIndex(text, ")")
 	if end < 0 {
 		return ""
 	}
 	fields := strings.Fields(text[end+1:])
 	if len(fields) < 20 {
+		return ""
+	}
+	// A zombie cannot own a lock or serve a proxy even if an unreaping parent
+	// leaves its /proc entry visible temporarily.
+	if fields[0] == "Z" {
 		return ""
 	}
 	return fields[19]

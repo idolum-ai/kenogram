@@ -20,4 +20,14 @@ for evidence in \
   'v2026.7.7.2'; do
   rg -Fq "$evidence" requirements/INDEX.md
 done
+e2e_count="$(awk '/^e2e:/ { print NF - 1; exit }' Makefile)"
+test "$e2e_count" -eq 5
+rg -Fq '`make e2e` runs all five' requirements/INDEX.md
+lifecycle_checkpoint_count="$(sed -n '/var lifecycleCrashCheckpoints = \[\]string{/,/^}/p' internal/app/lifecycle_crash_test.go | rg -o '"[^"]+"' | wc -l)"
+test "$lifecycle_checkpoint_count" -eq 14
+rg -Fq 'fourteen lifecycle boundaries' requirements/lifecycle.md
+if rg -iq 'make e2e.{0,40}(three proofs|runs all three)' requirements/INDEX.md README.md; then
+  echo "stale make e2e proof count" >&2
+  exit 1
+fi
 echo "docs freshness check passed"

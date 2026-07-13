@@ -42,6 +42,17 @@ func TestAcquireReclaimsStaleLock(t *testing.T) {
 	defer lock.Release()
 }
 
+func TestProcessStartTreatsZombieAsDead(t *testing.T) {
+	fields := "Z 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 4242"
+	if got := processStartFromStat("99 (proxy worker) " + fields); got != "" {
+		t.Fatalf("zombie start = %q", got)
+	}
+	fields = "S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 4242"
+	if got := processStartFromStat("99 (proxy worker) " + fields); got != "19" {
+		t.Fatalf("live start = %q", got)
+	}
+}
+
 func TestKernelLockSerializesProcessesAfterStaleMetadata(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "world.lock")
 	if err := os.WriteFile(path, []byte("999999 1\n"), 0o600); err != nil {

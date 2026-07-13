@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ type runtimeRunner struct {
 	calls       []string
 	network     string
 	mountSource string
+	containers  string
 }
 
 type destroyFailRunner struct{ runtimeRunner }
@@ -30,6 +32,26 @@ type failOnceRunner struct {
 	prefix string
 	failed bool
 }
+
+type stoppedRunner struct{ runtimeRunner }
+
+func (r *stoppedRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	raw, err := r.runtimeRunner.Run(ctx, name, args...)
+	if len(args) > 0 && args[0] == "inspect" {
+		raw = bytes.Replace(raw, []byte(`"Running":true`), []byte(`"Running":false`), 1)
+		raw = bytes.Replace(raw, []byte(`"Pid":123`), []byte(`"Pid":0`), 1)
+	}
+	return raw, err
+}
+
+type supervisedServiceRunner struct{ calls []string }
+
+func (r *supervisedServiceRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
+	r.calls = append(r.calls, strings.Join(args, " "))
+	return []byte("supervised\n"), nil
+}
+func (r *supervisedServiceRunner) Start(context.Context, string, ...string) error       { return nil }
+func (r *supervisedServiceRunner) Interactive(context.Context, string, ...string) error { return nil }
 
 func (r *failOnceRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	call := strings.Join(args, " ")
@@ -65,19 +87,30 @@ func (r *runtimeRunner) Run(_ context.Context, _ string, args ...string) ([]byte
 		return []byte(`{"host":{"security":{"rootless":true},"cgroupVersion":"v2","idMappings":{"uidmap":[{"size":65536}],"gidmap":[{"size":65536}]}}}`), nil
 	}
 	if len(args) > 0 && args[0] == "inspect" {
+		container := args[len(args)-1]
+		generation := 1
+		if strings.HasSuffix(container, "-g2") {
+			generation = 2
+		}
 		network := r.network
 		if network == "" {
 			network = "none"
 		}
-		return []byte(fmt.Sprintf(`[{"Name":"kenogram-w-g1","BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":"1","io.kenogram.plan-digest":"pd","io.kenogram.declaration-digest":"dd"}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), network, r.mountSource)), nil
+		return []byte(fmt.Sprintf(`[{"Name":%q,"BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":%q,"io.kenogram.plan-digest":"pd","io.kenogram.declaration-digest":"dd"}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, container, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), strconv.Itoa(generation), network, r.mountSource)), nil
 	}
 	if len(args) > 0 && args[0] == "ps" {
+		if r.containers != "" {
+			return []byte(r.containers), nil
+		}
 		return []byte("kenogram-w-g1\n"), nil
 	}
 	return []byte("ok"), nil
 }
-func (r *runtimeRunner) Start(context.Context, string, ...string) error       { return nil }
-func (r *runtimeRunner) Interactive(context.Context, string, ...string) error { return nil }
+func (r *runtimeRunner) Start(context.Context, string, ...string) error { return nil }
+func (r *runtimeRunner) Interactive(_ context.Context, _ string, args ...string) error {
+	r.calls = append(r.calls, "interactive "+strings.Join(args, " "))
+	return nil
+}
 
 func testBackend(r backend.Runner) *backend.Podman {
 	podman := backend.New(r)
@@ -164,11 +197,178 @@ func TestUpRecoversRollbackTransitionBeforeCreating(t *testing.T) {
 	}
 }
 
+func TestStatusAndRepairEntryFollowTransitionAuthority(t *testing.T) {
+	for _, test := range []struct {
+		phase               string
+		authoritative       int64
+		candidate           int64
+		authoritativeTarget string
+	}{
+		{phase: "rollback", authoritative: 1, candidate: 2, authoritativeTarget: "kenogram-w-g1"},
+		{phase: "commit", authoritative: 2, candidate: 1, authoritativeTarget: "kenogram-w-g2"},
+	} {
+		t.Run(test.phase, func(t *testing.T) {
+			base := t.TempDir()
+			layout := worldfs.For(base, "w")
+			if err := layout.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			prior := worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", Status: "running"}
+			successor := worldfs.State{Name: "w", Generation: 2, Container: "kenogram-w-g2", Status: "staging"}
+			if err := layout.WriteState(prior); err != nil {
+				t.Fatal(err)
+			}
+			if err := layout.WriteTransition(worldfs.Transition{Version: 1, Phase: test.phase, Prior: &prior, Successor: successor}); err != nil {
+				t.Fatal(err)
+			}
+			runner := &runtimeRunner{containers: "kenogram-w-g1\nkenogram-w-g2\n"}
+			a := &App{Backend: testBackend(runner), BaseDir: base}
+			status, err := a.Status(context.Background(), "w")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.RecoveryPhase != test.phase || status.Authoritative == nil || status.Authoritative.State.Generation != test.authoritative || status.Candidate == nil || status.Candidate.State.Generation != test.candidate {
+				t.Fatalf("status = %#v", status)
+			}
+			if status.Authoritative.Evidence == nil || status.Authoritative.Evidence.Name != test.authoritativeTarget {
+				t.Fatalf("authoritative evidence = %#v", status.Authoritative.Evidence)
+			}
+			if err := a.Enter(context.Background(), "w", true); err != nil {
+				t.Fatal(err)
+			}
+			if !containsCall(runner.calls, "interactive ", test.authoritativeTarget+" /bin/sh") {
+				t.Fatalf("repair entry did not use authority %s: %v", test.authoritativeTarget, runner.calls)
+			}
+		})
+	}
+}
+
+func TestRollbackWithoutPredecessorReportsCandidateButCannotEnter(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteTransition(worldfs.Transition{Version: 1, Phase: "rollback", Successor: worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1"}}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeRunner{}
+	a := &App{Backend: testBackend(runner), BaseDir: base}
+	status, err := a.Status(context.Background(), "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Authoritative != nil || status.Candidate == nil || status.Candidate.State.Generation != 1 {
+		t.Fatalf("status = %#v", status)
+	}
+	if err := a.Enter(context.Background(), "w", true); err == nil || !strings.Contains(err.Error(), "no authoritative generation") {
+		t.Fatalf("enter error = %v", err)
+	}
+}
+
 func TestServiceScriptReportsStateAndBacksOff(t *testing.T) {
 	script := serviceScript(plan.Service{Name: "worker", Command: []string{"/bin/false"}, Restart: "always"})
-	for _, want := range []string{"/run/kenogram/services", "running %s", "exited %s", "sleep 1"} {
+	for _, want := range []string{"/run/kenogram/services", ".supervisor", "trap", "running %s", "exited %s", "sleep 1"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestStartServicesAdoptsExistingSupervisor(t *testing.T) {
+	runner := &supervisedServiceRunner{}
+	a := &App{Backend: backend.New(runner)}
+	services := []plan.Service{{Name: "worker", Autostart: true, Command: []string{"worker"}}}
+	if err := a.startServices(context.Background(), "kenogram-w-g1", services); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 || strings.Contains(runner.calls[0], "--detach") {
+		t.Fatalf("calls = %v", runner.calls)
+	}
+}
+
+func TestStoppedStatusStillObservesRetainedContainer(t *testing.T) {
+	base := t.TempDir()
+	l := worldfs.For(base, "w")
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	state := worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", Status: "stopped"}
+	if err := l.WriteState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l.History, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &stoppedRunner{runtimeRunner: runtimeRunner{containers: "kenogram-w-g1\n"}}
+	status, err := (&App{Backend: testBackend(runner), BaseDir: base}).Status(context.Background(), "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := status.Authoritative
+	if observation == nil || !observation.Exists || observation.Evidence == nil || observation.Evidence.Running {
+		t.Fatalf("status = %#v", status)
+	}
+}
+
+func TestMutationsFailClosedDuringTransition(t *testing.T) {
+	base := t.TempDir()
+	l := worldfs.For(base, "w")
+	if err := l.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.WriteTransition(worldfs.Transition{Version: 1, Phase: "commit", Successor: worldfs.State{Name: "w", Generation: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{BaseDir: base, Now: time.Now}
+	for name, operation := range map[string]func() error{
+		"allow":          func() error { return a.Allow("w", "example.com:443", "1m") },
+		"revoke":         func() error { return a.Revoke("w", "example.com:443") },
+		"repair-history": func() error { return a.RepairHistory("w") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := operation(); err == nil || !strings.Contains(err.Error(), "unresolved commit transition") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestWorldsUsesTransitionAuthority(t *testing.T) {
+	for _, test := range []struct {
+		phase      string
+		generation int64
+	}{
+		{phase: "rollback", generation: 1},
+		{phase: "commit", generation: 2},
+	} {
+		t.Run(test.phase, func(t *testing.T) {
+			base := t.TempDir()
+			layout := worldfs.For(base, "w")
+			if err := layout.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			prior := worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1"}
+			successor := worldfs.State{Name: "w", Generation: 2, Container: "kenogram-w-g2"}
+			if err := layout.WriteTransition(worldfs.Transition{Version: 1, Phase: test.phase, Prior: &prior, Successor: successor}); err != nil {
+				t.Fatal(err)
+			}
+			worlds, err := (&App{BaseDir: base}).Worlds()
+			if err != nil || len(worlds) != 1 || worlds[0].Generation != test.generation || worlds[0].Status != "recovery-required:"+test.phase {
+				t.Fatalf("worlds = %#v, %v", worlds, err)
+			}
+		})
+	}
+}
+
+func TestInsideDocumentKeepsOptionalTransportsOutOfWorldOntology(t *testing.T) {
+	document := insideDocument()
+	if strings.Contains(strings.ToLower(document), "engram") {
+		t.Fatalf("generated world guidance names an optional transport:\n%s", document)
+	}
+	for _, required := range []string{"request as prose", "operator", "host-side declaration"} {
+		if !strings.Contains(document, required) {
+			t.Fatalf("generated world guidance is missing %q:\n%s", required, document)
 		}
 	}
 }

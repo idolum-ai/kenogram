@@ -10,10 +10,11 @@ import (
 )
 
 type ControlRequest struct {
-	Operation string `json:"operation"`
-	Host      string `json:"host"`
-	Port      int    `json:"port"`
-	Duration  string `json:"duration,omitempty"`
+	Operation    string        `json:"operation"`
+	Host         string        `json:"host,omitempty"`
+	Port         int           `json:"port,omitempty"`
+	Duration     string        `json:"duration,omitempty"`
+	Destinations []Destination `json:"destinations,omitempty"`
 }
 type ControlResponse struct {
 	OK    bool   `json:"ok"`
@@ -63,6 +64,12 @@ func (p *Proxy) control(conn net.Conn) {
 			return
 		}
 		p.Remove(Destination{request.Host, request.Port})
+		json.NewEncoder(conn).Encode(ControlResponse{OK: true})
+	case "reconcile":
+		if err := p.Reconcile(request.Destinations); err != nil {
+			json.NewEncoder(conn).Encode(ControlResponse{Error: err.Error()})
+			return
+		}
 		json.NewEncoder(conn).Encode(ControlResponse{OK: true})
 	default:
 		json.NewEncoder(conn).Encode(ControlResponse{Error: "unsupported operation"})

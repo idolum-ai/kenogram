@@ -10,11 +10,12 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/idolum-ai/kenogram/internal/naming"
 )
 
 type Destination struct {
@@ -59,6 +60,7 @@ type Proxy struct {
 	rateMu     sync.Mutex
 	rateWindow time.Time
 	rateCount  int
+	admission  uint64
 }
 
 func New(destinations []Destination, opts Options) *Proxy {
@@ -79,7 +81,7 @@ func New(destinations []Destination, opts Options) *Proxy {
 	}
 	p := &Proxy{durable: map[string]string{}, grants: map[string]grant{}, active: map[uint64]tracked{}, opts: opts, sem: make(chan struct{}, opts.MaxConnections)}
 	for _, d := range destinations {
-		p.durable[d.key()] = "declaration:" + d.key()
+		p.durable[d.key()] = p.newAdmissionLocked("declaration", d.key())
 	}
 	return p
 }
@@ -148,7 +150,12 @@ func (p *Proxy) handle(client net.Conn) {
 		return
 	}
 	defer outbound.Close()
-	id := p.track(client, admission)
+	id, current := p.trackIfCurrent(client, admission)
+	if !current {
+		p.opts.Logger.Printf("outcome=revoked_during_dial host=%q port=%d", host, port)
+		writeError(client, http.StatusForbidden)
+		return
+	}
 	defer p.untrack(id)
 	p.opts.Logger.Printf("outcome=connected host=%q port=%d address=%q", host, port, address)
 	if request.Method == http.MethodConnect {
@@ -226,17 +233,57 @@ func requestDestination(r *http.Request) (string, int, error) {
 func (p *Proxy) allowed(d Destination) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	now := time.Now()
-	for key, g := range p.grants {
-		if !g.expires.After(now) {
-			delete(p.grants, key)
-		}
-	}
+	p.expireLocked(time.Now())
 	if id, ok := p.durable[d.key()]; ok {
 		return id, true
 	}
 	g, ok := p.grants[d.key()]
 	return g.id, ok
+}
+
+func (p *Proxy) newAdmissionLocked(kind, key string) string {
+	p.admission++
+	return kind + ":" + key + ":" + strconv.FormatUint(p.admission, 10)
+}
+
+func (p *Proxy) expireLocked(now time.Time) {
+	for key, grant := range p.grants {
+		if grant.expires.After(now) {
+			continue
+		}
+		delete(p.grants, key)
+		for _, active := range p.active {
+			if active.admission == grant.id {
+				_ = active.conn.Close()
+			}
+		}
+	}
+}
+
+func (p *Proxy) admissionCurrentLocked(admission string) bool {
+	for _, current := range p.durable {
+		if current == admission {
+			return true
+		}
+	}
+	for _, current := range p.grants {
+		if current.id == admission {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Proxy) trackIfCurrent(conn net.Conn, admission string) (uint64, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.expireLocked(time.Now())
+	if !p.admissionCurrentLocked(admission) {
+		return 0, false
+	}
+	p.next++
+	p.active[p.next] = tracked{conn, admission}
+	return p.next, true
 }
 func (p *Proxy) dialResolved(ctx context.Context, host string, port int) (net.Conn, string, error) {
 	ips, err := p.opts.Resolver.LookupIPAddr(ctx, host)
@@ -254,21 +301,14 @@ func (p *Proxy) dialResolved(ctx context.Context, host string, port int) (net.Co
 	}
 	return nil, "", errors.Join(errs...)
 }
-func (p *Proxy) track(conn net.Conn, admission string) uint64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.next++
-	p.active[p.next] = tracked{conn, admission}
-	return p.next
-}
 func (p *Proxy) untrack(id uint64) { p.mu.Lock(); delete(p.active, id); p.mu.Unlock() }
 func (p *Proxy) Grant(d Destination, duration time.Duration) error {
-	if d.Host == "" || d.Port < 1 || d.Port > 65535 || duration <= 0 {
+	if naming.Host(d.Host) != nil || d.Port < 1 || d.Port > 65535 || duration <= 0 {
 		return fmt.Errorf("invalid grant")
 	}
 	p.mu.Lock()
 	key := d.key()
-	id := "grant:" + key + ":" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	id := p.newAdmissionLocked("grant", key)
 	p.grants[key] = grant{d, time.Now().Add(duration), id}
 	p.mu.Unlock()
 	time.AfterFunc(duration, func() { p.expireGrant(key, id) })
@@ -309,6 +349,40 @@ func (p *Proxy) Remove(d Destination) {
 	}
 	p.mu.Unlock()
 }
+
+// Reconcile restores live-policy conformity. Temporary grants are intentionally
+// cleared: applying one declaration twice must produce the same network policy.
+func (p *Proxy) Reconcile(destinations []Destination) error {
+	replacement := make(map[string]string, len(destinations))
+	for _, destination := range destinations {
+		if naming.Host(destination.Host) != nil || destination.Port < 1 || destination.Port > 65535 {
+			return fmt.Errorf("invalid destination")
+		}
+		key := destination.key()
+		replacement[key] = ""
+	}
+	p.mu.Lock()
+	for key := range replacement {
+		if current, ok := p.durable[key]; ok {
+			replacement[key] = current
+		} else {
+			replacement[key] = p.newAdmissionLocked("declaration", key)
+		}
+	}
+	p.durable = replacement
+	p.grants = map[string]grant{}
+	validAdmissions := map[string]bool{}
+	for _, admission := range replacement {
+		validAdmissions[admission] = true
+	}
+	for _, active := range p.active {
+		if !validAdmissions[active.admission] {
+			_ = active.conn.Close()
+		}
+	}
+	p.mu.Unlock()
+	return nil
+}
 func relay(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
@@ -331,14 +405,16 @@ func writeError(w io.Writer, status int) {
 	fmt.Fprintf(w, "HTTP/1.1 %d %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status, http.StatusText(status))
 }
 func ParseDestination(raw string) (Destination, error) {
-	parsed, err := url.Parse("door://" + raw)
-	if err != nil {
-		return Destination{}, err
+	if raw == "" || raw != strings.TrimSpace(raw) || strings.ContainsAny(raw, "@/?#") {
+		return Destination{}, fmt.Errorf("destination must be canonical host:port")
 	}
-	host := parsed.Hostname()
-	port, err := strconv.Atoi(parsed.Port())
-	if host == "" || err != nil || port < 1 || port > 65535 {
-		return Destination{}, fmt.Errorf("destination must be host:port")
+	host, portText, err := net.SplitHostPort(raw)
+	if err != nil || naming.Host(host) != nil {
+		return Destination{}, fmt.Errorf("destination must be canonical host:port")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 || portText != strconv.Itoa(port) || net.JoinHostPort(host, portText) != raw {
+		return Destination{}, fmt.Errorf("destination must be canonical host:port")
 	}
 	return Destination{host, port}, nil
 }
