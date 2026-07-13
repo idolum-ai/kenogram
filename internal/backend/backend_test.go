@@ -66,6 +66,29 @@ func TestVerifyEvidence(t *testing.T) {
 	}
 }
 
+func TestInspectStoppedContainerDoesNotRequireLiveProcessEvidence(t *testing.T) {
+	f := &fake{out: []byte(`[{"Name":"/kenogram-w-g1","State":{"Running":false,"Pid":0},"Mounts":[{"Source":"/state/workspace","Destination":"/workspace","RW":true}]}]`)}
+	p := New(f)
+	p.ReadProcStatus = func(int) ([]byte, error) {
+		t.Fatal("read process status for stopped container")
+		return nil, nil
+	}
+	p.MountIdentity = func(int, string, string) (bool, error) {
+		t.Fatal("verified mount identity for stopped container")
+		return false, nil
+	}
+	evidence, err := p.Inspect(context.Background(), "kenogram-w-g1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Running || evidence.PID != 0 {
+		t.Fatalf("stopped evidence = running %t, PID %d", evidence.Running, evidence.PID)
+	}
+	if len(evidence.Mounts) != 1 || evidence.Mounts[0].IdentityVerified {
+		t.Fatalf("stopped mount evidence = %#v", evidence.Mounts)
+	}
+}
+
 func TestVerifyExactMountEvidence(t *testing.T) {
 	r := plan.Result{PlanDigest: "p", DeclarationDigest: "d", Plan: plan.Plan{Name: "w", World: plan.World{User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
 	expected := []Mount{{Source: "/state/workspace", Target: "/workspace", Mode: "rw", NoExec: true}}
