@@ -30,7 +30,7 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Minute)
 	defer cancel()
 	tmp := t.TempDir()
-	resources := prepareContainerE2E(t, ctx, vfsMinimumFreeHermesGiB)
+	resources := prepareContainerE2E(t, ctx, e2eLaneHermes)
 	doorHost := hostDoorIPv4(t)
 	providerProof := hermesProof + "\n[engram:upstream] " + hermesEngramSignalID + " " + hermesEngramProof
 	provider := newObservedProvider(t, doorHost, providerProof)
@@ -60,8 +60,7 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 	writeHermesConfig(t, hermesConfig, doorHost, providerPort, "")
 	writeEngramCompositionEnv(t, engramEnv, telegramFixtureToken, telegramAPIBase(telegram.URL, doorHost), telegramFixtureUser, telegramFixtureUser)
 	writeEngramHermesDeclaration(t, declaration, world, image, engram, hermesConfig, engramEnv, doorHost, providerPort, doorHost, telegramPort)
-	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
-	resources.claimImage(t, ctx, image)
+	runImageAcquisition(t, ctx, resources, []string{image}, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	container := containerName(world, 1)
 	waitForTmuxTarget(t, ctx, tmp, testEnv, container, "main:hermes")
 	waitForHermesTUIReady(t, ctx, tmp, testEnv, container, "main:hermes")

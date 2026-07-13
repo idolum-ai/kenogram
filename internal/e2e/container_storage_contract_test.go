@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 type scriptedPodman struct {
@@ -61,7 +62,7 @@ func TestContainerCleanupRemovesOnlyClaimedImageWithoutForce(t *testing.T) {
 			imageInspect("sha256:owned"),
 			imageInspect("sha256:owned"),
 		},
-		"image\x00rm\x00--ignore\x00--no-prune\x00base": {{exitCode: 0}},
+		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:owned": {{exitCode: 0}},
 	}}
 	resources := &e2eContainerResources{runner: fake.run}
 	resources.trackImage(t, context.Background(), "base")
@@ -74,7 +75,7 @@ func TestContainerCleanupRemovesOnlyClaimedImageWithoutForce(t *testing.T) {
 		"image\x00inspect\x00base",
 		"image\x00exists\x00base",
 		"image\x00inspect\x00base",
-		"image\x00rm\x00--ignore\x00--no-prune\x00base",
+		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:owned",
 	}
 	if !reflect.DeepEqual(fake.calls, want) {
 		t.Fatalf("Podman calls = %#v, want %#v", fake.calls, want)
@@ -120,9 +121,9 @@ func TestContainerCleanupPreservesUnclaimedOrChangedImage(t *testing.T) {
 
 func TestContainerCleanupReportsInUseImageWithoutContainerSideEffects(t *testing.T) {
 	fake := &scriptedPodman{responses: map[string][]podmanCommandResult{
-		"image\x00exists\x00base":                       {{exitCode: 0}},
-		"image\x00inspect\x00base":                      {imageInspect("sha256:owned")},
-		"image\x00rm\x00--ignore\x00--no-prune\x00base": {{exitCode: 2, stderr: "image is in use", err: errors.New("exit 2")}},
+		"image\x00exists\x00base":                               {{exitCode: 0}},
+		"image\x00inspect\x00base":                              {imageInspect("sha256:owned")},
+		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:owned": {{exitCode: 2, stderr: "image is in use", err: errors.New("exit 2")}},
 	}}
 	resources := &e2eContainerResources{runner: fake.run, images: []imageLease{{reference: "base", claimedID: "sha256:owned"}}}
 	err := resources.cleanup(context.Background())
@@ -155,12 +156,12 @@ func TestContainerCleanupToleratesImageNeverPulled(t *testing.T) {
 
 func TestContainerCleanupContinuesAfterDerivedImageFailure(t *testing.T) {
 	fake := &scriptedPodman{responses: map[string][]podmanCommandResult{
-		"image\x00exists\x00derived":                       {{exitCode: 0}},
-		"image\x00inspect\x00derived":                      {imageInspect("sha256:derived")},
-		"image\x00rm\x00--ignore\x00--no-prune\x00derived": {{exitCode: 2, stderr: "derived in use", err: errors.New("exit 2")}},
-		"image\x00exists\x00base":                          {{exitCode: 0}},
-		"image\x00inspect\x00base":                         {imageInspect("sha256:base")},
-		"image\x00rm\x00--ignore\x00--no-prune\x00base":    {{exitCode: 0}},
+		"image\x00exists\x00derived":                              {{exitCode: 0}},
+		"image\x00inspect\x00derived":                             {imageInspect("sha256:derived")},
+		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:derived": {{exitCode: 2, stderr: "derived in use", err: errors.New("exit 2")}},
+		"image\x00exists\x00base":                                 {{exitCode: 0}},
+		"image\x00inspect\x00base":                                {imageInspect("sha256:base")},
+		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:base":    {{exitCode: 0}},
 	}}
 	resources := &e2eContainerResources{runner: fake.run, images: []imageLease{
 		{reference: "base", claimedID: "sha256:base"},
@@ -170,9 +171,43 @@ func TestContainerCleanupContinuesAfterDerivedImageFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "derived in use") {
 		t.Fatalf("cleanup error = %v", err)
 	}
-	wantLast := "image\x00rm\x00--ignore\x00--no-prune\x00base"
+	wantLast := "image\x00rm\x00--ignore\x00--no-prune\x00sha256:base"
 	if got := fake.calls[len(fake.calls)-1]; got != wantLast {
 		t.Fatalf("cleanup stopped before base removal; last call = %q, want %q", got, wantLast)
+	}
+}
+
+func TestFailedAcquisitionClaimsAppearedBaseForCleanup(t *testing.T) {
+	fake := &scriptedPodman{responses: map[string][]podmanCommandResult{
+		"image\x00exists\x00base": {
+			{exitCode: 0},
+			{exitCode: 0},
+		},
+		"image\x00inspect\x00base": {
+			imageInspect("sha256:base"),
+			imageInspect("sha256:base"),
+		},
+		"image\x00exists\x00derived": {
+			{exitCode: 1, err: errors.New("failed build did not create derived image")},
+			{exitCode: 1, err: errors.New("derived image remains absent")},
+		},
+		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:base": {{exitCode: 0}},
+	}}
+	resources := &e2eContainerResources{runner: fake.run, images: []imageLease{
+		{reference: "base"},
+		{reference: "derived"},
+	}}
+	if err := resources.claimAppearedImages(context.Background(), "base", "derived"); err != nil {
+		t.Fatal(err)
+	}
+	if resources.images[0].claimedID != "sha256:base" || resources.images[1].claimedID != "" {
+		t.Fatalf("post-failure claims = %#v", resources.images)
+	}
+	if err := resources.cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.calls[len(fake.calls)-1]; got != "image\x00rm\x00--ignore\x00--no-prune\x00sha256:base" {
+		t.Fatalf("failed acquisition cleanup last call = %q", got)
 	}
 }
 
@@ -236,6 +271,31 @@ func TestContainerCleanupRegistrationPrecedesEarlierCleanup(t *testing.T) {
 	want := []string{"container exists kenogram-world-g1", "tempdir"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("cleanup events = %#v, want %#v", events, want)
+	}
+}
+
+func TestContainerCleanupPerCommandTimeoutLeavesLaterWork(t *testing.T) {
+	var calls []string
+	runner := func(ctx context.Context, args ...string) podmanCommandResult {
+		call := strings.Join(args, "\x00")
+		calls = append(calls, call)
+		if call == "container\x00exists\x00kenogram-world-g2" {
+			<-ctx.Done()
+			return podmanCommandResult{exitCode: -1, err: ctx.Err()}
+		}
+		return podmanCommandResult{exitCode: 1, err: errors.New("absent")}
+	}
+	resources := &e2eContainerResources{runner: runner, containers: []containerLease{
+		{name: "kenogram-world-g1", world: "world", generation: 1},
+		{name: "kenogram-world-g2", world: "world", generation: 2},
+	}}
+	err := resources.cleanupWithTimeout(context.Background(), 5*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Fatalf("cleanup error = %v", err)
+	}
+	wantLast := "container\x00exists\x00kenogram-world-g1"
+	if got := calls[len(calls)-1]; got != wantLast {
+		t.Fatalf("cleanup did not continue after timeout; last call = %q", got)
 	}
 }
 
@@ -319,6 +379,25 @@ func TestContainerStorageOverlayIgnoresVFSOverride(t *testing.T) {
 	}
 }
 
+func TestContainerE2ELanePolicy(t *testing.T) {
+	for _, test := range []struct {
+		lane containerE2ELane
+		want uint64
+	}{
+		{lane: e2eLaneEngram, want: 0},
+		{lane: e2eLaneOpenClaw, want: 0},
+		{lane: e2eLaneHermes, want: 96},
+	} {
+		got, err := laneVFSMinimumFreeGiB(test.lane)
+		if err != nil || got != test.want {
+			t.Errorf("lane %q floor = %d, err = %v; want %d", test.lane, got, err, test.want)
+		}
+	}
+	if _, err := laneVFSMinimumFreeGiB("unknown"); err == nil {
+		t.Fatal("unknown lane unexpectedly accepted")
+	}
+}
+
 func TestVFSMinimumFreeOverride(t *testing.T) {
 	minimum, err := vfsMinimumFreeBytes(96, func(name string) string {
 		if name != vfsMinimumFreeEnv {
@@ -333,5 +412,8 @@ func TestVFSMinimumFreeOverride(t *testing.T) {
 		if _, err := vfsMinimumFreeBytes(96, func(string) string { return invalid }); err == nil {
 			t.Errorf("override %q unexpectedly accepted", invalid)
 		}
+	}
+	if _, err := vfsMinimumFreeBytes(0, func(string) string { return "" }); err == nil || !strings.Contains(err.Error(), "no evidence-backed") {
+		t.Fatalf("unmeasured vfs floor error = %v", err)
 	}
 }

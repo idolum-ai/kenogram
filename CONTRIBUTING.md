@@ -48,15 +48,15 @@ mismatches. Images absent from the pre-test snapshot are removed only after the
 test claims and re-verifies their immutable ID. Image removal is never forced;
 an image used by another workload survives as a visible cleanup failure.
 
-Before artifact downloads or image builds, rootless Podman `vfs` stores require
-lane-specific free-space floors: 24 GiB for the Engram release proof, 64 GiB for
-OpenClaw proofs, and 96 GiB for Hermes proofs. These are conservative fail-fast
-budgets, not image-size claims; the Hermes floor adds transient headroom to an
-observed 68 GiB expanded footprint. Rootless `overlay` is not subject to the
-amplification guard or its override. Operators with a measured local footprint
-may set `KENOGRAM_E2E_VFS_MIN_FREE_GIB` to a positive whole-GiB threshold. Use
-`df -h <graph-root>` for free capacity and `podman system df` for attribution.
-The setting does not delete or prune storage.
+Before artifact downloads or image builds, the Hermes lanes require 96 GiB free
+on rootless Podman `vfs`. This evidence-backed floor adds transient headroom to
+an observed 68 GiB expanded footprint. Engram and OpenClaw do not yet have a
+reproducible `vfs` peak, so their `vfs` lanes fail closed instead of inventing a
+default: set `KENOGRAM_E2E_VFS_MIN_FREE_GIB` to a locally measured positive
+whole-GiB threshold. Record peak graph-root usage and headroom when proposing a
+new default. Rootless `overlay` is not subject to the amplification guard or its
+override. Use `df -h <graph-root>` for free capacity and `podman system df` for
+attribution. The setting does not delete or prune storage.
 
 | Command | Evidence |
 |---|---|

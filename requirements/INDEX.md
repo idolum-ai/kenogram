@@ -50,7 +50,8 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
 - Container-heavy E2Es lease random world names, verify container labels and
   immutable image identities before cleanup, never force image removal, collect
   cleanup failures, and reject undersized rootless Podman `vfs` stores before
-  pulling; unit contracts use fake Podman responses and capacity probes.
+  pulling. Unmeasured `vfs` lanes require an explicit local floor; unit contracts
+  use fake Podman responses and capacity probes.
 - `make architecture` checks required files and package dependency direction.
 - `make stdlib-only` rejects third-party Go modules.
 - `make check` runs the fast local quality gate; runtime proofs remain separate.
