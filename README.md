@@ -40,7 +40,7 @@ prerequisites are absent.
 
 `make e2e` runs the release-pinned composition proofs. Kenogram isolates the
 OpenClaw `2026.6.11` TUI with a deterministic fake model, accepts the Engram
-`v0.2.0` release, and proves the hermetic fake-Telegram → Engram → tmux →
+`v0.3.0` release, and proves the hermetic fake-Telegram → Engram → tmux →
 OpenClaw path, including Bot API file download routing. Pull requests require
 the OpenClaw isolation proof; the full composition runs on `main` and nightly.
 

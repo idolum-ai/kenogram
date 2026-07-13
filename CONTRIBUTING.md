@@ -26,9 +26,9 @@ verification.
 
 | Command | Evidence |
 |---|---|
-| `make e2e-release` | Engram v0.2.0 materialization, replacement, restart, and destruction |
+| `make e2e-release` | Engram v0.3.0 materialization, replacement, restart, and destruction |
 | `make e2e-openclaw` | OpenClaw 2026.6.11 isolation, fake-model traffic, TUI operation, replacement, and absence claims |
-| `make e2e-composition` | Fake Telegram methods and files through Engram v0.2.0 into the isolated OpenClaw TUI |
+| `make e2e-composition` | Fake Telegram methods and files through Engram v0.3.0 into the isolated OpenClaw TUI |
 | `make e2e` | All deterministic proofs above |
 
 The real Telegram canary is manual and must use a dedicated bot and account:

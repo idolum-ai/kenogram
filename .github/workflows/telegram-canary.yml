@@ -30,12 +30,12 @@ jobs:
           podman unshare true
       - name: Seed immutable Engram fixture
         run: |
-          curl --fail --location --proto '=https' --tlsv1.2 --output /tmp/engram-v0.2.0-linux-amd64.tar.gz https://github.com/idolum-ai/engram/releases/download/v0.2.0/engram-v0.2.0-linux-amd64.tar.gz
-          echo 'a4ec04e3ac2924ed391c32b0b52ec95a48a727680d9d06f60a63cf5691f98a82  /tmp/engram-v0.2.0-linux-amd64.tar.gz' | sha256sum --check
+          curl --fail --location --proto '=https' --tlsv1.2 --output /tmp/engram-v0.3.0-linux-amd64.tar.gz https://github.com/idolum-ai/engram/releases/download/v0.3.0/engram-v0.3.0-linux-amd64.tar.gz
+          echo 'f8ef677d964ba8b86394d2e535fc195da206cbdf84029c9fc7593ebe3675c677  /tmp/engram-v0.3.0-linux-amd64.tar.gz' | sha256sum --check
       - name: Real Telegram to Engram to OpenClaw canary
         run: make e2e-telegram-canary
         env:
-          KENOGRAM_ENGRAM_ARCHIVE: /tmp/engram-v0.2.0-linux-amd64.tar.gz
+          KENOGRAM_ENGRAM_ARCHIVE: /tmp/engram-v0.3.0-linux-amd64.tar.gz
           KENOGRAM_TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           KENOGRAM_TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
           KENOGRAM_TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

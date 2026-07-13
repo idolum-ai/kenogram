@@ -38,7 +38,7 @@ type releaseLock struct {
 
 func TestEngramReleaseLock(t *testing.T) {
 	lock := readReleaseLock(t)
-	if lock.Version != "v0.2.0" || lock.Commit != "b23c854e1d3d" {
+	if lock.Version != "v0.3.0" || lock.Commit != "ac277af91b0d" {
 		t.Fatalf("unexpected Engram identity: %#v", lock)
 	}
 	if len(lock.SHA256) != sha256.Size*2 {
@@ -186,7 +186,7 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 
 func readReleaseLock(t *testing.T) releaseLock {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("testdata", "engram-v0.2.0.lock.json"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "engram-v0.3.0.lock.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -25,7 +25,7 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
 | Contract | Strongest automated evidence | Boundary still open |
 |---|---|---|
 | Declaration and plan | Unit, parser seeds, scheduled fuzzing, canonical digest, strict names, and staged-byte recheck | Snapshot-grade handling of an adversarially mutating source tree |
-| Operations | Signal-aware CLI, transition recovery tests, Engram v0.2.0 lifecycle E2E, and OpenClaw composition | Exhaustive CLI fault matrix and concurrent mutation stress |
+| Operations | Signal-aware CLI, transition recovery tests, Engram v0.3.0 lifecycle E2E, and OpenClaw composition | Exhaustive CLI fault matrix and concurrent mutation stress |
 | Security | Exact Podman argv, rootless preflight, expanded evidence rejection tests, secret canaries, OpenClaw absence checks, runtime-socket E2E | Seccomp profile identity and a supported Podman/kernel matrix |
 | Network | Multi-megabyte CONNECT, per-connection resolution, removal/expiry closure, Git/TLS fixture, and rootless integration | Full ten-invariant replay after every adoption path |
 | Lifecycle | Durable rollback/commit transition, recovery unit tests, service acknowledgement, Engram E2E, and isolated OpenClaw replacement | Every-action/write failpoint matrix and SIGKILL-at-each-phase campaign |
@@ -36,7 +36,7 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
 - `make test` runs unit, contract, and parser fuzz-seed tests.
 - `make test-evidence` retains structured test events and a coverage profile.
 - `make integration` runs the rootless Podman boundary contract and is mandatory in CI.
-- `make e2e-release` proves the checksum-pinned Engram `v0.2.0` lifecycle.
+- `make e2e-release` proves the checksum-pinned Engram `v0.3.0` lifecycle.
 - `make e2e-openclaw` proves checksum-pinned OpenClaw isolation and TUI use.
 - `make e2e-composition` proves fake Telegram method and file traffic through
   Engram into the isolated OpenClaw TUI; `make e2e` runs all three.
