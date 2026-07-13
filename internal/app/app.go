@@ -127,6 +127,11 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 		}
 		priorPrepared = &loaded
 	}
+	if priorActive && priorPrepared != nil {
+		if err := validateReplacementMountSources(priorPrepared.Result, prepared.Result); err != nil {
+			return err
+		}
+	}
 	generation := l.NextGeneration()
 	before, _ := worldfs.Digest(l.Workspace)
 	fmt.Fprintf(a.Out, "workspace: %d entries (%s)\n", len(before.Entries), worldfs.ShortDigest(before.Root))
@@ -173,12 +178,19 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 			retErr = errors.Join(retErr, errors.Join(cleanup...))
 		}
 	}()
+	stagingCleared := false
+	defer func() {
+		if !stagingCleared {
+			retErr = errors.Join(retErr, l.ClearStaging(generation))
+		}
+	}()
 	if err := a.materialize(ctx, l, container, generation, prepared); err != nil {
 		return a.recordFailure(l, prepared, "materialize", err)
 	}
 	if err := l.ClearStaging(generation); err != nil {
 		return a.recordFailure(l, prepared, "clear staging", err)
 	}
+	stagingCleared = true
 	absoluteDeclarationPath, _ := filepath.Abs(prepared.Path)
 	state := worldfs.State{Name: prepared.Result.Plan.Name, Generation: generation, Container: container, PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, DeclarationPath: absoluteDeclarationPath, Status: "staging"}
 	transition := worldfs.Transition{Version: 1, Phase: "rollback", Successor: state, SuccessorDeclaration: prepared.Raw}
@@ -219,6 +231,9 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 	if err != nil {
 		return a.recordFailure(l, prepared, "inspect successor", err)
 	}
+	if err := a.verifyRuntimeEvidence(evidence, prepared.Result, generation, mounts); err != nil {
+		return a.recordFailure(l, prepared, "verify successor before services", err)
+	}
 	proxyPID := 0
 	if len(prepared.Result.Plan.NetworkAllow) > 0 {
 		proxyPID, err = a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
@@ -231,9 +246,9 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 		return a.recordFailure(l, prepared, "start services", err)
 	}
 	evidence, err = a.Backend.Inspect(ctx, container)
-	if err != nil || backend.Verify(evidence, prepared.Result, generation) != nil {
+	if err != nil || a.verifyRuntimeEvidence(evidence, prepared.Result, generation, mounts) != nil {
 		if err == nil {
-			err = backend.Verify(evidence, prepared.Result, generation)
+			err = a.verifyRuntimeEvidence(evidence, prepared.Result, generation, mounts)
 		}
 		return a.recordFailure(l, prepared, "verify successor", err)
 	}
@@ -304,7 +319,11 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 	if err != nil {
 		return false, nil
 	}
-	if err := backend.Verify(evidence, prepared.Result, state.Generation); err != nil {
+	mounts, err := a.mounts(l, prepared.Result)
+	if err != nil {
+		return false, err
+	}
+	if err := a.verifyRuntimeEvidence(evidence, prepared.Result, state.Generation, mounts); err != nil {
 		return false, nil
 	}
 	proxyPID := state.ProxyPID
@@ -465,7 +484,8 @@ func (a *App) recoverTransition(ctx context.Context, l worldfs.Layout) error {
 		return a.rollbackTransition(ctx, l, transition)
 	}
 	evidence, inspectErr := a.Backend.Inspect(ctx, transition.Successor.Container)
-	if inspectErr != nil || backend.Verify(evidence, prepared.Result, transition.Successor.Generation) != nil {
+	mounts, mountsErr := a.mounts(l, prepared.Result)
+	if inspectErr != nil || mountsErr != nil || a.verifyRuntimeEvidence(evidence, prepared.Result, transition.Successor.Generation, mounts) != nil {
 		transition.Phase = "rollback"
 		if err := l.WriteTransition(transition); err != nil {
 			return err
@@ -586,7 +606,11 @@ func (a *App) restorePredecessor(ctx context.Context, l worldfs.Layout, prior wo
 			return err
 		}
 	}
-	if err := backend.Verify(evidence, prepared.Result, prior.Generation); err != nil {
+	mounts, err := a.mounts(l, prepared.Result)
+	if err != nil {
+		return err
+	}
+	if err := a.verifyRuntimeEvidence(evidence, prepared.Result, prior.Generation, mounts); err != nil {
 		return err
 	}
 	proxyPID := 0
@@ -617,6 +641,9 @@ func (a *App) restorePredecessor(ctx context.Context, l worldfs.Layout, prior wo
 }
 
 func (a *App) mounts(l worldfs.Layout, result plan.Result) ([]backend.Mount, error) {
+	if err := a.ValidateHostMounts(result); err != nil {
+		return nil, err
+	}
 	mounts := []backend.Mount{}
 	for _, target := range result.Plan.Workspace {
 		source, err := l.EnsureWorkspace(target)
@@ -629,6 +656,109 @@ func (a *App) mounts(l worldfs.Layout, result plan.Result) ([]backend.Mount, err
 		mounts = append(mounts, backend.Mount{Source: m.Source, Target: m.Target, Mode: m.Mode})
 	}
 	return mounts, nil
+}
+
+// ValidateHostMounts performs the host-specific, read-only safety checks that
+// complement declaration parsing. It is safe to call during dry-run.
+func (a *App) ValidateHostMounts(result plan.Result) error {
+	for _, mount := range result.Plan.Mounts {
+		if err := a.validateHostMountSource(mount.Source, false); err != nil {
+			return fmt.Errorf("mount source %q: %w", mount.Source, err)
+		}
+	}
+	return nil
+}
+
+func (a *App) verifyRuntimeEvidence(evidence backend.Evidence, result plan.Result, generation int64, expected []backend.Mount) error {
+	workspace := make(map[string]bool, len(result.Plan.Workspace))
+	for _, target := range result.Plan.Workspace {
+		workspace[target] = true
+	}
+	for _, mount := range evidence.Mounts {
+		if err := a.validateHostMountSource(mount.Source, workspace[mount.Destination]); err != nil {
+			return fmt.Errorf("observed mount source %q: %w", mount.Source, err)
+		}
+	}
+	return backend.Verify(evidence, result, generation, expected)
+}
+
+func (a *App) validateHostMountSource(source string, allowState bool) error {
+	info, err := os.Stat(source)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return fmt.Errorf("must be a regular file or directory")
+	}
+	protected := []string{}
+	if !allowState {
+		protected = append(protected, a.BaseDir)
+	}
+	uid := strconv.Itoa(os.Getuid())
+	protected = append(protected,
+		filepath.Join("/run/user", uid, "podman", "podman.sock"),
+		filepath.Join("/run/user", uid, "docker.sock"),
+		"/run/podman/podman.sock",
+		"/run/docker.sock",
+		"/var/run/docker.sock",
+	)
+	if runtimeDir := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")); runtimeDir != "" {
+		protected = append(protected, filepath.Join(runtimeDir, "podman", "podman.sock"), filepath.Join(runtimeDir, "docker.sock"))
+	}
+	for _, variable := range []string{"CONTAINER_HOST", "DOCKER_HOST"} {
+		if endpoint := strings.TrimSpace(os.Getenv(variable)); strings.HasPrefix(endpoint, "unix://") {
+			protected = append(protected, strings.TrimPrefix(endpoint, "unix://"))
+		}
+	}
+	for _, path := range protected {
+		if path != "" && hostPathsOverlap(source, path) {
+			return fmt.Errorf("overlaps protected host path %q", path)
+		}
+	}
+	return nil
+}
+
+func validateReplacementMountSources(prior, next plan.Result) error {
+	for _, oldMount := range prior.Plan.Mounts {
+		if oldMount.Mode != "rw" {
+			continue
+		}
+		oldSource := canonicalHostPath(oldMount.Source)
+		for _, newMount := range next.Plan.Mounts {
+			newSource := canonicalHostPath(newMount.Source)
+			if newSource != oldSource && strings.HasPrefix(newSource, oldSource+string(os.PathSeparator)) {
+				return fmt.Errorf("mount source %q is beneath predecessor-writable source %q", newMount.Source, oldMount.Source)
+			}
+		}
+	}
+	return nil
+}
+
+func canonicalHostPath(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	if evaluated, err := filepath.EvalSymlinks(absolute); err == nil {
+		return filepath.Clean(evaluated)
+	}
+	return filepath.Clean(absolute)
+}
+
+func hostPathsOverlap(first, second string) bool {
+	first, firstErr := filepath.Abs(first)
+	second, secondErr := filepath.Abs(second)
+	if firstErr != nil || secondErr != nil {
+		return false
+	}
+	first, second = filepath.Clean(first), filepath.Clean(second)
+	if evaluated, err := filepath.EvalSymlinks(first); err == nil {
+		first = filepath.Clean(evaluated)
+	}
+	if evaluated, err := filepath.EvalSymlinks(second); err == nil {
+		second = filepath.Clean(evaluated)
+	}
+	return first == second || strings.HasPrefix(first, second+string(os.PathSeparator)) || strings.HasPrefix(second, first+string(os.PathSeparator))
 }
 func (a *App) materialize(ctx context.Context, l worldfs.Layout, container string, generation int64, p Prepared) error {
 	for i, c := range p.Result.Plan.Copies {

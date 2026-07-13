@@ -32,6 +32,8 @@ func main() {
 		udp(os.Args[2])
 	case "listeners":
 		listeners()
+	case "seccomp":
+		seccomp()
 	default:
 		os.Exit(2)
 	}
@@ -105,4 +107,18 @@ func listeners() {
 		}
 	}
 }
+func seccomp() {
+	raw, err := os.ReadFile("/proc/1/status")
+	if err != nil {
+		fatal(err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "Seccomp:") {
+			fmt.Println(strings.TrimSpace(strings.TrimPrefix(line, "Seccomp:")))
+			return
+		}
+	}
+	fatal(fmt.Errorf("seccomp mode absent"))
+}
+
 func fatal(err error) { fmt.Fprintln(os.Stderr, err); os.Exit(1) }

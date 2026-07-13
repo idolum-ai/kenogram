@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/idolum-ai/kenogram/internal/plan"
 )
@@ -42,15 +43,24 @@ func (ExecRunner) Interactive(ctx context.Context, name string, args ...string) 
 }
 
 type Podman struct {
-	Runner Runner
-	Binary string
+	Runner         Runner
+	Binary         string
+	ReadProcStatus func(int) ([]byte, error)
+	MountIdentity  func(int, string, string) (bool, error)
 }
 
 func New(r Runner) *Podman {
 	if r == nil {
 		r = ExecRunner{}
 	}
-	return &Podman{Runner: r, Binary: "podman"}
+	return &Podman{
+		Runner: r,
+		Binary: "podman",
+		ReadProcStatus: func(pid int) ([]byte, error) {
+			return os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+		},
+		MountIdentity: mountIdentity,
+	}
 }
 func ContainerName(world string, generation int64) string {
 	return fmt.Sprintf("kenogram-%s-g%d", world, generation)
@@ -106,7 +116,7 @@ type Mount struct {
 
 func (p *Podman) Create(ctx context.Context, result plan.Result, generation int64, mounts []Mount) (string, error) {
 	name := ContainerName(result.Plan.Name, generation)
-	args := []string{"create", "--name", name, "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--hostname", result.Plan.World.Hostname, "--user", result.Plan.World.User, "--workdir", result.Plan.World.Workdir, "--cpus", strconv.FormatInt(result.Plan.Resources.CPUs, 10), "--memory", strconv.FormatInt(result.Plan.Resources.MemoryBytes, 10), "--pids-limit", strconv.FormatInt(result.Plan.Resources.PIDs, 10), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=" + result.Plan.Name, "--label", "io.kenogram.generation=" + strconv.FormatInt(generation, 10), "--label", "io.kenogram.plan-digest=" + result.PlanDigest, "--label", "io.kenogram.declaration-digest=" + result.DeclarationDigest, "--env", "NO_PROXY=localhost,127.0.0.1"}
+	args := []string{"create", "--name", name, "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--image-volume", "ignore", "--hostname", result.Plan.World.Hostname, "--user", result.Plan.World.User, "--workdir", result.Plan.World.Workdir, "--cpus", strconv.FormatInt(result.Plan.Resources.CPUs, 10), "--memory", strconv.FormatInt(result.Plan.Resources.MemoryBytes, 10), "--pids-limit", strconv.FormatInt(result.Plan.Resources.PIDs, 10), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=" + result.Plan.Name, "--label", "io.kenogram.generation=" + strconv.FormatInt(generation, 10), "--label", "io.kenogram.plan-digest=" + result.PlanDigest, "--label", "io.kenogram.declaration-digest=" + result.DeclarationDigest, "--env", "NO_PROXY=localhost,127.0.0.1"}
 	if len(result.Plan.NetworkAllow) > 0 {
 		args = append(args, "--env", "HTTP_PROXY=http://127.0.0.1:3128", "--env", "HTTPS_PROXY=http://127.0.0.1:3128")
 	}
@@ -191,6 +201,7 @@ type Evidence struct {
 	CapDrop                []string
 	BoundingCaps           []string
 	SecurityOpt            []string
+	SeccompMode            int
 	Devices                int
 	UIDMap                 []IDMap
 	GIDMap                 []IDMap
@@ -204,11 +215,12 @@ type IDMap struct {
 	Size        int64
 }
 type EvidenceMount struct {
-	Source      string
-	Destination string
-	RW          bool
-	Mode        string
-	Options     []string
+	Source           string
+	Destination      string
+	RW               bool
+	Mode             string
+	Options          []string
+	IdentityVerified bool
 }
 type inspectDocument struct {
 	Name         string   `json:"Name"`
@@ -277,8 +289,23 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 			return Evidence{}, fmt.Errorf("read runtime capability evidence: %w", err)
 		}
 	}
+	if e.PID <= 0 {
+		return Evidence{}, fmt.Errorf("runtime holder PID is absent")
+	}
+	status, err := p.ReadProcStatus(e.PID)
+	if err != nil {
+		return Evidence{}, fmt.Errorf("read runtime seccomp evidence: %w", err)
+	}
+	e.SeccompMode, err = parseProcSeccomp(status)
+	if err != nil {
+		return Evidence{}, fmt.Errorf("read runtime seccomp evidence: %w", err)
+	}
 	for _, m := range d.Mounts {
-		e.Mounts = append(e.Mounts, EvidenceMount{Source: m.Source, Destination: m.Destination, RW: m.RW, Mode: m.Mode, Options: m.Options})
+		identity, identityErr := p.MountIdentity(e.PID, m.Source, m.Destination)
+		if identityErr != nil {
+			return Evidence{}, fmt.Errorf("verify mount identity at %q: %w", m.Destination, identityErr)
+		}
+		e.Mounts = append(e.Mounts, EvidenceMount{Source: m.Source, Destination: m.Destination, RW: m.RW, Mode: m.Mode, Options: m.Options, IdentityVerified: identity})
 	}
 	for _, mapping := range d.IDMappings.UIDMap {
 		e.UIDMap = append(e.UIDMap, IDMap{ContainerID: mapping.ContainerID, HostID: mapping.HostID, Size: mapping.Size})
@@ -299,6 +326,31 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 		}
 	}
 	return e, nil
+}
+
+func mountIdentity(pid int, source, target string) (bool, error) {
+	if pid <= 0 || !filepath.IsAbs(target) {
+		return false, fmt.Errorf("invalid mount identity request")
+	}
+	inside := filepath.Join("/proc", strconv.Itoa(pid), "root", strings.TrimPrefix(filepath.Clean(target), string(os.PathSeparator)))
+	return sameFileIdentity(source, inside)
+}
+
+func sameFileIdentity(first, second string) (bool, error) {
+	firstInfo, err := os.Stat(first)
+	if err != nil {
+		return false, err
+	}
+	secondInfo, err := os.Stat(second)
+	if err != nil {
+		return false, err
+	}
+	firstStat, firstOK := firstInfo.Sys().(*syscall.Stat_t)
+	secondStat, secondOK := secondInfo.Sys().(*syscall.Stat_t)
+	if !firstOK || !secondOK {
+		return false, fmt.Errorf("filesystem identity is unavailable")
+	}
+	return firstStat.Dev == secondStat.Dev && firstStat.Ino == secondStat.Ino, nil
 }
 
 func readProcIDMap(pid int, name string) ([]IDMap, error) {
@@ -374,7 +426,22 @@ func parseProcBoundingCaps(raw []byte) ([]string, error) {
 	}
 	return nil, fmt.Errorf("capability bounding set is absent")
 }
-func Verify(e Evidence, result plan.Result, generation int64) error {
+
+func parseProcSeccomp(raw []byte) (int, error) {
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "Seccomp:") {
+			continue
+		}
+		value, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "Seccomp:")))
+		if err != nil || value < 0 || value > 2 {
+			return 0, fmt.Errorf("invalid seccomp mode")
+		}
+		return value, nil
+	}
+	return 0, fmt.Errorf("seccomp mode is absent")
+}
+
+func Verify(e Evidence, result plan.Result, generation int64, expectedMounts []Mount) error {
 	if !e.Running {
 		return fmt.Errorf("container is not running")
 	}
@@ -402,6 +469,9 @@ func Verify(e Evidence, result plan.Result, generation int64) error {
 	if containsPrefixFold(e.SecurityOpt, "seccomp=unconfined") {
 		return fmt.Errorf("unconfined seccomp evidence")
 	}
+	if e.SeccompMode != 2 {
+		return fmt.Errorf("seccomp filtering is not active (mode %d)", e.SeccompMode)
+	}
 	if e.Devices != 0 {
 		return fmt.Errorf("unexpected device mappings: %d", e.Devices)
 	}
@@ -423,37 +493,48 @@ func Verify(e Evidence, result plan.Result, generation int64) error {
 	}
 	targets := map[string]EvidenceMount{}
 	for _, mount := range e.Mounts {
+		if _, duplicate := targets[mount.Destination]; duplicate {
+			return fmt.Errorf("duplicate runtime mount at %q", mount.Destination)
+		}
 		targets[mount.Destination] = mount
 		lower := strings.ToLower(mount.Source + " " + mount.Destination)
 		if strings.Contains(lower, "podman.sock") || strings.Contains(lower, "docker.sock") {
 			return fmt.Errorf("runtime control socket mount detected at %q", mount.Destination)
 		}
 	}
-	for _, target := range result.Plan.Workspace {
-		evidence, ok := targets[target]
-		if !ok {
-			return fmt.Errorf("workspace mount %q missing", target)
-		}
-		if !mountHasOption(evidence, "nodev") || !mountHasOption(evidence, "nosuid") {
-			return fmt.Errorf("workspace mount %q lacks nodev/nosuid evidence", target)
-		}
+	if len(targets) != len(expectedMounts) {
+		return fmt.Errorf("runtime mount count is %d, want %d", len(targets), len(expectedMounts))
 	}
-	for _, mount := range result.Plan.Mounts {
+	for _, mount := range expectedMounts {
 		evidence, ok := targets[mount.Target]
 		if !ok {
-			return fmt.Errorf("declared mount %q missing", mount.Target)
+			return fmt.Errorf("expected mount %q missing", mount.Target)
 		}
-		if filepath.Clean(evidence.Source) != filepath.Clean(mount.Source) {
-			return fmt.Errorf("declared mount %q source mismatch", mount.Target)
+		if canonicalHostPath(evidence.Source) != canonicalHostPath(mount.Source) {
+			return fmt.Errorf("mount %q source mismatch", mount.Target)
 		}
 		if evidence.RW != (mount.Mode == "rw") {
-			return fmt.Errorf("declared mount %q mode mismatch", mount.Target)
+			return fmt.Errorf("mount %q mode mismatch", mount.Target)
+		}
+		if !evidence.IdentityVerified {
+			return fmt.Errorf("mount %q source identity mismatch", mount.Target)
 		}
 		if !mountHasOption(evidence, "nodev") || !mountHasOption(evidence, "nosuid") {
-			return fmt.Errorf("declared mount %q lacks nodev/nosuid evidence", mount.Target)
+			return fmt.Errorf("mount %q lacks nodev/nosuid evidence", mount.Target)
+		}
+		if mount.NoExec && !mountHasOption(evidence, "noexec") {
+			return fmt.Errorf("mount %q lacks noexec evidence", mount.Target)
 		}
 	}
 	return nil
+}
+
+func canonicalHostPath(path string) string {
+	clean := filepath.Clean(path)
+	if evaluated, err := filepath.EvalSymlinks(clean); err == nil {
+		return filepath.Clean(evaluated)
+	}
+	return clean
 }
 
 func mapsIdentity(mappings []IDMap, id int64) bool {

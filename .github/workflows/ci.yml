@@ -93,7 +93,6 @@ jobs:
         env:
           KENOGRAM_OPENCLAW_ARCHIVE: /tmp/openclaw-2026.6.11.tgz
       - name: Engram controls OpenClaw through fake Telegram
-        if: github.event_name != 'pull_request'
         run: make e2e-composition
         env:
           KENOGRAM_ENGRAM_ARCHIVE: /tmp/engram-v0.3.0-linux-amd64.tar.gz
@@ -126,14 +125,13 @@ jobs:
           curl --fail --location --proto '=https' --tlsv1.2 --output /tmp/hermes-agent-v2026.7.7.2.tar.gz https://github.com/NousResearch/hermes-agent/archive/refs/tags/v2026.7.7.2.tar.gz
           echo 'f5d1022eed3763a768cf7b0f0844831f0170a35f54eb8d18223f2e93f503025e  /tmp/hermes-agent-v2026.7.7.2.tar.gz' | sha256sum --check
       - name: Restore immutable Engram fixture
-        if: github.event_name != 'pull_request'
         id: hermes-engram-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/engram-v0.3.0-linux-amd64.tar.gz
           key: engram-v0.3.0-linux-amd64-f8ef677d964ba8b86394d2e535fc195da206cbdf84029c9fc7593ebe3675c677
       - name: Seed immutable Engram fixture
-        if: github.event_name != 'pull_request' && steps.hermes-engram-cache.outputs.cache-hit != 'true'
+        if: steps.hermes-engram-cache.outputs.cache-hit != 'true'
         run: |
           curl --fail --location --proto '=https' --tlsv1.2 --output /tmp/engram-v0.3.0-linux-amd64.tar.gz https://github.com/idolum-ai/engram/releases/download/v0.3.0/engram-v0.3.0-linux-amd64.tar.gz
           echo 'f8ef677d964ba8b86394d2e535fc195da206cbdf84029c9fc7593ebe3675c677  /tmp/engram-v0.3.0-linux-amd64.tar.gz' | sha256sum --check
@@ -142,7 +140,6 @@ jobs:
         env:
           KENOGRAM_HERMES_ARCHIVE: /tmp/hermes-agent-v2026.7.7.2.tar.gz
       - name: Engram controls Hermes through fake Telegram
-        if: github.event_name != 'pull_request'
         run: make e2e-hermes-composition
         env:
           KENOGRAM_HERMES_ARCHIVE: /tmp/hermes-agent-v2026.7.7.2.tar.gz

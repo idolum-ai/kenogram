@@ -10,13 +10,19 @@ plan output, logs, history, or generated projections. Host-private recovery
 state may retain a source digest, but never copied bytes.
 
 Relative sources resolve against the declaration directory, not the caller's
-working directory. Missing sources fail validation. Secret files must have no
-group or other permission bits; secret bytes are never printed.
+working directory. Missing sources fail validation. Every file and directory in
+a secret tree must have no group or other permission bits; failed materialization
+removes staged bytes before returning.
 
 Symlinked host source paths are rejected and copied trees reject symlink nodes.
+Declared mounts cannot contain or overlap Kenogram state or known container
+runtime control sockets. Runtime evidence must match the exact declared mount
+set and bind-source filesystem identity; image-authored volumes are ignored.
+Host-specific mount safety is checked during dry-run and apply. A replacement
+also rejects a new source beneath a predecessor-writable host mount.
 Podman evidence must confirm rootless operation, cgroups v2, private none-network
-mode, provenance labels, declared mounts, and resource limits. The runtime socket
-is never mounted. Kenogram protects the host only to the extent provided by the
+mode, active seccomp filtering, provenance labels, declared mounts, and resource
+limits before any service starts. The runtime socket is never mounted. Kenogram protects the host only to the extent provided by the
 kernel, rootless runtime, and its own correctness; declared rw mounts and secrets
 remain world-owned input by design.
 

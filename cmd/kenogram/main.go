@@ -40,7 +40,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "destroy":
 		return runWorldAction(ctx, "destroy", args[1:], stdout, stderr)
 	case "enter":
-		return runEnter(ctx, args[1:], stderr)
+		return runEnter(ctx, args[1:], stdout, stderr)
 	case "status":
 		return runStatus(ctx, args[1:], stdout, stderr)
 	case "allow":
@@ -75,8 +75,14 @@ func newApp(stdout io.Writer) (*app.App, error) {
 	return a, nil
 }
 func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram up [--dry-run] [--json] [--yes] <file>"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprintln(stderr, usage) }
 	dry := fs.Bool("dry-run", false, "stop after plan")
 	jsonOut := fs.Bool("json", false, "JSON output")
 	yes := fs.Bool("yes", false, "confirm replacement")
@@ -84,7 +90,7 @@ func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: kenogram up [--dry-run] [--json] [--yes] <file>")
+		fs.Usage()
 		return 2
 	}
 	prepared, err := app.Prepare(fs.Arg(0))
@@ -95,6 +101,10 @@ func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	a, err := newApp(stdout)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if err := a.ValidateHostMounts(prepared.Result); err != nil {
+		fmt.Fprintln(stderr, "validate host mounts:", err)
 		return 1
 	}
 	changes, drift := priorChanges(a, prepared)
@@ -171,14 +181,26 @@ func confirm(w io.Writer) bool {
 	return strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes")
 }
 func runWorldAction(ctx context.Context, action string, args []string, stdout, stderr io.Writer) int {
+	usage := fmt.Sprintf("usage: kenogram %s <world>", action)
+	if action == "destroy" {
+		usage = "usage: kenogram destroy --yes <world>"
+	}
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
 	fs := flag.NewFlagSet(action, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	yes := fs.Bool("yes", false, "confirm destructive action")
+	fs.Usage = func() { fmt.Fprintln(stderr, usage) }
+	yes := false
+	if action == "destroy" {
+		fs.BoolVar(&yes, "yes", false, "confirm destructive action")
+	}
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: kenogram %s [--yes] <world>\n", action)
+		fs.Usage()
 		return 2
 	}
 	name := fs.Arg(0)
@@ -186,7 +208,7 @@ func runWorldAction(ctx context.Context, action string, args []string, stdout, s
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	if action == "destroy" && !*yes {
+	if action == "destroy" && !yes {
 		fmt.Fprintln(stderr, "destroy requires --yes")
 		return 2
 	}
@@ -207,14 +229,21 @@ func runWorldAction(ctx context.Context, action string, args []string, stdout, s
 	fmt.Fprintf(stdout, "%s: %s\n", name, action)
 	return 0
 }
-func runEnter(ctx context.Context, args []string, stderr io.Writer) int {
+func runEnter(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram enter [--repair] <world>"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
 	fs := flag.NewFlagSet("enter", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprintln(stderr, usage) }
 	repair := fs.Bool("repair", false, "open a bare shell")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 1 {
+		fs.Usage()
 		return 2
 	}
 	if err := worldfs.ValidateName(fs.Arg(0)); err != nil {
@@ -232,13 +261,24 @@ func runEnter(ctx context.Context, args []string, stderr io.Writer) int {
 	return 0
 }
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram status [--json] <world>"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprintln(stderr, usage) }
 	jsonOut := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fs.Usage()
 		return 2
 	}
 	if err := worldfs.ValidateName(fs.Arg(0)); err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
 	a, err := newApp(io.Discard)
@@ -263,14 +303,25 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	return 0
 }
 func runWorlds(args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram worlds [--json]"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
 	fs := flag.NewFlagSet("worlds", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprintln(stderr, usage) }
 	jsonOut := fs.Bool("json", false, "JSON output")
-	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fs.Usage()
 		return 2
 	}
 	a, err := newApp(io.Discard)
 	if err != nil {
+		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	states, err := a.Worlds()
@@ -287,11 +338,17 @@ func runWorlds(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 func runAllow(args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram allow <world> <host>:<port> --for <duration>"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
 	if len(args) != 4 || args[2] != "--for" || args[3] == "" {
-		fmt.Fprintln(stderr, "usage: kenogram allow <world> <host>:<port> --for <duration>")
+		fmt.Fprintln(stderr, usage)
 		return 2
 	}
 	if err := worldfs.ValidateName(args[0]); err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
 	a, err := newApp(io.Discard)
@@ -306,11 +363,17 @@ func runAllow(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 func runRevoke(args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram revoke <world> <host>:<port>"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
 	if len(args) != 2 {
-		fmt.Fprintln(stderr, "usage: kenogram revoke <world> <host>:<port>")
+		fmt.Fprintln(stderr, usage)
 		return 2
 	}
 	if err := worldfs.ValidateName(args[0]); err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
 	a, err := newApp(io.Discard)
@@ -325,11 +388,17 @@ func runRevoke(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 func runRepairHistory(args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram repair-history --yes <world>"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
 	if len(args) != 2 || args[0] != "--yes" {
-		fmt.Fprintln(stderr, "usage: kenogram repair-history --yes <world>")
+		fmt.Fprintln(stderr, usage)
 		return 2
 	}
 	if err := worldfs.ValidateName(args[1]); err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
 	a, err := newApp(io.Discard)
@@ -342,6 +411,10 @@ func runRepairHistory(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "%s: truncated history tail removed\n", args[1])
 	return 0
+}
+
+func helpRequested(args []string) bool {
+	return len(args) == 1 && (args[0] == "--help" || args[0] == "-h")
 }
 func encode(stdout, stderr io.Writer, value any) int {
 	encoder := json.NewEncoder(stdout)

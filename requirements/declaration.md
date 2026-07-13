@@ -37,4 +37,8 @@ behavioral or ontological identity.
 
 The parser, not this summary, is authoritative about required keys and defaults.
 Start from [`../kenogram.example.toml`](../kenogram.example.toml) and use
-`kenogram up --dry-run` as the validation boundary.
+`kenogram up --dry-run` as the validation boundary. The example proves planning,
+not image compatibility. Before start, the materialized world must contain
+`/usr/bin/tail`, `/bin/sh`, the declared user, and every executable named by an
+autostart service; executables may come from the base or declared copies. Normal
+`enter` additionally requires `/usr/bin/tmux` and a `main` session.

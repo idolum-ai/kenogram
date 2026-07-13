@@ -19,7 +19,8 @@ Workspace data is host-side, carried, and represented by a deterministic digest
 tree. Configuration is regenerated from the declaration. Confirmation surfaces
 workspace drift. Rootless operation, private namespaces, capability reduction,
 seccomp, device allowlisting, cgroups v2, and absence of the runtime socket are
-mandatory.
+mandatory. Exact mount identity and active seccomp mode are observed before the
+network door or any declared service starts.
 
 A generation is one material inscription of the declared world-pattern, not the
 persistent substance of the world. Replacement is correct when provenance is

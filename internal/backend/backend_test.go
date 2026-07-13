@@ -2,10 +2,12 @@ package backend
 
 import (
 	"context"
-	"github.com/idolum-ai/kenogram/internal/plan"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/idolum-ai/kenogram/internal/plan"
 )
 
 type call struct {
@@ -37,30 +39,83 @@ func TestCreateExactArgv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create", "--name", "kenogram-w-g7", "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--hostname", "h", "--user", "agent", "--workdir", "/workspace", "--cpus", "2", "--memory", "3", "--pids-limit", "4", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=w", "--label", "io.kenogram.generation=7", "--label", "io.kenogram.plan-digest=pd", "--label", "io.kenogram.declaration-digest=dd", "--env", "NO_PROXY=localhost,127.0.0.1", "--env", "HTTP_PROXY=http://127.0.0.1:3128", "--env", "HTTPS_PROXY=http://127.0.0.1:3128", "--mount", "type=bind,src=/host,dst=/workspace,rw,nodev,nosuid,noexec", "--entrypoint", "/usr/bin/tail", "base@sha256:x", "-f", "/dev/null"}
+	want := []string{"create", "--name", "kenogram-w-g7", "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--image-volume", "ignore", "--hostname", "h", "--user", "agent", "--workdir", "/workspace", "--cpus", "2", "--memory", "3", "--pids-limit", "4", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=w", "--label", "io.kenogram.generation=7", "--label", "io.kenogram.plan-digest=pd", "--label", "io.kenogram.declaration-digest=dd", "--env", "NO_PROXY=localhost,127.0.0.1", "--env", "HTTP_PROXY=http://127.0.0.1:3128", "--env", "HTTPS_PROXY=http://127.0.0.1:3128", "--mount", "type=bind,src=/host,dst=/workspace,rw,nodev,nosuid,noexec", "--entrypoint", "/usr/bin/tail", "base@sha256:x", "-f", "/dev/null"}
 	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].args, want) {
 		t.Fatalf("got %#v", f.calls)
 	}
 }
 func TestVerifyEvidence(t *testing.T) {
 	r := plan.Result{PlanDigest: "p", DeclarationDigest: "d", Plan: plan.Plan{Name: "w", World: plan.World{User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
-	e := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", IPCMode: "private", PIDMode: "private", UTSMode: "private", UserNSMode: "", UIDMap: []IDMap{{ContainerID: int64(os.Getuid()), HostID: int64(os.Getuid()), Size: 1}}, GIDMap: []IDMap{{ContainerID: int64(os.Getgid()), HostID: int64(os.Getgid()), Size: 1}}, User: "agent", Hostname: "", WorkingDir: "", CapDrop: []string{"CAP_ALL"}, BoundingCaps: []string{}, SecurityOpt: []string{"no-new-privileges"}, Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}}
-	if err := Verify(e, r, 1); err != nil {
+	e := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", IPCMode: "private", PIDMode: "private", UTSMode: "private", UserNSMode: "", UIDMap: []IDMap{{ContainerID: int64(os.Getuid()), HostID: int64(os.Getuid()), Size: 1}}, GIDMap: []IDMap{{ContainerID: int64(os.Getgid()), HostID: int64(os.Getgid()), Size: 1}}, User: "agent", Hostname: "", WorkingDir: "", CapDrop: []string{"CAP_ALL"}, BoundingCaps: []string{}, SecurityOpt: []string{"no-new-privileges"}, SeccompMode: 2, Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}}
+	if err := Verify(e, r, 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	e.NetworkMode = "bridge"
-	if err := Verify(e, r, 1); err == nil {
+	if err := Verify(e, r, 1, nil); err == nil {
 		t.Fatal("bridge accepted")
 	}
 	e.NetworkMode = "none"
 	e.SecurityOpt = nil
-	if err := Verify(e, r, 1); err == nil {
+	if err := Verify(e, r, 1, nil); err == nil {
 		t.Fatal("missing no-new-privileges accepted")
 	}
 	e.SecurityOpt = []string{"no-new-privileges"}
 	e.Mounts = []EvidenceMount{{Source: "/run/podman/podman.sock", Destination: "/runtime.sock", RW: true, Mode: "nodev,nosuid"}}
-	if err := Verify(e, r, 1); err == nil {
+	if err := Verify(e, r, 1, nil); err == nil {
 		t.Fatal("runtime socket accepted")
+	}
+}
+
+func TestVerifyExactMountEvidence(t *testing.T) {
+	r := plan.Result{PlanDigest: "p", DeclarationDigest: "d", Plan: plan.Plan{Name: "w", World: plan.World{User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
+	expected := []Mount{{Source: "/state/workspace", Target: "/workspace", Mode: "rw", NoExec: true}}
+	base := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", IPCMode: "private", PIDMode: "private", UTSMode: "private", UIDMap: []IDMap{{ContainerID: int64(os.Getuid()), HostID: int64(os.Getuid()), Size: 1}}, GIDMap: []IDMap{{ContainerID: int64(os.Getgid()), HostID: int64(os.Getgid()), Size: 1}}, User: "agent", BoundingCaps: []string{}, SecurityOpt: []string{"no-new-privileges"}, SeccompMode: 2, Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}, Mounts: []EvidenceMount{{Source: "/state/workspace", Destination: "/workspace", RW: true, Mode: "rw,nodev,nosuid,noexec", IdentityVerified: true}}}
+	if err := Verify(base, r, 1, expected); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*Evidence){
+		"wrong source": func(e *Evidence) { e.Mounts[0].Source = "/host/home" },
+		"wrong mode":   func(e *Evidence) { e.Mounts[0].RW = false },
+		"missing option": func(e *Evidence) {
+			e.Mounts[0].Mode = "rw,nodev,nosuid"
+		},
+		"unexpected mount": func(e *Evidence) {
+			e.Mounts = append(e.Mounts, EvidenceMount{Source: "/host", Destination: "/extra", RW: true, Mode: "rw,nodev,nosuid", IdentityVerified: true})
+		},
+		"swapped identity": func(e *Evidence) { e.Mounts[0].IdentityVerified = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			evidence := base
+			evidence.Mounts = append([]EvidenceMount(nil), base.Mounts...)
+			mutate(&evidence)
+			if err := Verify(evidence, r, 1, expected); err == nil {
+				t.Fatal("forged mount evidence accepted")
+			}
+		})
+	}
+}
+
+func TestSameFileIdentityDetectsSourceSwap(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source")
+	bound := filepath.Join(dir, "bound")
+	if err := os.WriteFile(source, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(source, bound); err != nil {
+		t.Fatal(err)
+	}
+	if same, err := sameFileIdentity(source, bound); err != nil || !same {
+		t.Fatalf("original identity = %t, %v", same, err)
+	}
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if same, err := sameFileIdentity(source, bound); err != nil || same {
+		t.Fatalf("swapped identity = %t, %v", same, err)
 	}
 }
 
@@ -92,6 +147,29 @@ func TestParseProcBoundingCaps(t *testing.T) {
 	for _, raw := range [][]byte{nil, []byte("CapBnd:\n"), []byte("CapBnd:\tnot-hex\n")} {
 		if _, err := parseProcBoundingCaps(raw); err == nil {
 			t.Fatalf("parseProcBoundingCaps(%q) succeeded", raw)
+		}
+	}
+}
+
+func TestParseProcSeccomp(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want int
+		ok   bool
+	}{
+		{raw: "Name:\ttail\nSeccomp:\t2\n", want: 2, ok: true},
+		{raw: "Seccomp:\t0\n", want: 0, ok: true},
+		{raw: "Seccomp:\t1\n", want: 1, ok: true},
+		{raw: "Name:\ttail\n"},
+		{raw: "Seccomp:\tx\n"},
+		{raw: "Seccomp:\t3\n"},
+	} {
+		got, err := parseProcSeccomp([]byte(test.raw))
+		if test.ok && (err != nil || got != test.want) {
+			t.Fatalf("parseProcSeccomp(%q) = %d, %v", test.raw, got, err)
+		}
+		if !test.ok && err == nil {
+			t.Fatalf("parseProcSeccomp(%q) succeeded", test.raw)
 		}
 	}
 }

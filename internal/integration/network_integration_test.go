@@ -41,9 +41,19 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 	state := filepath.Join(tmp, "state")
 	env := append(os.Environ(), "KENOGRAM_STATE_DIR="+state)
 	declaration := filepath.Join(tmp, "kenogram.toml")
+	writeDeclaration(t, declaration, image, fmt.Sprintf("[[mounts]]\nsource = %q\ntarget = \"/host\"\nmode = \"ro\"\n", tmp))
+	if out, err := runFailure(tmp, env, bin, "up", "--yes", declaration); err == nil || !strings.Contains(out, "protected host path") {
+		t.Fatalf("state-parent mount was not rejected before creation: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(run(t, tmp, env, "podman", "ps", "--all", "--filter", "name=^kenogram-integration-g1$", "--format", "{{.Names}}")); got != "" {
+		t.Fatalf("dangerous declaration created runtime %q", got)
+	}
 	writeDeclaration(t, declaration, image, "")
 	run(t, tmp, env, bin, "up", "--yes", declaration)
 	container := "kenogram-integration-g1"
+	if got := strings.TrimSpace(run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "seccomp")); got != "2" {
+		t.Fatalf("seccomp mode=%q, want filtered mode 2", got)
+	}
 	interfaces := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "interfaces")
 	if strings.TrimSpace(interfaces) != "lo" {
 		t.Fatalf("interfaces=%q", interfaces)
