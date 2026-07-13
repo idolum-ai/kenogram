@@ -22,6 +22,11 @@ security issues privately as described in [`.github/SECURITY.md`](.github/SECURI
 is a compile-time and argv proof, not a substitute for the machine-only proof
 matrix in [`docs/apple-container-machine.md`](docs/apple-container-machine.md).
 
+Release preparation uses a short-lived `release/vX.Y.Z` branch and the process
+in [`docs/release-strategy.md`](docs/release-strategy.md). Maintainers review
+candidate binaries, checksums, embedded source identity, and release text before
+merge; ordinary contributors never need publication credentials.
+
 ## Composition proofs
 
 All release inputs are URL- and checksum-locked under `internal/e2e/testdata`.

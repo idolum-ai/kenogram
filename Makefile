@@ -8,15 +8,25 @@ LDFLAGS := -X github.com/idolum-ai/kenogram/internal/version.Version=$(VERSION) 
 GOCACHE ?= /tmp/kenogram-go-build
 GOMODCACHE ?= /tmp/kenogram-go-mod
 
-.PHONY: build install uninstall test test-evidence test-race integration e2e e2e-release e2e-openclaw e2e-composition e2e-hermes e2e-hermes-composition e2e-telegram-canary vet check architecture stdlib-only docs-freshness secrets smoke fmt cross-apple-machine
+.PHONY: build release-dist release-smoke install install-release uninstall test test-evidence test-race integration e2e e2e-release e2e-openclaw e2e-composition e2e-hermes e2e-hermes-composition e2e-telegram-canary vet check architecture stdlib-only docs-freshness secrets workflow-sanity smoke fmt cross-apple-machine
 
 build:
 	mkdir -p bin
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/kenogram
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go build -buildvcs=false -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/kenogram
+
+release-dist:
+	@if [ "$(VERSION)" = "dev" ]; then echo "VERSION=vX.Y.Z is required" >&2; exit 2; fi
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) RELEASE_COMMIT=$(COMMIT) RELEASE_DATE=$(DATE) ./scripts/package-release.sh "$(VERSION)" dist
+
+release-smoke:
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) ./scripts/check-release.sh
 
 install: build
 	mkdir -p $(BINDIR)
 	install -m 0755 bin/$(BINARY) $(BINDIR)/$(BINARY)
+
+install-release:
+	@if [ "$(VERSION)" = "dev" ]; then ./scripts/install-release.sh; else ./scripts/install-release.sh "$(VERSION)"; fi
 
 uninstall:
 	rm -f $(BINDIR)/$(BINARY)
@@ -38,7 +48,7 @@ vet:
 fmt:
 	test -z "$$(gofmt -l cmd internal)"
 
-check: fmt test vet build cross-apple-machine architecture stdlib-only docs-freshness secrets smoke
+check: fmt test vet build release-smoke cross-apple-machine architecture stdlib-only docs-freshness secrets workflow-sanity smoke
 
 cross-apple-machine:
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 go build -buildvcs=false ./...
@@ -54,6 +64,9 @@ docs-freshness:
 
 secrets:
 	bash scripts/check-secrets.sh
+
+workflow-sanity:
+	bash scripts/check-workflows.sh
 
 smoke: build
 	bash scripts/smoke.sh

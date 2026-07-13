@@ -44,6 +44,27 @@ jobs:
       - name: Race detector
         run: make test-race
 
+  apple-host:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Native Apple launcher contract
+        run: |
+          go test ./internal/backend -run '^TestAppleMachine' -count=1
+          go build -buildvcs=false -o bin/kenogram ./cmd/kenogram
+          file bin/kenogram | grep -F 'arm64'
+          ./bin/kenogram version
+          ./bin/kenogram help
+          if ./bin/kenogram status ci-smoke >apple-host.out 2>&1; then
+            echo 'macOS runtime command unexpectedly selected an implicit backend' >&2
+            exit 1
+          fi
+          grep -F 'on macOS select apple-container-machine with KENOGRAM_RUNTIME' apple-host.out
+
   runtime:
     needs: [check, race]
     runs-on: ubuntu-latest

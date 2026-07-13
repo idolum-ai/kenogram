@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'release/v')
+    runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      tag: ${{ steps.release.outputs.tag }}
+    env:
+      RELEASE_BODY: ${{ github.event.pull_request.body }}
+      RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
+      RELEASE_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+      RELEASE_PR_NUMBER: ${{ github.event.pull_request.number }}
+      RELEASE_TITLE: ${{ github.event.pull_request.title }}
+      RELEASE_URL: ${{ github.event.pull_request.html_url }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install proof tools
+        run: sudo apt-get update && sudo apt-get install -y podman uidmap fuse-overlayfs ripgrep
+      - name: Resolve reviewed source
+        id: release
+        run: |
+          set -euo pipefail
+          tag="$(./scripts/validate-release-version.sh "${RELEASE_BRANCH#release/}")"
+          prefix="## [${tag}] - "
+          heading="$(awk -v prefix="${prefix}" 'index($0, prefix) == 1 { print; exit }' CHANGELOG.md)"
+          date="${heading#"${prefix}"}"
+          [[ "${heading}" == "${prefix}"* && "${date}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
+            echo "CHANGELOG.md is missing a dated heading for ${tag}" >&2; exit 1;
+          }
+          git fetch --no-tags origin "refs/pull/${RELEASE_PR_NUMBER}/head:refs/remotes/origin/reviewed-release-head"
+          head_tree="$(git rev-parse 'refs/remotes/origin/reviewed-release-head^{tree}')"
+          merge_tree="$(git rev-parse "${RELEASE_MERGE_SHA}^{tree}")"
+          [[ "${head_tree}" = "${merge_tree}" ]] || { echo "merged release tree differs from the candidate-reviewed head" >&2; exit 1; }
+          printf '%s\n' "${RELEASE_BODY}" > release-notes-source.md
+          ./scripts/prepare-release-notes.sh "${tag}" "${RELEASE_TITLE}" "${RELEASE_URL}" release-notes-source.md release-notes.md
+          prerelease=false; [[ "${tag}" != *-* ]] || prerelease=true
+          echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
+          echo "source_sha=${RELEASE_MERGE_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+      - name: Full gate
+        run: make check
+      - name: Race detector
+        run: make test-race
+      - name: Real runtime integration
+        run: make integration
+      - name: Build and inspect release assets
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse --short=12 "${RELEASE_MERGE_SHA}")"
+          date="$(git show -s --format=%cI "${RELEASE_MERGE_SHA}")"
+          make release-dist VERSION="${TAG}" COMMIT="${commit}" DATE="${date}"
+          mkdir release-smoke
+          tar -xzf "dist/kenogram-${TAG}-linux-amd64.tar.gz" -C release-smoke kenogram
+          release-smoke/kenogram version | tee release-version.txt
+          grep -F "kenogram ${TAG} commit=${commit}" release-version.txt >/dev/null
+      - name: Upload reviewed release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-bundle
+          path: |
+            dist/*
+            release-notes.md
+            release-version.txt
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    env:
+      PRERELEASE: ${{ needs.build.outputs.prerelease }}
+      SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+      TAG: ${{ needs.build.outputs.tag }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 1
+          ref: ${{ needs.build.outputs.source_sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-bundle
+      - name: Create tag atomically
+        run: |
+          set -euo pipefail
+          remote_sha="$(git ls-remote --tags origin "refs/tags/${TAG}" | awk 'NR == 1 { print $1 }')"
+          if [[ -z "${remote_sha}" ]]; then
+            git push origin "${SOURCE_SHA}:refs/tags/${TAG}" || true
+            remote_sha="$(git ls-remote --tags origin "refs/tags/${TAG}" | awk 'NR == 1 { print $1 }')"
+          fi
+          [[ "${remote_sha}" = "${SOURCE_SHA}" ]] || { echo "tag ${TAG} exists at unexpected commit ${remote_sha}" >&2; exit 1; }
+      - name: Publish or recover GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected_assets="$(printf '%s\n' checksums.txt "kenogram-${TAG}-linux-amd64.tar.gz" "kenogram-${TAG}-linux-arm64.tar.gz")"
+          verify_release() {
+            [[ "$(gh release view "${TAG}" --json name --jq .name)" = "${TAG}" ]] || return 1
+            [[ "$(gh release view "${TAG}" --json body --jq .body)" = "$(cat release-notes.md)" ]] || return 1
+            [[ "$(gh release view "${TAG}" --json assets --jq '.assets[].name' | LC_ALL=C sort)" = "${expected_assets}" ]] || return 1
+            verify_dir="$(mktemp -d)"
+            gh release download "${TAG}" --dir "${verify_dir}"
+            for asset in dist/*; do cmp "${asset}" "${verify_dir}/$(basename "${asset}")" || return 1; done
+            rm -rf "${verify_dir}"
+          }
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            [[ "$(gh release view "${TAG}" --json isPrerelease --jq .isPrerelease)" = "${PRERELEASE}" ]] || exit 1
+            if [[ "$(gh release view "${TAG}" --json isDraft --jq .isDraft)" = false ]]; then verify_release; exit; fi
+            gh release edit "${TAG}" --title "${TAG}" --notes-file release-notes.md
+          else
+            args=("${TAG}" --verify-tag --draft --title "${TAG}" --notes-file release-notes.md)
+            [[ "${PRERELEASE}" = false ]] || args+=(--prerelease --latest=false)
+            gh release create "${args[@]}"
+          fi
+          gh release upload "${TAG}" dist/* --clobber
+          verify_release
+          gh release edit "${TAG}" --draft=false
+          verify_release

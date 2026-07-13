@@ -25,7 +25,7 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 	tmp := t.TempDir()
 	fixture := filepath.Join(tmp, "fixture")
 	buildEnv := append(os.Environ(), "CGO_ENABLED=0")
-	run(t, root, buildEnv, "go", "build", "-o", fixture, "./internal/integration/testdata/probe")
+	run(t, root, buildEnv, "go", "build", "-buildvcs=false", "-o", fixture, "./internal/integration/testdata/probe")
 	containerfile := filepath.Join(tmp, "Containerfile")
 	if err := os.WriteFile(containerfile, []byte("FROM scratch\nCOPY fixture /usr/bin/tail\nCOPY fixture /usr/local/bin/probe\nCOPY fixture /bin/sh\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 		exec.Command("podman", "rmi", "--force", image).Run()
 	})
 	bin := filepath.Join(tmp, "kenogram")
-	run(t, root, nil, "go", "build", "-o", bin, "./cmd/kenogram")
+	run(t, root, nil, "go", "build", "-buildvcs=false", "-o", bin, "./cmd/kenogram")
 	state := filepath.Join(tmp, "state")
 	env := append(os.Environ(), "KENOGRAM_STATE_DIR="+state)
 	declaration := filepath.Join(tmp, "kenogram.toml")
@@ -92,6 +92,16 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 	proxied := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", port))
 	if !strings.Contains(proxied, "200") {
 		t.Fatalf("proxy=%q", proxied)
+	}
+	run(t, tmp, env, bin, "revoke", "integration", fmt.Sprintf("localhost:%d", port))
+	revoked := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", port))
+	if !strings.Contains(revoked, "403") {
+		t.Fatalf("revoked declaration remained allowed: %q", revoked)
+	}
+	run(t, tmp, env, bin, "up", "--yes", declaration)
+	reconciled := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", port))
+	if !strings.Contains(reconciled, "200") {
+		t.Fatalf("unchanged declaration did not restore policy: %q", reconciled)
 	}
 	direct = run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "dial", fmt.Sprintf("127.0.0.1:%d", port))
 	if !strings.Contains(direct, "unroutable") {

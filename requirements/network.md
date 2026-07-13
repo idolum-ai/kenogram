@@ -16,6 +16,10 @@ The normative acceptance invariants are:
 9. Ephemeral grants die by deadline or proxy death and removal closes connections.
 10. Repeated application of one declaration is indistinguishable under 1–9.
 
+Reapplication replaces the proxy's durable allowance set with the declaration
+and clears ephemeral grants. This also restores a declaration-backed allowance
+removed by `revoke`; `revoke` changes live policy, not declaration authority.
+
 The invariants, rather than the internal mechanism, define network conformance.
 Implementations that preserve the same observations are behaviorally equivalent
 for this contract. This is an engineering criterion informed by Kenogram's

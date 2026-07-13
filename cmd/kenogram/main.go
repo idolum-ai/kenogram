@@ -79,7 +79,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 }
-func newApp(stdout io.Writer) (*app.App, error) {
+
+var newApp = func(stdout io.Writer) (*app.App, error) {
 	a, err := app.New()
 	if err != nil {
 		return nil, err
@@ -90,6 +91,7 @@ func newApp(stdout io.Writer) (*app.App, error) {
 	}
 	return a, nil
 }
+
 func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	const usage = "usage: kenogram up [--dry-run] [--json] [--yes] <file>"
 	if helpRequested(args) {
@@ -302,21 +304,64 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	state, evidence, err := a.Status(ctx, fs.Arg(0))
+	status, err := a.Status(ctx, fs.Arg(0))
 	if err != nil {
 		fmt.Fprintln(stderr, "status:", err)
 		return 1
 	}
-	payload := struct {
-		State    any               `json:"state"`
-		Evidence any               `json:"runtime_evidence,omitempty"`
-		Sources  map[string]string `json:"sources"`
-	}{state, evidence, map[string]string{"declared": "applied.toml", "recorded": "state.json", "observed": "podman inspect"}}
+	payload := newStatusPayload(status)
 	if *jsonOut {
 		return encode(stdout, stderr, payload)
 	}
-	fmt.Fprintf(stdout, "world: %s\nstatus: %s\ngeneration: g%d\ncontainer: %s\nplan digest: %s\ndeclaration digest: %s\nruntime running: %t\nnetwork mode: %s\n", state.Name, state.Status, state.Generation, state.Container, state.PlanDigest, state.DeclarationDigest, evidence.Running, evidence.NetworkMode)
+	world := fs.Arg(0)
+	stateLabel := "unknown"
+	if status.Authoritative != nil && status.Authoritative.State.Status != "" {
+		stateLabel = status.Authoritative.State.Status
+	}
+	if status.RecoveryPhase != "" {
+		stateLabel = "recovery-required:" + status.RecoveryPhase
+	}
+	fmt.Fprintf(stdout, "world: %s\nstatus: %s\n", world, stateLabel)
+	printGeneration := func(label string, observation *app.GenerationObservation) {
+		if observation == nil {
+			fmt.Fprintf(stdout, "%s: none\n", label)
+			return
+		}
+		running, network := false, ""
+		if observation.Evidence != nil {
+			running, network = observation.Evidence.Running, observation.Evidence.NetworkMode
+		}
+		fmt.Fprintf(stdout, "%s generation: g%d\n%s container: %s\n%s plan digest: %s\n%s declaration digest: %s\n%s runtime exists: %t\n%s runtime running: %t\n%s network mode: %s\n", label, observation.State.Generation, label, observation.State.Container, label, observation.State.PlanDigest, label, observation.State.DeclarationDigest, label, observation.Exists, label, running, label, network)
+	}
+	printGeneration("authoritative", status.Authoritative)
+	if status.Candidate != nil {
+		printGeneration("candidate", status.Candidate)
+	}
 	return 0
+}
+
+type statusPayload struct {
+	// State and RuntimeEvidence preserve the pre-transition-aware JSON fields.
+	State           any               `json:"state,omitempty"`
+	RuntimeEvidence any               `json:"runtime_evidence,omitempty"`
+	RuntimeExists   bool              `json:"runtime_exists"`
+	Status          app.StatusResult  `json:"status"`
+	Sources         map[string]string `json:"sources"`
+}
+
+func newStatusPayload(status app.StatusResult) statusPayload {
+	sources := map[string]string{"declared": "applied.toml", "recorded": "state.json", "observed": "podman inspect"}
+	if status.RecoveryPhase != "" {
+		sources["declared"] = "transition.json"
+		sources["recorded"] = "transition.json"
+	}
+	payload := statusPayload{Status: status, Sources: sources}
+	if status.Authoritative != nil {
+		payload.State = status.Authoritative.State
+		payload.RuntimeExists = status.Authoritative.Exists
+		payload.RuntimeEvidence = status.Authoritative.Evidence
+	}
+	return payload
 }
 func runWorlds(args []string, stdout, stderr io.Writer) int {
 	const usage = "usage: kenogram worlds [--json]"

@@ -86,7 +86,7 @@ func Validate(d Declaration, declarationDir string) error {
 	}
 	seenNetwork := map[string]bool{}
 	for i, allow := range d.Network.Allow {
-		if strings.TrimSpace(allow.Host) == "" || strings.ContainsAny(allow.Host, "*/ ") {
+		if err := naming.Host(allow.Host); err != nil {
 			return fmt.Errorf("network.allow[%d].host must be an exact non-wildcard name or address", i)
 		}
 		if allow.Port < 1 || allow.Port > 65535 {

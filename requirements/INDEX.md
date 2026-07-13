@@ -27,8 +27,8 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
 | Declaration and plan | Unit, parser seeds, scheduled fuzzing, canonical digest, strict names, and staged-byte recheck | Snapshot-grade handling of an adversarially mutating source tree |
 | Operations | Signal-aware CLI, transition recovery tests, Engram v0.3.0 lifecycle E2E, and OpenClaw/Hermes compositions | Exhaustive CLI fault matrix and concurrent mutation stress |
 | Security | Exact Podman argv/mount-inode/seccomp evidence, rootless preflight, secret failure canaries, OpenClaw/Hermes absence checks, runtime-socket E2E | Seccomp profile identity and a supported Podman/kernel matrix |
-| Network | Multi-megabyte CONNECT, per-connection resolution, removal/expiry closure, Git/TLS fixture, and rootless integration | Full ten-invariant replay after every adoption path |
-| Lifecycle | Durable rollback/commit transition, recovery unit tests, service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Every-action/write failpoint matrix and SIGKILL-at-each-phase campaign |
+| Network | Multi-megabyte CONNECT, per-connection resolution, removal/expiry closure, declaration reconciliation, Git/TLS fixture, and rootless integration | Full ten-invariant replay after every adoption path |
+| Lifecycle | Durable rollback/commit transition, persisted-runtime 14-boundary SIGKILL recovery-only matrix, replay-safe service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Syscall-granular power-loss testing and exhaustive non-`up` action failpoints |
 | History | Tamper/truncated-tail unit tests plus E2E tombstone outcomes | Power-loss testing on multiple filesystems |
 
 ## Executable checks
@@ -43,8 +43,7 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
 - `make e2e-hermes` proves checksum-pinned Hermes Agent `v2026.7.7.2` isolation, native fake
   Telegram, lifecycle, and TUI use.
 - `make e2e-hermes-composition` proves fake Telegram text through Engram and the
-  isolated Hermes TUI, plus attachment ingestion into its workspace; `make e2e`
-  runs all five.
+  isolated Hermes TUI, plus attachment ingestion into its workspace; `make e2e` runs all five.
 - `make e2e-telegram-canary` is an operator-assisted, protected-environment
   proof of the real Telegram path and is never a pull-request gate.
 - `make architecture` checks required files and package dependency direction.

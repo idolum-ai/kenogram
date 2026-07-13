@@ -25,6 +25,21 @@ successor before recording it applied. `down`, `destroy`, `enter --repair`,
 `status`, `allow`, and `worlds` operate only from host-side state. `version`
 reports build provenance.
 
+`status` names the authoritative generation and, while a durable transition
+exists, the candidate generation and recovery phase separately. `enter
+--repair` resolves authority from the same transition record. Applying an
+unchanged declaration reconciles the live network door to its declared
+destinations and clears temporary grants; process liveness alone is not policy
+evidence. Destinations accepted by `allow` and `revoke` use canonical
+`host:port` syntax, including brackets around IPv6 addresses, with no URL
+userinfo, path, query, or fragment.
+
+`allow`, `revoke`, and `repair-history` reject mutation while a durable
+transition is unresolved. The operator must first recover it with `up`, `down`,
+or `destroy`. `status --json` preserves the `state` and `runtime_evidence`
+aliases while also reporting authoritative and candidate observations; during
+recovery, its declaration and state provenance is `transition.json`.
+
 Parse, validation, or runtime failures use exit status 1. CLI usage or missing
 confirmation uses status 2.
 

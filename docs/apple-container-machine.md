@@ -80,10 +80,22 @@ explicit authority grant.
 
 Automated tests currently prove selector validation, exact argv, environment
 scrubbing, prerequisite ordering, failure before the user command, non-ownership
-of machine lifecycle, native Linux regressions, and a Darwin/arm64 cross-build.
-They do not prove that a released Apple machine supplies nested rootless Podman,
-cgroup delegation, user namespaces, bind-mount flags, network-door transfer, or
-interactive TTY behavior.
+of machine lifecycle, native Linux regressions, a Darwin/arm64 cross-build, and
+a native Apple-silicon build and fail-closed CLI smoke test on GitHub's
+`macos-26` runner.
+
+That hosted runner cannot prove the machine boundary. GitHub documents that its
+[arm64 macOS runners do not support nested virtualization](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#limitations-for-arm64-macos-runners),
+while Apple's runtime is built on the macOS Virtualization framework. A real
+machine proof therefore requires a dedicated self-hosted Apple-silicon Mac on
+macOS 26 (or an equivalent bare-metal Mac provider), with a version-pinned
+`container` installation and a pre-provisioned Kenogram machine. The workflow
+should be scheduled and manually dispatchable, not a required pull-request gate
+until runner capacity and cleanup are reliable.
+
+The current matrix does not prove that a released Apple machine supplies nested
+rootless Podman, cgroup delegation, user namespaces, bind-mount flags,
+network-door transfer, or interactive TTY behavior.
 
 Before this transport can be called supported, a real Apple-silicon CI or
 operator proof must exercise: create/adopt/replace/restart/destroy; `enter` TTY;
