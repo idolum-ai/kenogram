@@ -34,9 +34,9 @@ type App struct {
 	Out        io.Writer
 	Now        func() time.Time
 	Executable string
-	// LifecycleCheckpoint is nil in production. Tests use it to terminate a
+	// lifecycleCheckpoint is nil in production. Tests use it to terminate a
 	// process at named durable boundaries without changing runtime behavior.
-	LifecycleCheckpoint func(string)
+	lifecycleCheckpoint func(string)
 }
 
 func New() (*App, error) {
@@ -52,8 +52,8 @@ func New() (*App, error) {
 }
 
 func (a *App) checkpoint(name string) {
-	if a.LifecycleCheckpoint != nil {
-		a.LifecycleCheckpoint(name)
+	if a.lifecycleCheckpoint != nil {
+		a.lifecycleCheckpoint(name)
 	}
 }
 
@@ -528,22 +528,26 @@ func (a *App) recoverTransition(ctx context.Context, l worldfs.Layout) error {
 		path = l.Applied
 	}
 	prepared, prepareErr := preparedFromRecovery(transition.SuccessorDeclaration, transition.SuccessorPlan, path, transition.Successor)
+	if prepareErr != nil {
+		return fmt.Errorf("committed successor intent is invalid; preserving commit transition: %w", prepareErr)
+	}
 	exists, existsErr := a.Backend.Exists(ctx, transition.Successor.Container)
-	if prepareErr != nil || existsErr != nil || !exists {
-		transition.Phase = "rollback"
-		if err := l.WriteTransition(transition); err != nil {
-			return err
-		}
-		return a.rollbackTransition(ctx, l, transition)
+	if existsErr != nil {
+		return fmt.Errorf("observe committed successor; preserving commit transition: %w", existsErr)
+	}
+	if !exists {
+		return fmt.Errorf("committed successor %s is absent; preserving commit transition", transition.Successor.Container)
 	}
 	evidence, inspectErr := a.Backend.Inspect(ctx, transition.Successor.Container)
 	mounts, mountsErr := a.mounts(l, prepared.Result)
-	if inspectErr != nil || mountsErr != nil || a.verifyRuntimeEvidence(evidence, prepared.Result, transition.Successor.Generation, mounts) != nil {
-		transition.Phase = "rollback"
-		if err := l.WriteTransition(transition); err != nil {
-			return err
-		}
-		return a.rollbackTransition(ctx, l, transition)
+	if inspectErr != nil {
+		return fmt.Errorf("inspect committed successor; preserving commit transition: %w", inspectErr)
+	}
+	if mountsErr != nil {
+		return fmt.Errorf("reconstruct committed successor mounts; preserving commit transition: %w", mountsErr)
+	}
+	if verifyErr := a.verifyRuntimeEvidence(evidence, prepared.Result, transition.Successor.Generation, mounts); verifyErr != nil {
+		return fmt.Errorf("verify committed successor; preserving commit transition: %w", verifyErr)
 	}
 	if len(prepared.Result.Plan.NetworkAllow) > 0 && !a.proxyAlive(l) {
 		pid, err := a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
@@ -648,12 +652,10 @@ func (a *App) restorePredecessor(ctx context.Context, l worldfs.Layout, prior wo
 	if err != nil {
 		return err
 	}
-	restarted := false
 	if !evidence.Running {
 		if err := a.Backend.Start(ctx, prior.Container); err != nil {
 			return err
 		}
-		restarted = true
 		evidence, err = a.Backend.Inspect(ctx, prior.Container)
 		if err != nil {
 			return err
@@ -673,10 +675,8 @@ func (a *App) restorePredecessor(ctx context.Context, l worldfs.Layout, prior wo
 			return err
 		}
 	}
-	if restarted {
-		if err := a.startServices(ctx, prior.Container, prepared.Result.Plan.Services); err != nil {
-			return err
-		}
+	if err := a.startServices(ctx, prior.Container, prepared.Result.Plan.Services); err != nil {
+		return err
 	}
 	prior.ProxyPID = proxyPID
 	prior.Status = "running"
@@ -893,7 +893,7 @@ func serviceScript(s plan.Service) string {
 		command[i] = shellQuote(arg)
 	}
 	line := strings.Join(command, " ")
-	prefix := "#!/bin/sh\nset -u\nstatus_dir=/run/kenogram/services\nmkdir -p \"$status_dir\"\nstatus=\"$status_dir/" + s.Name + "\"\nrun_service() {\n  printf 'starting\\n' >\"$status\"\n  " + line + " &\n  pid=$!\n  printf 'running %s\\n' \"$pid\" >\"$status\"\n  wait \"$pid\"\n  code=$?\n  printf 'exited %s\\n' \"$code\" >\"$status\"\n  return \"$code\"\n}\n"
+	prefix := "#!/bin/sh\nset -u\nstatus_dir=/run/kenogram/services\nmkdir -p \"$status_dir\"\nstatus=\"$status_dir/" + s.Name + "\"\nsupervisor=\"$status.supervisor\"\nprintf '%s\\n' \"$$\" >\"$supervisor\"\ntrap 'rm -f \"$supervisor\"' EXIT HUP INT TERM\nrun_service() {\n  printf 'starting\\n' >\"$status\"\n  " + line + " &\n  pid=$!\n  printf 'running %s\\n' \"$pid\" >\"$status\"\n  wait \"$pid\"\n  code=$?\n  printf 'exited %s\\n' \"$code\" >\"$status\"\n  return \"$code\"\n}\n"
 	switch s.Restart {
 	case "always":
 		return prefix + "while :; do\n  run_service || :\n  sleep 1\ndone\n"
@@ -904,9 +904,26 @@ func serviceScript(s plan.Service) string {
 	}
 }
 
+func serviceObservationCommand(name string) []string {
+	status := "/run/kenogram/services/" + name
+	script := "status=" + shellQuote(status) + "; supervisor=\"$status.supervisor\"; " +
+		"if [ -r \"$supervisor\" ]; then read pid <\"$supervisor\"; " +
+		"if kill -0 \"$pid\" 2>/dev/null; then printf 'supervised\\n'; exit 0; fi; fi; cat \"$status\""
+	return []string{"/bin/sh", "-c", script}
+}
+
+func serviceConverged(status string) bool {
+	return status == "supervised" || status == "exited 0"
+}
+
 func (a *App) startServices(ctx context.Context, container string, services []plan.Service) error {
 	for _, service := range services {
 		if !service.Autostart {
+			continue
+		}
+		observation := serviceObservationCommand(service.Name)
+		raw, observationErr := a.Backend.ExecOutput(ctx, container, observation)
+		if observationErr == nil && serviceConverged(strings.TrimSpace(string(raw))) {
 			continue
 		}
 		script := "/etc/kenogram/services/" + service.Name + ".sh"
@@ -915,12 +932,9 @@ func (a *App) startServices(ctx context.Context, container string, services []pl
 		}
 		deadline := time.Now().Add(10 * time.Second)
 		for {
-			raw, err := a.Backend.ExecOutput(ctx, container, []string{"/bin/sh", "-c", "cat /run/kenogram/services/" + shellQuote(service.Name)})
+			raw, err := a.Backend.ExecOutput(ctx, container, observation)
 			status := strings.TrimSpace(string(raw))
-			if err == nil && strings.HasPrefix(status, "running ") {
-				break
-			}
-			if err == nil && status == "exited 0" {
+			if err == nil && serviceConverged(status) {
 				// A service command may intentionally daemonize (tmux is the
 				// canonical example). Its successful acknowledgement is
 				// observable even though no foreground child remains.
@@ -1208,6 +1222,9 @@ func (a *App) Allow(name, destination, duration string) error {
 		return lockErr
 	}
 	defer lock.Release()
+	if err := requireSettledTransition(l); err != nil {
+		return err
+	}
 	if err := proxy.SendControl(l.ProxySocket, proxy.ControlRequest{Operation: "grant", Host: d.Host, Port: d.Port, Duration: duration}); err != nil {
 		return err
 	}
@@ -1229,6 +1246,9 @@ func (a *App) Revoke(name, destination string) error {
 		return err
 	}
 	defer lock.Release()
+	if err := requireSettledTransition(l); err != nil {
+		return err
+	}
 	if err := proxy.SendControl(l.ProxySocket, proxy.ControlRequest{Operation: "remove", Host: d.Host, Port: d.Port}); err != nil {
 		return err
 	}
@@ -1246,12 +1266,26 @@ func (a *App) RepairHistory(name string) error {
 		return err
 	}
 	defer lock.Release()
+	if err := requireSettledTransition(l); err != nil {
+		return err
+	}
 	if err := history.RepairTruncatedTail(l.History); err != nil {
 		return err
 	}
 	s, _ := l.ReadState()
 	_, err = history.Append(l.History, history.Record{Action: "history-repair", PlanDigest: s.PlanDigest, DeclarationDigest: s.DeclarationDigest, Outcome: "truncated-tail-removed"}, a.Now())
 	return err
+}
+
+func requireSettledTransition(l worldfs.Layout) error {
+	transition, err := l.ReadTransition()
+	if err == nil {
+		return fmt.Errorf("world has an unresolved %s transition; run up, down, or destroy to recover it first", transition.Phase)
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("read transition before mutation: %w", err)
+	}
+	return nil
 }
 func transitionAuthority(transition worldfs.Transition) (authoritative, candidate *worldfs.State) {
 	successor := transition.Successor
@@ -1325,7 +1359,7 @@ func (a *App) Status(ctx context.Context, name string) (StatusResult, error) {
 	if err != nil {
 		return StatusResult{}, err
 	}
-	if s.Container == "" || s.Status != "running" {
+	if s.Container == "" {
 		return StatusResult{Authoritative: &GenerationObservation{State: s}}, nil
 	}
 	observation, err := a.observeGeneration(ctx, s)
@@ -1344,7 +1378,22 @@ func (a *App) Worlds() ([]worldfs.State, error) {
 		if !entry.IsDir() || entry.Name() == ".destroyed" {
 			continue
 		}
-		s, err := worldfs.For(a.BaseDir, entry.Name()).ReadState()
+		l := worldfs.For(a.BaseDir, entry.Name())
+		if transition, transitionErr := l.ReadTransition(); transitionErr == nil {
+			authoritative, _ := transitionAuthority(transition)
+			if authoritative == nil {
+				states = append(states, worldfs.State{Name: entry.Name(), Status: "recovery-required:" + transition.Phase + ": no authoritative generation"})
+			} else {
+				state := *authoritative
+				state.Status = "recovery-required:" + transition.Phase
+				states = append(states, state)
+			}
+			continue
+		} else if !os.IsNotExist(transitionErr) {
+			states = append(states, worldfs.State{Name: entry.Name(), Status: "uncertain: " + transitionErr.Error()})
+			continue
+		}
+		s, err := l.ReadState()
 		if err != nil {
 			states = append(states, worldfs.State{Name: entry.Name(), Status: "uncertain: " + err.Error()})
 			continue

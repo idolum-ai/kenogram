@@ -119,7 +119,7 @@ func TestValidateRejectsDuplicateNetworkAndServices(t *testing.T) {
 }
 
 func TestValidateRejectsURLSyntaxInNetworkHost(t *testing.T) {
-	for _, host := range []string{" user.example", "user@example.com", "example.com/path", "example.com?query", "example.com#fragment", "[2001:db8::1]", "not:ipv6"} {
+	for _, host := range []string{" user.example", "bad\thost", "*", "user@example.com", "example.com/path", "example.com?query", "example.com#fragment", "[2001:db8::1]", "not:ipv6"} {
 		d, dir := validForValidation(t)
 		d.Network.Allow[0].Host = host
 		if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "exact non-wildcard") {

@@ -111,7 +111,7 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	revisionSource := filepath.Join(tmp, "revision")
 	kenogram := filepath.Join(tmp, "kenogram")
 	buildEnv := append(os.Environ(), "CGO_ENABLED=0")
-	run(t, ctx, root, buildEnv, "go", "build", "-o", kenogram, "./cmd/kenogram")
+	run(t, ctx, root, buildEnv, "go", "build", "-buildvcs=false", "-o", kenogram, "./cmd/kenogram")
 	testEnv := append(os.Environ(), "KENOGRAM_STATE_DIR="+stateRoot)
 
 	t.Cleanup(func() {

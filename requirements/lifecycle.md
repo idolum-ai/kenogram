@@ -15,7 +15,7 @@ durable successor state is written, that record advances from rollback to
 commit. The next `up` completes either direction idempotently before planning a
 new generation; an unrecoverable observation leaves the record intact.
 
-The transition phase defines authority for every recovery-facing command.
+The transition phase defines authority for `status`, `worlds`, and repair entry.
 During rollback the predecessor remains authoritative and the successor is a
 candidate; during commit the successor is authoritative and the predecessor is
 the displaced candidate. `status` reports both roles and `enter --repair`
@@ -37,11 +37,12 @@ same observable contracts.
 
 The unit suite kills a replacement process at fourteen lifecycle boundaries:
 after the rollback record, predecessor stop, successor start, both evidence
-checks, service start, commit record, each durable authority write, history
+checks, service start, commit record, each commit-artifact write, history
 append, predecessor removal, and transition removal. A fresh process must then
-converge on one running successor with one applied history record per
-generation. This is process-crash evidence, not a claim about storage surviving
-kernel or power loss on every filesystem.
+load the persisted runtime exactly as the killed process left it, converge
+recovery alone on the phase-authoritative generation without creating a
+container, and only then apply the successor. This is process-crash evidence,
+not a claim about storage surviving kernel or power loss on every filesystem.
 
 Rootless Podman, cgroups v2, and subordinate UID/GID mappings are hard
 preflight requirements. Generated `/KENOGRAM.md`, `world.json`, and service
@@ -50,6 +51,7 @@ matching stopped generations are restarted; missing or mismatched runtime state
 is replaced. A failed cutover restores predecessor services and its door.
 
 Autostart service wrappers report `starting`, `running <pid>`, and `exited
-<status>` under `/run/kenogram/services`. Restart policies wait one second
-between attempts. A successful command may intentionally daemonize; its zero
-exit is an acknowledgement, not a general application-health claim.
+<status>` under `/run/kenogram/services`, and retain a live supervisor marker
+for idempotent recovery. Restart policies wait one second between attempts. A
+successful command may intentionally daemonize; its zero exit is an
+acknowledgement, not a general application-health claim.

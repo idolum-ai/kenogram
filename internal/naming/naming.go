@@ -4,9 +4,11 @@ package naming
 
 import (
 	"fmt"
+	"net"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 var operational = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
@@ -16,6 +18,22 @@ func World(value string) error { return validate("world", value) }
 
 // Service validates a service name before it is used as a generated filename.
 func Service(value string) error { return validate("service", value) }
+
+// Host validates an exact, non-wildcard network name or IP address.
+func Host(value string) error {
+	if value == "" {
+		return fmt.Errorf("invalid host %q: use an exact non-wildcard name or address", value)
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || strings.ContainsRune("*/\\@?#[]", r) {
+			return fmt.Errorf("invalid host %q: use an exact non-wildcard name or address", value)
+		}
+	}
+	if strings.Contains(value, ":") && net.ParseIP(value) == nil {
+		return fmt.Errorf("invalid host %q: use an exact non-wildcard name or address", value)
+	}
+	return nil
+}
 
 func validate(kind, value string) error {
 	if !operational.MatchString(value) || value == "." || value == ".." {

@@ -25,7 +25,7 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 	tmp := t.TempDir()
 	fixture := filepath.Join(tmp, "fixture")
 	buildEnv := append(os.Environ(), "CGO_ENABLED=0")
-	run(t, root, buildEnv, "go", "build", "-o", fixture, "./internal/integration/testdata/probe")
+	run(t, root, buildEnv, "go", "build", "-buildvcs=false", "-o", fixture, "./internal/integration/testdata/probe")
 	containerfile := filepath.Join(tmp, "Containerfile")
 	if err := os.WriteFile(containerfile, []byte("FROM scratch\nCOPY fixture /usr/bin/tail\nCOPY fixture /usr/local/bin/probe\nCOPY fixture /bin/sh\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 		exec.Command("podman", "rmi", "--force", image).Run()
 	})
 	bin := filepath.Join(tmp, "kenogram")
-	run(t, root, nil, "go", "build", "-o", bin, "./cmd/kenogram")
+	run(t, root, nil, "go", "build", "-buildvcs=false", "-o", bin, "./cmd/kenogram")
 	state := filepath.Join(tmp, "state")
 	env := append(os.Environ(), "KENOGRAM_STATE_DIR="+state)
 	declaration := filepath.Join(tmp, "kenogram.toml")

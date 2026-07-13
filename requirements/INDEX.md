@@ -28,7 +28,7 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
 | Operations | Signal-aware CLI, transition recovery tests, Engram v0.3.0 lifecycle E2E, and OpenClaw/Hermes compositions | Exhaustive CLI fault matrix and concurrent mutation stress |
 | Security | Exact Podman argv/mount-inode/seccomp evidence, rootless preflight, secret failure canaries, OpenClaw/Hermes absence checks, runtime-socket E2E | Seccomp profile identity and a supported Podman/kernel matrix |
 | Network | Multi-megabyte CONNECT, per-connection resolution, removal/expiry closure, declaration reconciliation, Git/TLS fixture, and rootless integration | Full ten-invariant replay after every adoption path |
-| Lifecycle | Durable rollback/commit transition, 14-boundary replacement SIGKILL recovery matrix, service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Syscall-granular power-loss testing and exhaustive non-`up` action failpoints |
+| Lifecycle | Durable rollback/commit transition, persisted-runtime 14-boundary SIGKILL recovery-only matrix, replay-safe service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Syscall-granular power-loss testing and exhaustive non-`up` action failpoints |
 | History | Tamper/truncated-tail unit tests plus E2E tombstone outcomes | Power-loss testing on multiple filesystems |
 
 ## Executable checks

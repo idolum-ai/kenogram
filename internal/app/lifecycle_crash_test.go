@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,28 +22,61 @@ import (
 )
 
 type crashContainer struct {
-	result     plan.Result
-	generation int64
-	running    bool
+	Result     plan.Result     `json:"result"`
+	Generation int64           `json:"generation"`
+	Running    bool            `json:"running"`
+	Services   map[string]bool `json:"services,omitempty"`
 }
 
 type crashRunner struct {
 	results    map[string]plan.Result
 	containers map[string]*crashContainer
 	mount      string
+	statePath  string
+	calls      []string
+	failPrefix string
+	failed     bool
 }
 
-func newCrashRunner(mount string, results ...plan.Result) *crashRunner {
-	runner := &crashRunner{results: map[string]plan.Result{}, containers: map[string]*crashContainer{}, mount: mount}
+func newCrashRunner(mount, statePath string, results ...plan.Result) *crashRunner {
+	runner := &crashRunner{results: map[string]plan.Result{}, containers: map[string]*crashContainer{}, mount: mount, statePath: statePath}
 	for _, result := range results {
 		runner.results[result.PlanDigest] = result
 	}
+	if raw, err := os.ReadFile(statePath); err == nil {
+		if err := json.Unmarshal(raw, &runner.containers); err != nil {
+			panic(err)
+		}
+		for _, container := range runner.containers {
+			if container.Services == nil {
+				container.Services = map[string]bool{}
+			}
+		}
+	}
 	return runner
+}
+
+func (r *crashRunner) save() error {
+	raw, err := json.Marshal(r.containers)
+	if err != nil {
+		return err
+	}
+	temporary := r.statePath + ".tmp"
+	if err := os.WriteFile(temporary, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, r.statePath)
 }
 
 func (r *crashRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
 	if len(args) == 0 {
 		return nil, nil
+	}
+	call := strings.Join(args, " ")
+	r.calls = append(r.calls, call)
+	if !r.failed && r.failPrefix != "" && strings.HasPrefix(call, r.failPrefix) {
+		r.failed = true
+		return nil, fmt.Errorf("injected %s failure", r.failPrefix)
 	}
 	switch args[0] {
 	case "info":
@@ -55,21 +89,25 @@ func (r *crashRunner) Run(_ context.Context, _ string, args ...string) ([]byte, 
 		if name == "" || generation <= 0 || !ok {
 			return nil, fmt.Errorf("unknown crash fixture create: %v", args)
 		}
-		r.containers[name] = &crashContainer{result: result, generation: generation}
+		r.containers[name] = &crashContainer{Result: result, Generation: generation, Services: map[string]bool{}}
+		if err := r.save(); err != nil {
+			return nil, err
+		}
 		return []byte(name), nil
 	case "start":
 		if container := r.containers[args[len(args)-1]]; container != nil {
-			container.running = true
+			container.Running = true
 		}
-		return nil, nil
+		return nil, r.save()
 	case "stop":
 		if container := r.containers[args[len(args)-1]]; container != nil {
-			container.running = false
+			container.Running = false
+			container.Services = map[string]bool{}
 		}
-		return nil, nil
+		return nil, r.save()
 	case "rm":
 		delete(r.containers, args[len(args)-1])
-		return nil, nil
+		return nil, r.save()
 	case "ps":
 		names := make([]string, 0, len(r.containers))
 		for name := range r.containers {
@@ -84,20 +122,58 @@ func (r *crashRunner) Run(_ context.Context, _ string, args ...string) ([]byte, 
 			return nil, fmt.Errorf("container %s absent", name)
 		}
 		return r.inspect(name, container)
+	case "exec":
+		name := argumentAfter(args, "--detach")
+		if name != "" {
+			container := r.containers[name]
+			service := serviceNameFromArgs(args)
+			if container != nil && service != "" {
+				if container.Services == nil {
+					container.Services = map[string]bool{}
+				}
+				container.Services[service] = true
+				return nil, r.save()
+			}
+		}
+		name = args[1]
+		container := r.containers[name]
+		service := serviceNameFromArgs(args)
+		if container != nil && service != "" && container.Services[service] {
+			return []byte("supervised\n"), nil
+		}
+		return nil, fmt.Errorf("service observation unavailable")
 	default:
 		return []byte("ok"), nil
 	}
 }
 
+func serviceNameFromArgs(args []string) string {
+	joined := strings.Join(args, " ")
+	for _, marker := range []string{"/etc/kenogram/services/", "/run/kenogram/services/"} {
+		index := strings.Index(joined, marker)
+		if index < 0 {
+			continue
+		}
+		name := joined[index+len(marker):]
+		name = strings.Trim(name, "'\"")
+		name = strings.TrimSuffix(name, ".sh")
+		if end := strings.IndexAny(name, " ;'\""); end >= 0 {
+			name = name[:end]
+		}
+		return name
+	}
+	return ""
+}
+
 func (r *crashRunner) inspect(name string, container *crashContainer) ([]byte, error) {
-	result := container.result
+	result := container.Result
 	pid := 0
-	if container.running {
+	if container.Running {
 		pid = 321
 	}
 	document := []map[string]any{{
 		"Name": name, "BoundingCaps": []string{},
-		"State": map[string]any{"Running": container.running, "Pid": pid},
+		"State": map[string]any{"Running": container.Running, "Pid": pid},
 		"IDMappings": map[string]any{
 			"UidMap": []map[string]any{{"ContainerID": os.Getuid(), "HostID": os.Getuid(), "Size": 1}},
 			"GidMap": []map[string]any{{"ContainerID": os.Getgid(), "HostID": os.Getgid(), "Size": 1}},
@@ -105,7 +181,7 @@ func (r *crashRunner) inspect(name string, container *crashContainer) ([]byte, e
 		"Config": map[string]any{
 			"User": result.Plan.World.User, "Hostname": result.Plan.World.Hostname, "WorkingDir": result.Plan.World.Workdir,
 			"Labels": map[string]string{
-				"io.kenogram.world": result.Plan.Name, "io.kenogram.generation": strconv.FormatInt(container.generation, 10),
+				"io.kenogram.world": result.Plan.Name, "io.kenogram.generation": strconv.FormatInt(container.Generation, 10),
 				"io.kenogram.plan-digest": result.PlanDigest, "io.kenogram.declaration-digest": result.DeclarationDigest,
 			},
 		},
@@ -146,6 +222,8 @@ func crashPrepared(marker string, pids int64) Prepared {
 	prepared.Raw = []byte("version = 1\n# " + marker + "\n")
 	prepared.Path = marker + ".toml"
 	prepared.Result.Plan.Resources.PIDs = pids
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "example.test", Port: 443}}
+	prepared.Result.Plan.Services = []plan.Service{{Name: "worker", Command: []string{"/bin/true"}, Autostart: true, Restart: "never"}}
 	canonical, err := plan.Canonical(prepared.Result.Plan)
 	if err != nil {
 		panic(err)
@@ -170,13 +248,13 @@ func TestLifecycleSIGKILLHelper(t *testing.T) {
 	base := os.Getenv("KENOGRAM_TEST_CRASH_STATE")
 	layout := worldfs.For(base, "w")
 	prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
-	runner := newCrashRunner(layout.WorkspacePath("/workspace"), prior.Result, successor.Result)
-	a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(1, 0) }, Executable: "kenogram"}
+	runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
+	a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(1, 0) }, Executable: crashProxyExecutable(t, base)}
 	if err := a.Up(context.Background(), prior); err != nil {
 		t.Fatal(err)
 	}
 	a.Now = func() time.Time { return time.Unix(2, 0) }
-	a.LifecycleCheckpoint = func(name string) {
+	a.lifecycleCheckpoint = func(name string) {
 		if name == checkpoint {
 			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 			select {}
@@ -189,52 +267,55 @@ func TestLifecycleSIGKILLHelper(t *testing.T) {
 }
 
 func TestLifecycleRecoversAfterSIGKILLAtCommitBoundaries(t *testing.T) {
-	checkpoints := []string{
-		"rollback-recorded", "predecessor-stopped", "successor-started", "boundary-verified", "services-started", "successor-verified",
-		"commit-recorded", "digest-written", "declaration-written", "recovery-plan-written", "state-written", "history-written",
-		"predecessor-destroyed", "transition-cleared",
+	checkpoints := lifecycleCrashCheckpoints
+	if len(checkpoints) != 14 {
+		t.Fatalf("lifecycle checkpoint count = %d, want 14", len(checkpoints))
 	}
 	for _, checkpoint := range checkpoints {
 		t.Run(checkpoint, func(t *testing.T) {
 			base := t.TempDir()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLifecycleSIGKILLHelper$")
-			command.Env = append(os.Environ(), "KENOGRAM_TEST_CRASH_CHECKPOINT="+checkpoint, "KENOGRAM_TEST_CRASH_STATE="+base)
-			err := command.Run()
-			if ctx.Err() != nil {
-				t.Fatalf("crash helper timed out: %v", ctx.Err())
-			}
-			exit, ok := err.(*exec.ExitError)
-			if !ok {
-				t.Fatalf("crash helper error = %v", err)
-			}
-			status, ok := exit.Sys().(syscall.WaitStatus)
-			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
-				t.Fatalf("crash helper status = %v", exit.Sys())
-			}
+			crashAt(t, base, checkpoint)
 
 			layout := worldfs.For(base, "w")
 			prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
-			runner := newCrashRunner(layout.WorkspacePath("/workspace"), prior.Result, successor.Result)
-			priorRunning := checkpoint == "rollback-recorded"
-			if checkpoint != "predecessor-destroyed" && checkpoint != "transition-cleared" {
-				runner.containers["kenogram-w-g1"] = &crashContainer{result: prior.Result, generation: 1, running: priorRunning}
+			runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
+			a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(3, 0) }, Executable: crashProxyExecutable(t, base)}
+			defer func() { _ = a.stopProxy(layout) }()
+			transition, transitionErr := layout.ReadTransition()
+			expectedGeneration := int64(2)
+			if transitionErr == nil && transition.Phase == "rollback" {
+				expectedGeneration = 1
 			}
-			runner.containers["kenogram-w-g2"] = &crashContainer{result: successor.Result, generation: 2, running: checkpoint != "predecessor-stopped"}
-			a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(3, 0) }, Executable: "kenogram"}
-			if err := a.Up(context.Background(), successor); err != nil {
+			if err := a.recoverTransition(context.Background(), layout); err != nil {
 				t.Fatal(err)
 			}
 			state, err := layout.ReadState()
-			if err != nil || state.Generation != 2 || state.PlanDigest != successor.Result.PlanDigest || state.Status != "running" {
-				t.Fatalf("recovered state = %#v, %v", state, err)
+			if err != nil || state.Generation != expectedGeneration || state.Status != "running" {
+				t.Fatalf("recovery-only state = %#v, %v", state, err)
 			}
 			if _, err := os.Stat(layout.Transition); !os.IsNotExist(err) {
-				t.Fatalf("transition remains: %v", err)
+				t.Fatalf("transition remains after recovery-only pass: %v", err)
 			}
-			if len(runner.containers) != 1 || runner.containers[state.Container] == nil || !runner.containers[state.Container].running {
-				t.Fatalf("runtime authority = %#v", runner.containers)
+			if countCalls(runner.calls, "create ") != 0 {
+				t.Fatalf("recovery created runtime: %v", runner.calls)
+			}
+			if len(runner.containers) != 1 || runner.containers[state.Container] == nil || !runner.containers[state.Container].Running || !runner.containers[state.Container].Services["worker"] {
+				t.Fatalf("recovery-only runtime authority = %#v", runner.containers)
+			}
+			if !a.proxyAlive(layout) {
+				t.Fatal("network door is not alive after recovery-only pass")
+			}
+
+			runner.calls = nil
+			if err := a.Up(context.Background(), successor); err != nil {
+				t.Fatal(err)
+			}
+			state, err = layout.ReadState()
+			if err != nil || state.Generation != 2 || state.PlanDigest != successor.Result.PlanDigest || state.Status != "running" {
+				t.Fatalf("final state = %#v, %v", state, err)
+			}
+			if len(runner.containers) != 1 || runner.containers[state.Container] == nil || !runner.containers[state.Container].Running || !runner.containers[state.Container].Services["worker"] {
+				t.Fatalf("final runtime authority = %#v", runner.containers)
 			}
 			records, err := history.Verify(layout.History)
 			if err != nil {
@@ -251,4 +332,122 @@ func TestLifecycleRecoversAfterSIGKILLAtCommitBoundaries(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCommitRecoveryFailureNeverReversesAuthority(t *testing.T) {
+	for _, failure := range []string{"exists", "inspect", "verification"} {
+		t.Run(failure, func(t *testing.T) {
+			base := t.TempDir()
+			crashAt(t, base, "commit-recorded")
+			layout := worldfs.For(base, "w")
+			prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
+			runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
+			podman := crashBackend(runner)
+			switch failure {
+			case "exists":
+				runner.failPrefix = "ps "
+			case "inspect":
+				runner.failPrefix = "inspect "
+			case "verification":
+				failed := false
+				podman.MountIdentity = func(int, string, string) (bool, error) {
+					if !failed {
+						failed = true
+						return false, nil
+					}
+					return true, nil
+				}
+			}
+			a := &App{Backend: podman, BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: crashProxyExecutable(t, base)}
+			defer func() { _ = a.stopProxy(layout) }()
+			if err := a.recoverTransition(context.Background(), layout); err == nil || !strings.Contains(err.Error(), "preserving commit transition") {
+				t.Fatalf("first recovery error = %v", err)
+			}
+			transition, err := layout.ReadTransition()
+			if err != nil || transition.Phase != "commit" {
+				t.Fatalf("transition = %#v, %v", transition, err)
+			}
+			if err := a.recoverTransition(context.Background(), layout); err != nil {
+				t.Fatal(err)
+			}
+			state, err := layout.ReadState()
+			if err != nil || state.Generation != 2 {
+				t.Fatalf("state = %#v, %v", state, err)
+			}
+		})
+	}
+}
+
+func TestRollbackRecoveryReplaysServicesAfterStartFailure(t *testing.T) {
+	base := t.TempDir()
+	crashAt(t, base, "predecessor-stopped")
+	layout := worldfs.For(base, "w")
+	prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
+	runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
+	runner.failPrefix = "exec --detach kenogram-w-g1"
+	a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: crashProxyExecutable(t, base)}
+	defer func() { _ = a.stopProxy(layout) }()
+	if err := a.recoverTransition(context.Background(), layout); err == nil {
+		t.Fatal("first recovery unexpectedly succeeded")
+	}
+	priorRuntime := runner.containers["kenogram-w-g1"]
+	if priorRuntime == nil || !priorRuntime.Running || priorRuntime.Services["worker"] {
+		t.Fatalf("runtime after injected failure = %#v", runner.containers)
+	}
+	if err := a.recoverTransition(context.Background(), layout); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.containers["kenogram-w-g1"].Services["worker"] {
+		t.Fatalf("service was not restored: %#v", runner.containers)
+	}
+}
+
+func crashAt(t *testing.T, base, checkpoint string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLifecycleSIGKILLHelper$")
+	command.Env = append(os.Environ(), "KENOGRAM_TEST_CRASH_CHECKPOINT="+checkpoint, "KENOGRAM_TEST_CRASH_STATE="+base)
+	err := command.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("crash helper timed out: %v", ctx.Err())
+	}
+	exit, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("crash helper error = %v", err)
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("crash helper status = %v", exit.Sys())
+	}
+}
+
+func crashProxyExecutable(t *testing.T, base string) string {
+	t.Helper()
+	path := filepath.Join(base, "fake-proxy.sh")
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	script := `#!/bin/sh
+control=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--control" ]; then control=$2; shift 2; continue; fi
+  shift
+done
+: >"$control"
+trap 'exit 0' TERM INT
+while :; do
+  sleep 0.1
+done
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+var lifecycleCrashCheckpoints = []string{
+	"rollback-recorded", "predecessor-stopped", "successor-started", "boundary-verified", "services-started", "successor-verified",
+	"commit-recorded", "digest-written", "declaration-written", "recovery-plan-written", "state-written", "history-written",
+	"predecessor-destroyed", "transition-cleared",
 }

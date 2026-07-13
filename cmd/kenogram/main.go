@@ -63,7 +63,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 }
-func newApp(stdout io.Writer) (*app.App, error) {
+
+var newApp = func(stdout io.Writer) (*app.App, error) {
 	a, err := app.New()
 	if err != nil {
 		return nil, err
@@ -74,6 +75,7 @@ func newApp(stdout io.Writer) (*app.App, error) {
 	}
 	return a, nil
 }
+
 func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	const usage = "usage: kenogram up [--dry-run] [--json] [--yes] <file>"
 	if helpRequested(args) {
@@ -291,10 +293,7 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintln(stderr, "status:", err)
 		return 1
 	}
-	payload := struct {
-		Status  app.StatusResult  `json:"status"`
-		Sources map[string]string `json:"sources"`
-	}{status, map[string]string{"declared": "applied.toml", "recorded": "state.json and transition.json", "observed": "podman inspect"}}
+	payload := newStatusPayload(status)
 	if *jsonOut {
 		return encode(stdout, stderr, payload)
 	}
@@ -323,6 +322,30 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		printGeneration("candidate", status.Candidate)
 	}
 	return 0
+}
+
+type statusPayload struct {
+	// State and RuntimeEvidence preserve the pre-transition-aware JSON fields.
+	State           any               `json:"state,omitempty"`
+	RuntimeEvidence any               `json:"runtime_evidence,omitempty"`
+	RuntimeExists   bool              `json:"runtime_exists"`
+	Status          app.StatusResult  `json:"status"`
+	Sources         map[string]string `json:"sources"`
+}
+
+func newStatusPayload(status app.StatusResult) statusPayload {
+	sources := map[string]string{"declared": "applied.toml", "recorded": "state.json", "observed": "podman inspect"}
+	if status.RecoveryPhase != "" {
+		sources["declared"] = "transition.json"
+		sources["recorded"] = "transition.json"
+	}
+	payload := statusPayload{Status: status, Sources: sources}
+	if status.Authoritative != nil {
+		payload.State = status.Authoritative.State
+		payload.RuntimeExists = status.Authoritative.Exists
+		payload.RuntimeEvidence = status.Authoritative.Evidence
+	}
+	return payload
 }
 func runWorlds(args []string, stdout, stderr io.Writer) int {
 	const usage = "usage: kenogram worlds [--json]"
