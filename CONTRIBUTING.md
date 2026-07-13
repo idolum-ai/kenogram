@@ -41,7 +41,7 @@ export KENOGRAM_TELEGRAM_CANARY_NONCE="$(date +%s)"
 make e2e-telegram-canary
 ```
 
-The canary sends its two operator instructions through the bot, waits three
+The canary sends its three operator commands through the bot, waits three
 minutes for them, proves the resulting model request and Telegram delivery from
 Engram's audit record, then destroys the world. CI stores these secrets only in
 the protected `live-telegram-canary` environment.

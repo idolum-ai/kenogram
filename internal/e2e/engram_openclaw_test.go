@@ -88,7 +88,14 @@ USER node
 
 	telegram.enqueueText("/attach main:openclaw")
 	telegram.waitOutbound(t, 20*time.Second, "attached existing tmux target")
-	telegram.enqueueText("/send 1 Reply with the proof marker.")
+	telegram.enqueueText("/text 1 Reply with the proof marker.")
+	waitFor(t, 10*time.Second, func() (bool, string) {
+		out, err := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:openclaw")
+		return err == nil && strings.Contains(out, "Reply with the proof marker."), out
+	})
+	// OpenClaw treats LF as an editor newline. C-m supplies the carriage-return
+	// submit binding explicitly after Engram has proven the text reached the pane.
+	telegram.enqueueText("/key 1 C-m")
 	if !provider.observedWithin(30 * time.Second) {
 		pane, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:openclaw")
 		audit, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "cat", "/workspace/.engram/audit.jsonl")
