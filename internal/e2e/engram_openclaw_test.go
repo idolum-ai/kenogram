@@ -45,7 +45,7 @@ func TestEngramControlsOpenClawInsideKenogram(t *testing.T) {
 	containerfile := filepath.Join(tmp, "Containerfile")
 	containerBody := fmt.Sprintf(`FROM %s
 USER root
-RUN apt-get update && apt-get install --no-install-recommends -y tmux curl procps strace && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install --no-install-recommends -y tmux curl procps && rm -rf /var/lib/apt/lists/*
 ARG KENOGRAM_UID
 ARG KENOGRAM_GID
 RUN getent group "$KENOGRAM_GID" >/dev/null || groupadd --gid "$KENOGRAM_GID" kenogram-test; printf 'kenogram:x:%%s:%%s:Kenogram composition:/workspace:/bin/sh\n' "$KENOGRAM_UID" "$KENOGRAM_GID" >> /etc/passwd
@@ -84,6 +84,7 @@ USER node
 	waitForOpenClaw(t, ctx, tmp, testEnv, container)
 	assertOpenClawVersion(t, ctx, tmp, testEnv, container, openClaw.Version)
 	waitForTmuxTarget(t, ctx, tmp, testEnv, container, "main:openclaw")
+	waitForOpenClawTUIReady(t, ctx, tmp, testEnv, container, "main:openclaw")
 	waitForEngramPolling(t, telegram, 20*time.Second)
 	assertOpenClawCompositionVersions(t, ctx, tmp, testEnv, container, openClaw.Version)
 
@@ -157,8 +158,7 @@ func writeEngramOpenClawDeclaration(t *testing.T, path, world, image, engram, op
 		t.Fatal(err)
 	}
 	tuiShell := strings.Join(openClawEnvCommand("/usr/local/bin/openclaw", "tui", "--url", "ws://127.0.0.1:18789", "--token", openClawGatewayToken, "--session", "engram-composition", "--timeout-ms", "20000"), " ")
-	tracedTUI := "/usr/bin/strace -ff -tt -xx -yy -s 256 -e trace=read,readv -o /workspace/openclaw-stdin.trace " + tuiShell
-	tmuxCommand := []string{"/bin/sh", "-c", "until /usr/bin/curl --fail --silent http://127.0.0.1:18789/readyz >/dev/null; do sleep 0.1; done; cd /workspace && /usr/bin/tmux -vv new-session -d -x 120 -y 40 -s main -n openclaw " + shellQuote(tracedTUI) + " && exec /usr/bin/tmux wait-for kenogram-service-stop"}
+	tmuxCommand := []string{"/bin/sh", "-c", "until /usr/bin/curl --fail --silent http://127.0.0.1:18789/readyz >/dev/null; do sleep 0.1; done; cd /workspace && /usr/bin/tmux new-session -d -x 120 -y 40 -s main -n openclaw " + shellQuote(tuiShell) + " && exec /usr/bin/tmux wait-for kenogram-service-stop"}
 	tmuxJSON, err := json.Marshal(tmuxCommand)
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +227,29 @@ func waitForTmuxTarget(t *testing.T, ctx context.Context, dir string, env []stri
 	})
 }
 
+func waitForOpenClawTUIReady(t *testing.T, ctx context.Context, dir string, env []string, container, target string) {
+	t.Helper()
+	waitFor(t, 45*time.Second, func() (bool, string) {
+		pane, err := runResult(ctx, dir, env, "podman", "exec", container, "tmux", "capture-pane", "-p", "-t", target)
+		if err != nil {
+			return false, pane
+		}
+		paneTTY, err := runResult(ctx, dir, env, "podman", "exec", container, "tmux", "display-message", "-p", "-t", target, "#{pane_tty}")
+		if err != nil {
+			return false, paneTTY
+		}
+		paneTTY = strings.TrimSpace(paneTTY)
+		modes, err := runResult(ctx, dir, env, "podman", "exec", container, "stty", "-F", paneTTY, "-a")
+		if err != nil {
+			return false, modes
+		}
+		ready := strings.Contains(pane, "gateway connected | idle") &&
+			strings.Contains(modes, "-icanon") &&
+			strings.Contains(modes, "-icrnl")
+		return ready, fmt.Sprintf("pane tty: %s\nterminal modes:\n%s\npane:\n%s", paneTTY, modes, pane)
+	})
+}
+
 func assertOpenClawCompositionVersions(t *testing.T, ctx context.Context, dir string, env []string, container, openClawVersion string) {
 	t.Helper()
 	command := `printf 'tmux='; tmux -V; printf 'openclaw='; /usr/local/bin/openclaw --version; printf 'pi-tui='; node -p "require('/app/node_modules/@earendil-works/pi-tui/package.json').version"`
@@ -265,10 +288,6 @@ for pid in $(pgrep -f 'openclaw.*tui'); do
       ;;
   esac
 done
-printf '%s\n' '--- OpenClaw stdin reads ---'
-grep -Eh 'read(v)?\(.*(\\x0d|\\x52\\x65\\x70\\x6c\\x79)' /workspace/openclaw-stdin.trace* 2>/dev/null | tail -80 || true
-printf '%s\n' '--- tmux verbose input/key excerpts ---'
-grep -Ehi 'send-keys|input_key|input_parse|input_key_build|write.*pane' /workspace/tmux-*.log 2>/dev/null | tail -120 || true
 `
 	out, err := runResult(ctx, dir, env, "podman", "exec", container, "/bin/sh", "-c", command)
 	if err != nil {
