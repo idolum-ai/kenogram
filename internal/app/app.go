@@ -55,6 +55,22 @@ type Prepared struct {
 	Path        string
 }
 
+// GenerationObservation keeps recorded authority distinct from runtime
+// observation. A missing runtime is evidence too, so Exists is explicit.
+type GenerationObservation struct {
+	State    worldfs.State     `json:"state"`
+	Exists   bool              `json:"runtime_exists"`
+	Evidence *backend.Evidence `json:"runtime_evidence,omitempty"`
+}
+
+// StatusResult reports transition authority without hiding the generation that
+// is being committed or rolled back.
+type StatusResult struct {
+	Authoritative *GenerationObservation `json:"authoritative,omitempty"`
+	Candidate     *GenerationObservation `json:"candidate,omitempty"`
+	RecoveryPhase string                 `json:"recovery_phase,omitempty"`
+}
+
 func Prepare(path string) (Prepared, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -1130,7 +1146,7 @@ func (a *App) Enter(ctx context.Context, name string, repair bool) error {
 		return err
 	}
 	l := worldfs.For(a.BaseDir, name)
-	s, err := l.ReadState()
+	s, err := authoritativeState(l)
 	if err != nil {
 		return err
 	}
@@ -1202,35 +1218,83 @@ func (a *App) RepairHistory(name string) error {
 	_, err = history.Append(l.History, history.Record{Action: "history-repair", PlanDigest: s.PlanDigest, DeclarationDigest: s.DeclarationDigest, Outcome: "truncated-tail-removed"}, a.Now())
 	return err
 }
-func (a *App) Status(ctx context.Context, name string) (worldfs.State, backend.Evidence, error) {
+func transitionAuthority(transition worldfs.Transition) (authoritative, candidate *worldfs.State) {
+	successor := transition.Successor
+	if transition.Phase == "commit" {
+		return &successor, transition.Prior
+	}
+	return transition.Prior, &successor
+}
+
+func authoritativeState(l worldfs.Layout) (worldfs.State, error) {
+	transition, err := l.ReadTransition()
+	if err == nil {
+		authoritative, _ := transitionAuthority(transition)
+		if authoritative == nil || authoritative.Container == "" {
+			return worldfs.State{}, fmt.Errorf("no authoritative generation during %s recovery", transition.Phase)
+		}
+		return *authoritative, nil
+	}
+	if !os.IsNotExist(err) {
+		return worldfs.State{}, err
+	}
+	return l.ReadState()
+}
+
+func (a *App) observeGeneration(ctx context.Context, state worldfs.State) (*GenerationObservation, error) {
+	observation := &GenerationObservation{State: state}
+	if state.Container == "" {
+		return observation, nil
+	}
+	exists, err := a.Backend.Exists(ctx, state.Container)
+	if err != nil || !exists {
+		return observation, err
+	}
+	observation.Exists = true
+	evidence, err := a.Backend.Inspect(ctx, state.Container)
+	if err != nil {
+		return observation, err
+	}
+	observation.Evidence = &evidence
+	return observation, nil
+}
+
+func (a *App) Status(ctx context.Context, name string) (StatusResult, error) {
 	if err := naming.World(name); err != nil {
-		return worldfs.State{}, backend.Evidence{}, err
+		return StatusResult{}, err
 	}
 	l := worldfs.For(a.BaseDir, name)
 	if transition, err := l.ReadTransition(); err == nil {
-		state := transition.Successor
-		state.Status = "recovery-required:" + transition.Phase
-		exists, observeErr := a.Backend.Exists(ctx, state.Container)
-		if observeErr != nil || !exists {
-			return state, backend.Evidence{}, observeErr
+		authoritative, candidate := transitionAuthority(transition)
+		result := StatusResult{RecoveryPhase: transition.Phase}
+		if authoritative != nil {
+			result.Authoritative, err = a.observeGeneration(ctx, *authoritative)
+			if err != nil {
+				return result, err
+			}
 		}
-		evidence, inspectErr := a.Backend.Inspect(ctx, state.Container)
-		return state, evidence, inspectErr
+		if candidate != nil {
+			result.Candidate, err = a.observeGeneration(ctx, *candidate)
+			if err != nil {
+				return result, err
+			}
+		}
+		return result, nil
 	} else if !os.IsNotExist(err) {
-		return worldfs.State{Name: name, Status: "recovery-required:corrupt-transition"}, backend.Evidence{}, err
+		return StatusResult{RecoveryPhase: "corrupt-transition"}, err
 	}
 	if _, err := history.Verify(l.History); err != nil {
-		return worldfs.State{}, backend.Evidence{}, fmt.Errorf("verify history: %w", err)
+		return StatusResult{}, fmt.Errorf("verify history: %w", err)
 	}
 	s, err := l.ReadState()
 	if err != nil {
-		return s, backend.Evidence{}, err
+		return StatusResult{}, err
 	}
 	if s.Container == "" || s.Status != "running" {
-		return s, backend.Evidence{}, nil
+		return StatusResult{Authoritative: &GenerationObservation{State: s}}, nil
 	}
-	e, err := a.Backend.Inspect(ctx, s.Container)
-	return s, e, err
+	observation, err := a.observeGeneration(ctx, s)
+	return StatusResult{Authoritative: observation}, err
 }
 func (a *App) Worlds() ([]worldfs.State, error) {
 	entries, err := os.ReadDir(a.BaseDir)

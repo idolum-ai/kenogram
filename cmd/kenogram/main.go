@@ -286,20 +286,42 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	state, evidence, err := a.Status(ctx, fs.Arg(0))
+	status, err := a.Status(ctx, fs.Arg(0))
 	if err != nil {
 		fmt.Fprintln(stderr, "status:", err)
 		return 1
 	}
 	payload := struct {
-		State    any               `json:"state"`
-		Evidence any               `json:"runtime_evidence,omitempty"`
-		Sources  map[string]string `json:"sources"`
-	}{state, evidence, map[string]string{"declared": "applied.toml", "recorded": "state.json", "observed": "podman inspect"}}
+		Status  app.StatusResult  `json:"status"`
+		Sources map[string]string `json:"sources"`
+	}{status, map[string]string{"declared": "applied.toml", "recorded": "state.json and transition.json", "observed": "podman inspect"}}
 	if *jsonOut {
 		return encode(stdout, stderr, payload)
 	}
-	fmt.Fprintf(stdout, "world: %s\nstatus: %s\ngeneration: g%d\ncontainer: %s\nplan digest: %s\ndeclaration digest: %s\nruntime running: %t\nnetwork mode: %s\n", state.Name, state.Status, state.Generation, state.Container, state.PlanDigest, state.DeclarationDigest, evidence.Running, evidence.NetworkMode)
+	world := fs.Arg(0)
+	stateLabel := "unknown"
+	if status.Authoritative != nil && status.Authoritative.State.Status != "" {
+		stateLabel = status.Authoritative.State.Status
+	}
+	if status.RecoveryPhase != "" {
+		stateLabel = "recovery-required:" + status.RecoveryPhase
+	}
+	fmt.Fprintf(stdout, "world: %s\nstatus: %s\n", world, stateLabel)
+	printGeneration := func(label string, observation *app.GenerationObservation) {
+		if observation == nil {
+			fmt.Fprintf(stdout, "%s: none\n", label)
+			return
+		}
+		running, network := false, ""
+		if observation.Evidence != nil {
+			running, network = observation.Evidence.Running, observation.Evidence.NetworkMode
+		}
+		fmt.Fprintf(stdout, "%s generation: g%d\n%s container: %s\n%s plan digest: %s\n%s declaration digest: %s\n%s runtime exists: %t\n%s runtime running: %t\n%s network mode: %s\n", label, observation.State.Generation, label, observation.State.Container, label, observation.State.PlanDigest, label, observation.State.DeclarationDigest, label, observation.Exists, label, running, label, network)
+	}
+	printGeneration("authoritative", status.Authoritative)
+	if status.Candidate != nil {
+		printGeneration("candidate", status.Candidate)
+	}
 	return 0
 }
 func runWorlds(args []string, stdout, stderr io.Writer) int {

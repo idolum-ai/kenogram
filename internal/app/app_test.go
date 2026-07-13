@@ -21,6 +21,7 @@ type runtimeRunner struct {
 	calls       []string
 	network     string
 	mountSource string
+	containers  string
 }
 
 type destroyFailRunner struct{ runtimeRunner }
@@ -72,12 +73,18 @@ func (r *runtimeRunner) Run(_ context.Context, _ string, args ...string) ([]byte
 		return []byte(fmt.Sprintf(`[{"Name":"kenogram-w-g1","BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":"1","io.kenogram.plan-digest":"pd","io.kenogram.declaration-digest":"dd"}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), network, r.mountSource)), nil
 	}
 	if len(args) > 0 && args[0] == "ps" {
+		if r.containers != "" {
+			return []byte(r.containers), nil
+		}
 		return []byte("kenogram-w-g1\n"), nil
 	}
 	return []byte("ok"), nil
 }
-func (r *runtimeRunner) Start(context.Context, string, ...string) error       { return nil }
-func (r *runtimeRunner) Interactive(context.Context, string, ...string) error { return nil }
+func (r *runtimeRunner) Start(context.Context, string, ...string) error { return nil }
+func (r *runtimeRunner) Interactive(_ context.Context, _ string, args ...string) error {
+	r.calls = append(r.calls, "interactive "+strings.Join(args, " "))
+	return nil
+}
 
 func testBackend(r backend.Runner) *backend.Podman {
 	podman := backend.New(r)
@@ -161,6 +168,72 @@ func TestUpRecoversRollbackTransitionBeforeCreating(t *testing.T) {
 	}
 	if rm < 0 || create < 0 || rm >= create {
 		t.Fatalf("interrupted successor was not removed before create: %v", runner.calls)
+	}
+}
+
+func TestStatusAndRepairEntryFollowTransitionAuthority(t *testing.T) {
+	for _, test := range []struct {
+		phase               string
+		authoritative       int64
+		candidate           int64
+		authoritativeTarget string
+	}{
+		{phase: "rollback", authoritative: 1, candidate: 2, authoritativeTarget: "kenogram-w-g1"},
+		{phase: "commit", authoritative: 2, candidate: 1, authoritativeTarget: "kenogram-w-g2"},
+	} {
+		t.Run(test.phase, func(t *testing.T) {
+			base := t.TempDir()
+			layout := worldfs.For(base, "w")
+			if err := layout.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			prior := worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", Status: "running"}
+			successor := worldfs.State{Name: "w", Generation: 2, Container: "kenogram-w-g2", Status: "staging"}
+			if err := layout.WriteState(prior); err != nil {
+				t.Fatal(err)
+			}
+			if err := layout.WriteTransition(worldfs.Transition{Version: 1, Phase: test.phase, Prior: &prior, Successor: successor}); err != nil {
+				t.Fatal(err)
+			}
+			runner := &runtimeRunner{containers: "kenogram-w-g1\nkenogram-w-g2\n"}
+			a := &App{Backend: testBackend(runner), BaseDir: base}
+			status, err := a.Status(context.Background(), "w")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.RecoveryPhase != test.phase || status.Authoritative == nil || status.Authoritative.State.Generation != test.authoritative || status.Candidate == nil || status.Candidate.State.Generation != test.candidate {
+				t.Fatalf("status = %#v", status)
+			}
+			if err := a.Enter(context.Background(), "w", true); err != nil {
+				t.Fatal(err)
+			}
+			if !containsCall(runner.calls, "interactive ", test.authoritativeTarget+" /bin/sh") {
+				t.Fatalf("repair entry did not use authority %s: %v", test.authoritativeTarget, runner.calls)
+			}
+		})
+	}
+}
+
+func TestRollbackWithoutPredecessorReportsCandidateButCannotEnter(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteTransition(worldfs.Transition{Version: 1, Phase: "rollback", Successor: worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1"}}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeRunner{}
+	a := &App{Backend: testBackend(runner), BaseDir: base}
+	status, err := a.Status(context.Background(), "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Authoritative != nil || status.Candidate == nil || status.Candidate.State.Generation != 1 {
+		t.Fatalf("status = %#v", status)
+	}
+	if err := a.Enter(context.Background(), "w", true); err == nil || !strings.Contains(err.Error(), "no authoritative generation") {
+		t.Fatalf("enter error = %v", err)
 	}
 }
 
