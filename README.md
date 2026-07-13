@@ -68,3 +68,9 @@ uses a protected canary bot to prove the real Telegram path and never runs on a
 pull request. Exact commands and secret requirements are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md#composition-proofs). Security reports belong
 in GitHub's private vulnerability-reporting flow.
+
+Once a release exists, a repository checkout can install it with
+`./scripts/install-release.sh vX.Y.Z`. The installer verifies the release
+checksum and embedded identity but does not install Kenogram's host
+prerequisites. The reviewed candidate and immutable publication contract is documented in
+[`docs/release-strategy.md`](docs/release-strategy.md).
