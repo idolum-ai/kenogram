@@ -8,7 +8,7 @@ LDFLAGS := -X github.com/idolum-ai/kenogram/internal/version.Version=$(VERSION) 
 GOCACHE ?= /tmp/kenogram-go-build
 GOMODCACHE ?= /tmp/kenogram-go-mod
 
-.PHONY: build install uninstall test test-evidence test-race integration e2e e2e-release e2e-openclaw e2e-composition e2e-telegram-canary vet check architecture stdlib-only docs-freshness secrets smoke fmt
+.PHONY: build install uninstall test test-evidence test-race integration e2e e2e-release e2e-openclaw e2e-composition e2e-hermes e2e-hermes-composition e2e-telegram-canary vet check architecture stdlib-only docs-freshness secrets smoke fmt
 
 build:
 	mkdir -p bin
@@ -58,7 +58,7 @@ smoke: build
 integration:
 	KENOGRAM_INTEGRATION=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/integration -count=1 -timeout=5m -v
 
-e2e: e2e-release e2e-openclaw e2e-composition
+e2e: e2e-release e2e-openclaw e2e-composition e2e-hermes e2e-hermes-composition
 
 e2e-release:
 	KENOGRAM_E2E=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/e2e -run TestEngramReleaseInsideKenogram -count=1 -timeout=10m -v
@@ -68,6 +68,12 @@ e2e-openclaw:
 
 e2e-composition:
 	KENOGRAM_ENGRAM_OPENCLAW_E2E=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/e2e -run TestEngramControlsOpenClawInsideKenogram -count=1 -timeout=16m -v
+
+e2e-hermes:
+	KENOGRAM_HERMES_E2E=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/e2e -run TestHermesInsideKenogram -count=1 -timeout=20m -v
+
+e2e-hermes-composition:
+	KENOGRAM_ENGRAM_HERMES_E2E=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/e2e -run TestEngramControlsHermesInsideKenogram -count=1 -timeout=20m -v
 
 e2e-telegram-canary:
 	KENOGRAM_LIVE_TELEGRAM=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/e2e -run TestLiveTelegramOpenClawCanary -count=1 -timeout=19m -v

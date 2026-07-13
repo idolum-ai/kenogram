@@ -186,11 +186,21 @@ type observedProvider struct {
 }
 
 func newOpenAIProvider(t *testing.T, host string) *observedProvider {
+	proof := openClawProof + "\n[engram:upstream] " + openClawSignalID + " " + openClawTelegramProof
+	return newObservedProvider(t, host, proof)
+}
+
+func newObservedProvider(t *testing.T, host, proof string) *observedProvider {
 	t.Helper()
 	provider := &observedProvider{}
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/healthz" {
 			response.WriteHeader(http.StatusOK)
+			return
+		}
+		if request.URL.Path == "/v1/models" {
+			response.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(response, `{"object":"list","data":[{"id":"proof","object":"model","owned_by":"kenogram"}]}`)
 			return
 		}
 		if request.URL.Path != "/v1/chat/completions" {
@@ -213,7 +223,6 @@ func newOpenAIProvider(t *testing.T, host string) *observedProvider {
 		provider.requests++
 		provider.bodies = append(provider.bodies, string(raw))
 		provider.mu.Unlock()
-		proof := openClawProof + "\n[engram:upstream] " + openClawSignalID + " " + openClawTelegramProof
 		if body.Stream {
 			response.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprintf(response, "data: {\"id\":\"proof\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":%q},\"finish_reason\":null}]}\n\n", proof)

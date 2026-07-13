@@ -300,15 +300,23 @@ func telegramAPIBase(rawURL, host string) string {
 
 func (f *telegramFixture) waitForMethod(t *testing.T, timeout time.Duration, method string) {
 	t.Helper()
+	f.waitForMethodAfter(t, timeout, method, 0)
+}
+
+func (f *telegramFixture) methodCount(method string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.methodRequests[method]
+}
+
+func (f *telegramFixture) waitForMethodAfter(t *testing.T, timeout time.Duration, method string, previous int) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		f.mu.Lock()
-		count := f.methodRequests[method]
-		f.mu.Unlock()
-		if count > 0 {
+		if f.methodCount(method) > previous {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("Engram did not call Telegram method %s", method)
+	t.Fatalf("Telegram method %s did not advance beyond %d calls", method, previous)
 }

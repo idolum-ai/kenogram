@@ -40,10 +40,10 @@ prerequisites are absent.
 
 `make e2e` runs the release-pinned composition proofs. Kenogram isolates
 OpenClaw `2026.6.11` with deterministic fake Telegram and model services,
-accepts the Engram `v0.3.0` release, and separately proves native Telegram →
-OpenClaw and fake-Telegram → Engram → tmux → OpenClaw paths. Pull requests
-require the OpenClaw isolation proof; the full composition runs on `main` and
-nightly.
+Hermes Agent `v2026.7.7.2` with the same hermetic boundaries, and accepts the
+Engram `v0.3.0` release. Separate proofs cover each agent's native Telegram
+path and fake-Telegram → Engram → tmux → agent path. Pull requests require
+both isolation proofs; full Engram compositions run on `main` and nightly.
 
 The operator-assisted `make e2e-telegram-canary` is deliberately separate. It
 uses a protected canary bot to prove the real Telegram path and never runs on a

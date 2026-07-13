@@ -10,7 +10,7 @@ Kenogram accepts small changes that strengthen an observable contract.
 4. Run `make integration` for namespace, proxy, Podman, mount, or runtime
    evidence changes.
 5. Run the relevant composition proof below for lifecycle, generated
-   configuration, Engram, OpenClaw, or destruction changes.
+   configuration, Engram, OpenClaw, Hermes Agent, or destruction changes.
 6. Include failure-path evidence for lifecycle mutations. At most one
    generation may own a writable workspace after any injected failure.
 
@@ -29,6 +29,8 @@ verification.
 | `make e2e-release` | Engram v0.3.0 materialization, replacement, restart, and destruction |
 | `make e2e-openclaw` | OpenClaw 2026.6.11 isolation, native fake-Telegram and TUI round-trips, replacement, and absence claims |
 | `make e2e-composition` | Fake Telegram methods and files through Engram v0.3.0 into the isolated OpenClaw TUI |
+| `make e2e-hermes` | Hermes Agent v2026.7.7.2 integrity, isolation, native fake-Telegram and TUI round-trips, lifecycle, and absence claims |
+| `make e2e-hermes-composition` | Fake Telegram methods and files through Engram v0.3.0 into the isolated Hermes TUI |
 | `make e2e` | All deterministic proofs above |
 
 The real Telegram canary is manual and must use a dedicated bot and account:

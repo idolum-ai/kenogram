@@ -117,7 +117,10 @@ func (p *Podman) Create(ctx context.Context, result plan.Result, generation int6
 		}
 		args = append(args, "--mount", "type=bind,src="+m.Source+",dst="+m.Target+","+options)
 	}
-	args = append(args, result.Plan.World.Base, "/usr/bin/tail", "-f", "/dev/null")
+	// A declaration owns the world's process model. Explicitly replace any
+	// image entrypoint so a base image cannot run bootstrap code before the
+	// inert holder or reinterpret tail's arguments as its own command.
+	args = append(args, "--entrypoint", "/usr/bin/tail", result.Plan.World.Base, "-f", "/dev/null")
 	if _, err := p.Runner.Run(ctx, p.Binary, args...); err != nil {
 		return "", err
 	}

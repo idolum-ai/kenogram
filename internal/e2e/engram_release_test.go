@@ -236,12 +236,17 @@ func download(t *testing.T, ctx context.Context, url, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.Copy(file, io.LimitReader(response.Body, 32<<20)); err != nil {
+	const maxFixtureBytes = int64(128 << 20)
+	written, err := io.Copy(file, &io.LimitedReader{R: response.Body, N: maxFixtureBytes + 1})
+	if err != nil {
 		file.Close()
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if written > maxFixtureBytes {
+		t.Fatalf("fixture exceeds %d-byte download limit", maxFixtureBytes)
 	}
 }
 
@@ -602,11 +607,16 @@ func copyRegularFile(t *testing.T, source, target string, mode os.FileMode) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.Copy(output, io.LimitReader(input, 32<<20)); err != nil {
+	const maxFixtureBytes = int64(128 << 20)
+	written, err := io.Copy(output, &io.LimitedReader{R: input, N: maxFixtureBytes + 1})
+	if err != nil {
 		output.Close()
 		t.Fatal(err)
 	}
 	if err := output.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if written > maxFixtureBytes {
+		t.Fatalf("fixture exceeds %d-byte copy limit", maxFixtureBytes)
 	}
 }

@@ -1,0 +1,9 @@
+{
+  "release": "v2026.7.7.2",
+  "version": "0.18.2",
+  "commit": "9de9c25f620ff7f1ce0fd5457d596052d5159596",
+  "source_asset": "hermes-agent-v2026.7.7.2.tar.gz",
+  "source_sha256": "f5d1022eed3763a768cf7b0f0844831f0170a35f54eb8d18223f2e93f503025e",
+  "source_url": "https://github.com/NousResearch/hermes-agent/archive/refs/tags/v2026.7.7.2.tar.gz",
+  "image": "docker.io/nousresearch/hermes-agent@sha256:9c841866021c54c4596849f6135717e8a4d52ba510b7f52c50aef1de1a283973"
+}
