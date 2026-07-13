@@ -18,6 +18,10 @@ Do not add third-party Go dependencies, generic runtime abstractions, or new
 integration fixtures unless they prove a boundary not already covered. Report
 security issues privately as described in [`.github/SECURITY.md`](.github/SECURITY.md).
 
+`make check` cross-compiles the explicit Apple container-machine launcher. That
+is a compile-time and argv proof, not a substitute for the machine-only proof
+matrix in [`docs/apple-container-machine.md`](docs/apple-container-machine.md).
+
 ## Composition proofs
 
 All release inputs are URL- and checksum-locked under `internal/e2e/testdata`.

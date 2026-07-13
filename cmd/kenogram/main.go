@@ -9,10 +9,12 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
 	"github.com/idolum-ai/kenogram/internal/app"
+	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/netns"
 	"github.com/idolum-ai/kenogram/internal/plan"
 	"github.com/idolum-ai/kenogram/internal/proxy"
@@ -28,6 +30,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
+		fmt.Fprintln(stdout, version.String())
+		return 0
+	}
+	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		printHelp(stdout)
+		return 0
+	}
+	launcher, err := backend.AppleMachineFromEnvironment(runtime.GOOS, os.Getenv, nil)
+	if err != nil {
+		fmt.Fprintln(stderr, "runtime:", err)
+		return 1
+	}
+	if launcher != nil {
+		if err := launcher.Launch(ctx, args); err != nil {
+			fmt.Fprintln(stderr, "runtime:", err)
+			return 1
+		}
+		return 0
+	}
 	switch args[0] {
 	case "_netns-listener":
 		return runNetnsListener(args[1:], stderr)
@@ -51,12 +73,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runRepairHistory(args[1:], stdout, stderr)
 	case "worlds":
 		return runWorlds(args[1:], stdout, stderr)
-	case "version", "--version", "-v":
-		fmt.Fprintln(stdout, version.String())
-		return 0
-	case "help", "--help", "-h":
-		printHelp(stdout)
-		return 0
 	default:
 		fmt.Fprintln(stderr, "unknown command:", args[0])
 		printHelp(stderr)

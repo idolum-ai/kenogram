@@ -8,7 +8,7 @@ LDFLAGS := -X github.com/idolum-ai/kenogram/internal/version.Version=$(VERSION) 
 GOCACHE ?= /tmp/kenogram-go-build
 GOMODCACHE ?= /tmp/kenogram-go-mod
 
-.PHONY: build install uninstall test test-evidence test-race integration e2e e2e-release e2e-openclaw e2e-composition e2e-hermes e2e-hermes-composition e2e-telegram-canary vet check architecture stdlib-only docs-freshness secrets smoke fmt
+.PHONY: build install uninstall test test-evidence test-race integration e2e e2e-release e2e-openclaw e2e-composition e2e-hermes e2e-hermes-composition e2e-telegram-canary vet check architecture stdlib-only docs-freshness secrets smoke fmt cross-apple-machine
 
 build:
 	mkdir -p bin
@@ -38,7 +38,10 @@ vet:
 fmt:
 	test -z "$$(gofmt -l cmd internal)"
 
-check: fmt test vet build architecture stdlib-only docs-freshness secrets smoke
+check: fmt test vet build cross-apple-machine architecture stdlib-only docs-freshness secrets smoke
+
+cross-apple-machine:
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) GOOS=darwin GOARCH=arm64 go build -buildvcs=false ./...
 
 architecture:
 	bash scripts/check-architecture.sh
