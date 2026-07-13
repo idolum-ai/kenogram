@@ -33,6 +33,10 @@ func Digest(root string) (DigestTree, error) {
 
 const digestAttempts = 8
 
+// ErrWorkspaceChanging identifies a digest that could not observe one stable
+// point-in-time view of a live workspace.
+var ErrWorkspaceChanging = errors.New("workspace is changing")
+
 type treeChangedError struct {
 	path  string
 	cause error
@@ -46,6 +50,12 @@ func (e *treeChangedError) Error() string {
 }
 
 func (e *treeChangedError) Unwrap() error { return e.cause }
+
+func (e *treeChangedError) Is(target error) bool { return target == ErrWorkspaceChanging }
+
+// IsChanging reports whether a digest failed only because the tree mutated
+// while it was being read.
+func IsChanging(err error) bool { return errors.Is(err, ErrWorkspaceChanging) }
 
 func digestRetry(root string, digest func(string) (DigestTree, error)) (DigestTree, error) {
 	var last error

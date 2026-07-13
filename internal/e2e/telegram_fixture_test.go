@@ -125,7 +125,7 @@ func (f *telegramFixture) waitOutbound(t *testing.T, timeout time.Duration, frag
 	for time.Now().Before(deadline) {
 		f.mu.Lock()
 		for _, message := range f.outbound {
-			if strings.Contains(message.Text, fragment) {
+			if strings.Contains(message.Text, fragment) || strings.Contains(telegramMarkdownText(message.Text), fragment) {
 				f.mu.Unlock()
 				return message
 			}
@@ -137,6 +137,33 @@ func (f *telegramFixture) waitOutbound(t *testing.T, timeout time.Duration, frag
 	defer f.mu.Unlock()
 	t.Fatalf("Telegram output did not contain %q; observed: %#v", fragment, f.outbound)
 	return telegramOutbound{}
+}
+
+func telegramMarkdownText(text string) string {
+	var plain strings.Builder
+	plain.Grow(len(text))
+	for index := 0; index < len(text); index++ {
+		if text[index] == '\\' && index+1 < len(text) && strings.ContainsRune(`_*[]()~`+"`"+`>#+-=|{}.!\\`, rune(text[index+1])) {
+			index++
+		}
+		plain.WriteByte(text[index])
+	}
+	return plain.String()
+}
+
+func TestTelegramMarkdownText(t *testing.T) {
+	for _, test := range []struct {
+		wire string
+		want string
+	}{
+		{wire: `KENOGRAM\_HERMES\_PROOF`, want: "KENOGRAM_HERMES_PROOF"},
+		{wire: `literal\\path`, want: `literal\path`},
+		{wire: `ordinary\q`, want: `ordinary\q`},
+	} {
+		if got := telegramMarkdownText(test.wire); got != test.want {
+			t.Fatalf("telegramMarkdownText(%q) = %q, want %q", test.wire, got, test.want)
+		}
+	}
 }
 
 func (f *telegramFixture) waitForFileRequest(t *testing.T, timeout time.Duration) {

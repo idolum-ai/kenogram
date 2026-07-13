@@ -82,6 +82,15 @@ func TestDigestRetriesAChangingWorkspace(t *testing.T) {
 	}
 }
 
+func TestDigestClassifiesChangingWorkspace(t *testing.T) {
+	_, err := digestRetry("workspace", func(string) (DigestTree, error) {
+		return DigestTree{}, &treeChangedError{path: "workspace/live.db-wal"}
+	})
+	if !IsChanging(err) || !errors.Is(err, ErrWorkspaceChanging) {
+		t.Fatalf("changing workspace error was not classified: %v", err)
+	}
+}
+
 func TestDigestDoesNotRetryPermanentErrors(t *testing.T) {
 	attempts := 0
 	_, err := digestRetry("workspace", func(string) (DigestTree, error) {

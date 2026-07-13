@@ -332,7 +332,7 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 	if err := l.WriteState(state); err != nil {
 		return false, err
 	}
-	tree, err := worldfs.Digest(l.Workspace)
+	workspaceDigest, workspaceDetail, err := adoptionWorkspaceEvidence(l.Workspace, worldfs.Digest)
 	if err != nil {
 		return false, err
 	}
@@ -340,12 +340,23 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 	if restarted {
 		outcome = "restarted"
 	}
-	if _, err := history.Append(l.History, history.Record{Action: "up", PlanDigest: state.PlanDigest, DeclarationDigest: state.DeclarationDigest, WorkspaceDigest: tree.Root, Outcome: outcome}, a.Now()); err != nil {
+	if _, err := history.Append(l.History, history.Record{Action: "up", PlanDigest: state.PlanDigest, DeclarationDigest: state.DeclarationDigest, WorkspaceDigest: workspaceDigest, Outcome: outcome, Detail: workspaceDetail}, a.Now()); err != nil {
 		return false, err
 	}
 	fmt.Fprintf(a.Out, "%s %s generation g%d (%s)\n", state.Name, outcome, state.Generation, state.PlanDigest)
 	committed = true
 	return true, nil
+}
+
+func adoptionWorkspaceEvidence(path string, digest func(string) (worldfs.DigestTree, error)) (string, string, error) {
+	tree, err := digest(path)
+	if err == nil {
+		return tree.Root, "", nil
+	}
+	if worldfs.IsChanging(err) {
+		return "", "stable workspace digest unavailable: live workspace was changing during adoption", nil
+	}
+	return "", "", err
 }
 func (a *App) proxyAlive(l worldfs.Layout) bool {
 	raw, err := os.ReadFile(l.ProxyPID)

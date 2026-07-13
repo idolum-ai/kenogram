@@ -242,6 +242,15 @@ func TestUpAdoptsVerifiedMatchingGeneration(t *testing.T) {
 	}
 }
 
+func TestAdoptionRecordsUnavailableDigestForChangingWorkspace(t *testing.T) {
+	digest, detail, err := adoptionWorkspaceEvidence("workspace", func(string) (worldfs.DigestTree, error) {
+		return worldfs.DigestTree{}, fmt.Errorf("digest retries exhausted: %w", worldfs.ErrWorkspaceChanging)
+	})
+	if err != nil || digest != "" || !strings.Contains(detail, "live workspace was changing") {
+		t.Fatalf("digest=%q detail=%q err=%v", digest, detail, err)
+	}
+}
+
 func TestUpRejectsCopyDriftBeforeCutover(t *testing.T) {
 	base := t.TempDir()
 	source := filepath.Join(t.TempDir(), "config")
