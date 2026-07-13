@@ -86,7 +86,12 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 		out, err := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:hermes")
 		return err == nil && strings.Contains(out, hermesProof), out
 	})
-	telegram.waitOutbound(t, 45*time.Second, hermesEngramProof)
+	// Hermes paints model output inside an alternate-screen TUI. Exercise
+	// Engram's documented raw-pane route instead of treating decorated model
+	// text as Engram's column-zero terminal signal protocol.
+	telegram.enqueueText("/raw 1")
+	telegram.waitOutbound(t, 30*time.Second, "preparing [1] raw")
+	telegram.waitOutboundAttachment(t, 30*time.Second, "sendDocument", hermesEngramProof)
 
 	telegram.enqueueDocument()
 	telegram.waitForFileRequest(t, 30*time.Second)

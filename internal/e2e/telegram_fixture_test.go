@@ -3,9 +3,11 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -24,9 +26,11 @@ const (
 )
 
 type telegramOutbound struct {
-	Method    string
-	Text      string
-	MessageID int
+	Method     string
+	Text       string
+	MessageID  int
+	Filename   string
+	Attachment []byte
 }
 
 type telegramFixture struct {
@@ -136,6 +140,30 @@ func (f *telegramFixture) waitOutbound(t *testing.T, timeout time.Duration, frag
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	t.Fatalf("Telegram output did not contain %q; observed: %#v", fragment, f.outbound)
+	return telegramOutbound{}
+}
+
+func (f *telegramFixture) waitOutboundAttachment(t *testing.T, timeout time.Duration, method, fragment string) telegramOutbound {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		f.mu.Lock()
+		for _, message := range f.outbound {
+			if message.Method == method && strings.Contains(string(message.Attachment), fragment) {
+				f.mu.Unlock()
+				return message
+			}
+		}
+		f.mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	observed := make([]string, 0, len(f.outbound))
+	for _, message := range f.outbound {
+		observed = append(observed, fmt.Sprintf("%s filename=%q bytes=%d", message.Method, message.Filename, len(message.Attachment)))
+	}
+	t.Fatalf("Telegram %s attachment did not contain %q; observed: %v", method, fragment, observed)
 	return telegramOutbound{}
 }
 
@@ -256,6 +284,10 @@ func (f *telegramFixture) updatesAtOrAfter(offset int) []map[string]any {
 
 func (f *telegramFixture) serveOutbound(response http.ResponseWriter, request *http.Request, method string) {
 	text, chatID, messageID := telegramRequestFields(request)
+	if request.MultipartForm != nil {
+		defer request.MultipartForm.RemoveAll()
+	}
+	filename, attachment := telegramRequestAttachment(request)
 	f.mu.Lock()
 	if chatID == 0 {
 		chatID = telegramFixtureUser
@@ -264,7 +296,7 @@ func (f *telegramFixture) serveOutbound(response http.ResponseWriter, request *h
 		messageID = f.nextMessageID
 		f.nextMessageID++
 	}
-	f.outbound = append(f.outbound, telegramOutbound{Method: method, Text: text, MessageID: messageID})
+	f.outbound = append(f.outbound, telegramOutbound{Method: method, Text: text, MessageID: messageID, Filename: filename, Attachment: attachment})
 	f.mu.Unlock()
 	writeTelegramResult(response, map[string]any{
 		"message_id": messageID,
@@ -273,6 +305,52 @@ func (f *telegramFixture) serveOutbound(response http.ResponseWriter, request *h
 		"chat":       map[string]any{"id": chatID, "type": "private"},
 		"text":       text,
 	})
+}
+
+func telegramRequestAttachment(request *http.Request) (string, []byte) {
+	if request.MultipartForm == nil {
+		return "", nil
+	}
+	for _, files := range request.MultipartForm.File {
+		for _, header := range files {
+			file, err := header.Open()
+			if err != nil {
+				continue
+			}
+			data, readErr := io.ReadAll(io.LimitReader(file, 2<<20))
+			_ = file.Close()
+			if readErr == nil {
+				return header.Filename, data
+			}
+		}
+	}
+	return "", nil
+}
+
+func TestTelegramRequestAttachment(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("chat_id", strconv.FormatInt(telegramFixtureUser, 10)); err != nil {
+		t.Fatal(err)
+	}
+	part, err := writer.CreateFormFile("document", "proof.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(part, telegramFixtureFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/sendDocument", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	_, chatID, _ := telegramRequestFields(request)
+	defer request.MultipartForm.RemoveAll()
+	filename, attachment := telegramRequestAttachment(request)
+	if chatID != telegramFixtureUser || filename != "proof.txt" || string(attachment) != telegramFixtureFile {
+		t.Fatalf("multipart request = chat %d, filename %q, attachment %q", chatID, filename, attachment)
+	}
 }
 
 func telegramRequestFields(request *http.Request) (string, int64, int) {
