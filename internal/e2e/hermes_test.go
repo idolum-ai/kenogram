@@ -103,9 +103,21 @@ func TestHermesInsideKenogram(t *testing.T) {
 	waitForHermesTelegramAfter(t, telegram, 45*time.Second, getMeCount, getUpdatesCount)
 	assertHermesVersion(t, ctx, tmp, testEnv, first, lock.Version)
 	assertHermesIsolation(t, ctx, tmp, testEnv, first, doorHost, providerPort)
+	runHermesQuery(t, ctx, tmp, testEnv, first, provider, "HERMES_DIRECT_QUERY_PROOF_921f64ad")
 	telegram.enqueueTextFrom(telegramFixtureUser+1, hermesDeniedTelegramPrompt)
 	telegram.enqueueText("Reply with the proof marker and preserve this request marker: " + hermesNativeTelegramPrompt)
-	provider.waitObservedContaining(t, 45*time.Second, hermesNativeTelegramPrompt)
+	if !provider.observedContainingWithin(45*time.Second, hermesNativeTelegramPrompt) {
+		logs, _ := runResult(ctx, tmp, testEnv, "podman", "logs", first)
+		gatewayLogs, _ := runResult(ctx, tmp, testEnv, "podman", "exec", first, "/bin/sh", "-c", "find /workspace/.hermes/logs -type f -maxdepth 2 -exec tail -n 80 {} \\;")
+		telegram.mu.Lock()
+		methods := make(map[string]int, len(telegram.methodRequests))
+		for method, count := range telegram.methodRequests {
+			methods[method] = count
+		}
+		outbound := append([]telegramOutbound(nil), telegram.outbound...)
+		telegram.mu.Unlock()
+		t.Fatalf("Hermes did not route the authorized Telegram prompt to its provider\ncontainer logs:\n%s\ngateway logs:\n%s\nTelegram methods: %#v\nTelegram outbound: %#v", logs, gatewayLogs, methods, outbound)
+	}
 	provider.assertNotObservedContaining(t, hermesDeniedTelegramPrompt)
 	telegram.waitOutbound(t, 45*time.Second, hermesProof)
 	runHermesTUI(t, ctx, tmp, testEnv, first, provider, "hermes-proof-one", "HERMES_TUI_PROOF_ONE")
@@ -322,6 +334,16 @@ func assertHermesIsolation(t *testing.T, ctx context.Context, dir string, env []
 	}
 	if out, err := runResult(ctx, dir, env, "podman", "exec", container, "test", "!", "-e", "/run/podman/podman.sock"); err != nil {
 		t.Fatalf("runtime socket visible: %s", out)
+	}
+}
+
+func runHermesQuery(t *testing.T, ctx context.Context, dir string, env []string, container string, provider *observedProvider, marker string) {
+	t.Helper()
+	args := append([]string{"exec", container}, hermesEnvCommand("/opt/hermes/.venv/bin/hermes", "chat", "--query", "Reply with the proof marker and preserve this request marker: "+marker, "--quiet", "--ignore-rules", "--provider", "custom", "--model", "proof")...)
+	out := run(t, ctx, dir, env, "podman", args...)
+	provider.waitObservedContaining(t, 45*time.Second, marker)
+	if !strings.Contains(out, hermesProof) {
+		t.Fatalf("Hermes direct query output did not contain proof marker:\n%s", out)
 	}
 }
 

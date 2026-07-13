@@ -77,7 +77,7 @@ func (f *telegramFixture) enqueueTextFrom(userID int64, text string) int {
 		"message": map[string]any{
 			"message_id": messageID,
 			"date":       1_700_000_000,
-			"from":       map[string]any{"id": userID, "username": "kenogram_fixture"},
+			"from":       map[string]any{"id": userID, "is_bot": false, "first_name": "Kenogram", "username": "kenogram_fixture", "language_code": "en"},
 			"chat":       map[string]any{"id": userID, "type": "private", "first_name": "Kenogram"},
 			"text":       text,
 		},
@@ -96,7 +96,7 @@ func (f *telegramFixture) enqueueDocument() int {
 		"message": map[string]any{
 			"message_id": messageID,
 			"date":       1_700_000_000,
-			"from":       map[string]any{"id": telegramFixtureUser, "username": "kenogram_fixture"},
+			"from":       map[string]any{"id": telegramFixtureUser, "is_bot": false, "first_name": "Kenogram", "username": "kenogram_fixture", "language_code": "en"},
 			"chat":       map[string]any{"id": telegramFixtureUser, "type": "private", "first_name": "Kenogram"},
 			"document": map[string]any{
 				"file_id":        "fixture-file-id",
@@ -189,6 +189,8 @@ func (f *telegramFixture) serveHTTP(response http.ResponseWriter, request *http.
 			"file_size": len(telegramFixtureFile),
 			"file_path": "documents/proof.txt",
 		})
+	case "getWebhookInfo":
+		writeTelegramResult(response, map[string]any{"url": "", "has_custom_certificate": false, "pending_update_count": 0})
 	case "deleteWebhook", "deleteMyCommands", "setMyCommands", "pinChatMessage", "unpinChatMessage", "deleteMessage", "answerCallbackQuery":
 		writeTelegramResult(response, true)
 	default:
@@ -239,6 +241,8 @@ func (f *telegramFixture) serveOutbound(response http.ResponseWriter, request *h
 	f.mu.Unlock()
 	writeTelegramResult(response, map[string]any{
 		"message_id": messageID,
+		"date":       1_700_000_000,
+		"from":       map[string]any{"id": 7_770_001, "is_bot": true, "first_name": "Kenogram Fixture", "username": "kenogram_fixture_bot"},
 		"chat":       map[string]any{"id": chatID, "type": "private"},
 		"text":       text,
 	})

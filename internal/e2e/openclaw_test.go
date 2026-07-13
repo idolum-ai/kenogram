@@ -250,14 +250,14 @@ func (p *observedProvider) assertObserved(t *testing.T) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.requests == 0 {
-		t.Fatal("OpenClaw never reached the declared provider")
+		t.Fatal("agent never reached the declared provider")
 	}
 }
 
 func (p *observedProvider) waitObserved(t *testing.T, timeout time.Duration) {
 	t.Helper()
 	if !p.observedWithin(timeout) {
-		t.Fatal("OpenClaw never reached the declared provider")
+		t.Fatal("agent never reached the declared provider")
 	}
 }
 
@@ -289,7 +289,7 @@ func (p *observedProvider) waitObservedContaining(t *testing.T, timeout time.Dur
 		p.mu.Unlock()
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("OpenClaw provider request did not contain canary marker %q", fragment)
+	t.Fatalf("provider request did not contain canary marker %q", fragment)
 }
 
 func (p *observedProvider) assertNotObservedContaining(t *testing.T, fragment string) {
@@ -298,7 +298,7 @@ func (p *observedProvider) assertNotObservedContaining(t *testing.T, fragment st
 	defer p.mu.Unlock()
 	for _, body := range p.bodies {
 		if strings.Contains(body, fragment) {
-			t.Fatalf("OpenClaw provider unexpectedly received denied marker %q", fragment)
+			t.Fatalf("provider unexpectedly received denied marker %q", fragment)
 		}
 	}
 }
