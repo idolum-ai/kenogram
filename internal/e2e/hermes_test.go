@@ -63,7 +63,8 @@ func TestHermesInsideKenogram(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Minute)
 	defer cancel()
-	resources := prepareContainerE2E(t, ctx)
+	tmp := t.TempDir()
+	resources := prepareContainerE2E(t, ctx, vfsMinimumFreeHermesGiB)
 	doorHost := hostDoorIPv4(t)
 	provider := newObservedProvider(t, doorHost, hermesProof)
 	defer provider.Close()
@@ -72,16 +73,15 @@ func TestHermesInsideKenogram(t *testing.T) {
 	providerPort := mustPort(t, provider.URL)
 	telegramPort := mustPort(t, telegram.URL)
 	root := repositoryRoot(t)
-	tmp := t.TempDir()
 	lock := readHermesLock(t)
 	t.Logf("evidence hermes_release=%s version=%s commit=%s source_sha256=%s image=%s", lock.Release, lock.Version, lock.Commit, lock.SourceSHA256, lock.Image)
 	verifyHermesArtifact(t, ctx, tmp, lock)
 	image := lock.Image
 	resources.trackImage(t, ctx, image)
 
-	world := "hermes-e2e-" + strconv.Itoa(os.Getpid())
+	world := e2eWorldName(t, "hermes-e2e")
 	for generation := 1; generation <= 3; generation++ {
-		resources.trackContainer(containerName(world, generation))
+		resources.trackContainer(t, ctx, world, generation)
 	}
 	stateRoot := filepath.Join(tmp, "state")
 	configSource := filepath.Join(tmp, "hermes-config.yaml")
@@ -96,6 +96,7 @@ func TestHermesInsideKenogram(t *testing.T) {
 	writeHermesDeclaration(t, declaration, world, image, configSource, revisionSource, doorHost, providerPort, doorHost, telegramPort)
 	getMeCount, getUpdatesCount := telegram.methodCount("getMe"), telegram.methodCount("getUpdates")
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
+	resources.claimImage(t, ctx, image)
 	first := containerName(world, 1)
 	waitForHermesTelegramAfter(t, telegram, 45*time.Second, getMeCount, getUpdatesCount)
 	assertHermesVersion(t, ctx, tmp, testEnv, first, lock.Version)

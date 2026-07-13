@@ -3,7 +3,9 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,12 +20,15 @@ import (
 )
 
 const (
-	defaultVFSMinimumFreeGiB = uint64(96)
-	vfsMinimumFreeEnv        = "KENOGRAM_E2E_VFS_MIN_FREE_GIB"
+	vfsMinimumFreeEngramGiB   = uint64(24)
+	vfsMinimumFreeOpenClawGiB = uint64(64)
+	vfsMinimumFreeHermesGiB   = uint64(96)
+	vfsMinimumFreeEnv         = "KENOGRAM_E2E_VFS_MIN_FREE_GIB"
 )
 
 type podmanCommandResult struct {
 	output   string
+	stderr   string
 	exitCode int
 	err      error
 }
@@ -39,15 +44,22 @@ type containerStorageInfo struct {
 type imageLease struct {
 	reference     string
 	existedBefore bool
+	claimedID     string
+}
+
+type containerLease struct {
+	name       string
+	world      string
+	generation int
 }
 
 type e2eContainerResources struct {
 	runner     podmanRunner
-	containers []string
+	containers []containerLease
 	images     []imageLease
 }
 
-func prepareContainerE2E(t *testing.T, ctx context.Context) *e2eContainerResources {
+func prepareContainerE2E(t *testing.T, ctx context.Context, laneMinimumGiB uint64) *e2eContainerResources {
 	t.Helper()
 	runner := execPodman
 	infoResult := runner(ctx, "info", "--format", "json")
@@ -58,11 +70,10 @@ func prepareContainerE2E(t *testing.T, ctx context.Context) *e2eContainerResourc
 	if err != nil {
 		t.Fatalf("parse Podman storage before E2E: %v", err)
 	}
-	minimumFree, err := vfsMinimumFreeBytes(os.Getenv)
-	if err != nil {
+	if err := validateContainerStorageInfo(info); err != nil {
 		t.Fatal(err)
 	}
-	available, err := assessContainerStorage(info, minimumFree, availableBytes)
+	available, minimumFree, err := assessContainerStorage(info, laneMinimumGiB, os.Getenv, availableBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +84,19 @@ func prepareContainerE2E(t *testing.T, ctx context.Context) *e2eContainerResourc
 	}
 
 	resources := &e2eContainerResources{runner: runner}
+	registerContainerCleanup(t, resources)
+	return resources
+}
+
+func validateContainerStorageInfo(info containerStorageInfo) error {
+	if !info.Rootless {
+		return errors.New("container E2Es require rootless Podman; storage evidence reported rootless=false")
+	}
+	return nil
+}
+
+func registerContainerCleanup(t *testing.T, resources *e2eContainerResources) {
+	t.Helper()
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
@@ -82,11 +106,28 @@ func prepareContainerE2E(t *testing.T, ctx context.Context) *e2eContainerResourc
 			t.Errorf("container E2E cleanup: %v", cleanupErr)
 		}
 	})
-	return resources
 }
 
-func (r *e2eContainerResources) trackContainer(names ...string) {
-	r.containers = append(r.containers, names...)
+func e2eWorldName(t *testing.T, prefix string) string {
+	t.Helper()
+	var nonce [12]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		t.Fatalf("generate E2E world nonce: %v", err)
+	}
+	return fmt.Sprintf("%s-%x", prefix, nonce)
+}
+
+func (r *e2eContainerResources) trackContainer(t *testing.T, ctx context.Context, world string, generation int) {
+	t.Helper()
+	name := containerName(world, generation)
+	exists, err := podmanObjectExists(ctx, r.runner, "container", name)
+	if err != nil {
+		t.Fatalf("record whether container %q predates E2E: %v", name, err)
+	}
+	if exists {
+		t.Fatalf("refuse to lease pre-existing container %q", name)
+	}
+	r.containers = append(r.containers, containerLease{name: name, world: world, generation: generation})
 }
 
 func (r *e2eContainerResources) trackImage(t *testing.T, ctx context.Context, reference string) {
@@ -98,12 +139,51 @@ func (r *e2eContainerResources) trackImage(t *testing.T, ctx context.Context, re
 	r.images = append(r.images, imageLease{reference: reference, existedBefore: exists})
 }
 
+func (r *e2eContainerResources) claimImage(t *testing.T, ctx context.Context, reference string) {
+	t.Helper()
+	for index := range r.images {
+		lease := &r.images[index]
+		if lease.reference != reference {
+			continue
+		}
+		if lease.existedBefore {
+			return
+		}
+		identity, err := podmanImageIdentity(ctx, r.runner, reference)
+		if err != nil {
+			t.Fatalf("claim acquired image %q: %v", reference, err)
+		}
+		lease.claimedID = identity
+		return
+	}
+	t.Fatalf("claim untracked image %q", reference)
+}
+
 func (r *e2eContainerResources) cleanup(ctx context.Context) error {
 	var cleanupErrors []error
-	for _, name := range r.containers {
-		result := r.runner(ctx, "rm", "--force", "--ignore", name)
+	for index := len(r.containers) - 1; index >= 0; index-- {
+		lease := r.containers[index]
+		exists, err := podmanObjectExists(ctx, r.runner, "container", lease.name)
+		if err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("inspect tracked container %q: %w", lease.name, err))
+			continue
+		}
+		if !exists {
+			continue
+		}
+		identity, labels, err := podmanContainerIdentity(ctx, r.runner, lease.name)
+		if err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("verify tracked container %q: %w", lease.name, err))
+			continue
+		}
+		wantGeneration := strconv.Itoa(lease.generation)
+		if labels["io.kenogram.world"] != lease.world || labels["io.kenogram.generation"] != wantGeneration {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("preserve container %q: ownership labels do not match world %q generation %s", lease.name, lease.world, wantGeneration))
+			continue
+		}
+		result := r.runner(ctx, "rm", "--force", "--ignore", identity)
 		if result.err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove container %q: %w", name, podmanCommandError(result)))
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove container %q (%s): %w", lease.name, identity, podmanCommandError(result)))
 		}
 	}
 	// Derived images are tracked after their bases, so reverse order releases
@@ -121,7 +201,20 @@ func (r *e2eContainerResources) cleanup(ctx context.Context) error {
 		if !exists {
 			continue
 		}
-		result := r.runner(ctx, "image", "rm", "--force", lease.reference)
+		if lease.claimedID == "" {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("preserve unclaimed image %q: it appeared after the pre-test snapshot", lease.reference))
+			continue
+		}
+		identity, err := podmanImageIdentity(ctx, r.runner, lease.reference)
+		if err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("verify test-acquired image %q: %w", lease.reference, err))
+			continue
+		}
+		if identity != lease.claimedID {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("preserve image %q: identity changed from %s to %s", lease.reference, lease.claimedID, identity))
+			continue
+		}
+		result := r.runner(ctx, "image", "rm", "--ignore", "--no-prune", lease.reference)
 		if result.err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove test-owned image %q: %w", lease.reference, podmanCommandError(result)))
 		}
@@ -131,8 +224,12 @@ func (r *e2eContainerResources) cleanup(ctx context.Context) error {
 
 func execPodman(ctx context.Context, args ...string) podmanCommandResult {
 	command := exec.CommandContext(ctx, "podman", args...)
-	output, err := command.CombinedOutput()
-	result := podmanCommandResult{output: strings.TrimSpace(string(output)), err: err}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	result := podmanCommandResult{output: strings.TrimSpace(stdout.String()), stderr: strings.TrimSpace(stderr.String()), err: err}
 	if err == nil {
 		return result
 	}
@@ -145,7 +242,11 @@ func execPodman(ctx context.Context, args ...string) podmanCommandResult {
 }
 
 func podmanImageExists(ctx context.Context, runner podmanRunner, reference string) (bool, error) {
-	result := runner(ctx, "image", "exists", reference)
+	return podmanObjectExists(ctx, runner, "image", reference)
+}
+
+func podmanObjectExists(ctx context.Context, runner podmanRunner, object, reference string) (bool, error) {
+	result := runner(ctx, object, "exists", reference)
 	switch result.exitCode {
 	case 0:
 		if result.err != nil {
@@ -159,24 +260,62 @@ func podmanImageExists(ctx context.Context, runner podmanRunner, reference strin
 	}
 }
 
+func podmanImageIdentity(ctx context.Context, runner podmanRunner, reference string) (string, error) {
+	result := runner(ctx, "image", "inspect", reference)
+	if result.err != nil {
+		return "", podmanCommandError(result)
+	}
+	var payload []struct {
+		ID string `json:"Id"`
+	}
+	if err := json.Unmarshal([]byte(result.output), &payload); err != nil {
+		return "", err
+	}
+	if len(payload) != 1 || strings.TrimSpace(payload[0].ID) == "" {
+		return "", fmt.Errorf("Podman image inspect returned %d objects without one identity", len(payload))
+	}
+	return strings.TrimSpace(payload[0].ID), nil
+}
+
+func podmanContainerIdentity(ctx context.Context, runner podmanRunner, reference string) (string, map[string]string, error) {
+	result := runner(ctx, "container", "inspect", reference)
+	if result.err != nil {
+		return "", nil, podmanCommandError(result)
+	}
+	var payload []struct {
+		ID     string `json:"Id"`
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+	}
+	if err := json.Unmarshal([]byte(result.output), &payload); err != nil {
+		return "", nil, err
+	}
+	if len(payload) != 1 || strings.TrimSpace(payload[0].ID) == "" {
+		return "", nil, fmt.Errorf("Podman container inspect returned %d objects without one identity", len(payload))
+	}
+	return strings.TrimSpace(payload[0].ID), payload[0].Config.Labels, nil
+}
+
 func podmanCommandError(result podmanCommandResult) error {
+	diagnostic := strings.TrimSpace(strings.Join([]string{result.stderr, result.output}, "\n"))
 	if result.err == nil {
-		if result.output == "" {
+		if diagnostic == "" {
 			return fmt.Errorf("Podman exited with status %d", result.exitCode)
 		}
-		return fmt.Errorf("Podman exited with status %d: %s", result.exitCode, result.output)
+		return fmt.Errorf("Podman exited with status %d: %s", result.exitCode, diagnostic)
 	}
-	if result.output == "" {
+	if diagnostic == "" {
 		return result.err
 	}
-	return fmt.Errorf("%w: %s", result.err, result.output)
+	return fmt.Errorf("%w: %s", result.err, diagnostic)
 }
 
 func parseContainerStorageInfo(raw string) (containerStorageInfo, error) {
 	var payload struct {
 		Host struct {
 			Security struct {
-				Rootless bool `json:"rootless"`
+				Rootless *bool `json:"rootless"`
 			} `json:"security"`
 		} `json:"host"`
 		Store struct {
@@ -187,8 +326,11 @@ func parseContainerStorageInfo(raw string) (containerStorageInfo, error) {
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		return containerStorageInfo{}, err
 	}
+	if payload.Host.Security.Rootless == nil {
+		return containerStorageInfo{}, errors.New("Podman info did not report host.security.rootless")
+	}
 	info := containerStorageInfo{
-		Rootless:        payload.Host.Security.Rootless,
+		Rootless:        *payload.Host.Security.Rootless,
 		GraphDriverName: strings.ToLower(strings.TrimSpace(payload.Store.GraphDriverName)),
 		GraphRoot:       strings.TrimSpace(payload.Store.GraphRoot),
 	}
@@ -198,8 +340,8 @@ func parseContainerStorageInfo(raw string) (containerStorageInfo, error) {
 	return info, nil
 }
 
-func vfsMinimumFreeBytes(getenv func(string) string) (uint64, error) {
-	minimumGiB := defaultVFSMinimumFreeGiB
+func vfsMinimumFreeBytes(defaultGiB uint64, getenv func(string) string) (uint64, error) {
+	minimumGiB := defaultGiB
 	if configured := strings.TrimSpace(getenv(vfsMinimumFreeEnv)); configured != "" {
 		parsed, err := strconv.ParseUint(configured, 10, 64)
 		if err != nil || parsed == 0 || parsed > math.MaxUint64/(1<<30) {
@@ -210,21 +352,25 @@ func vfsMinimumFreeBytes(getenv func(string) string) (uint64, error) {
 	return minimumGiB << 30, nil
 }
 
-func assessContainerStorage(info containerStorageInfo, minimumFree uint64, freeBytes func(string) (uint64, error)) (uint64, error) {
-	if !info.Rootless || info.GraphDriverName != "vfs" {
-		return 0, nil
+func assessContainerStorage(info containerStorageInfo, laneMinimumGiB uint64, getenv func(string) string, freeBytes func(string) (uint64, error)) (uint64, uint64, error) {
+	if info.GraphDriverName != "vfs" {
+		return 0, 0, nil
+	}
+	minimumFree, err := vfsMinimumFreeBytes(laneMinimumGiB, getenv)
+	if err != nil {
+		return 0, 0, err
 	}
 	if info.GraphRoot == "" {
-		return 0, errors.New("unsafe rootless Podman vfs storage: Podman info did not report store.graphRoot")
+		return 0, minimumFree, errors.New("unsafe rootless Podman vfs storage: Podman info did not report store.graphRoot")
 	}
 	available, err := freeBytes(info.GraphRoot)
 	if err != nil {
-		return 0, fmt.Errorf("inspect free space for rootless Podman vfs at %q: %w", info.GraphRoot, err)
+		return 0, minimumFree, fmt.Errorf("inspect free space for rootless Podman vfs at %q: %w", info.GraphRoot, err)
 	}
 	if available < minimumFree {
-		return available, fmt.Errorf("unsafe rootless Podman vfs storage: %.1f GiB available at %q, require %.1f GiB; vfs duplicates unpacked layers and these image builds need transient headroom. Free space, select rootless overlay storage, or set %s to a locally validated positive GiB threshold (use `podman system df` to inspect usage)", bytesToGiB(available), info.GraphRoot, bytesToGiB(minimumFree), vfsMinimumFreeEnv)
+		return available, minimumFree, fmt.Errorf("unsafe rootless Podman vfs storage: %.1f GiB available at %q, require %.1f GiB; vfs duplicates unpacked layers and these image builds need transient headroom. Free space, select rootless overlay storage, or set %s to a locally validated positive GiB threshold (use `df -h` on the graph root for capacity and `podman system df` for attribution)", bytesToGiB(available), info.GraphRoot, bytesToGiB(minimumFree), vfsMinimumFreeEnv)
 	}
-	return available, nil
+	return available, minimumFree, nil
 }
 
 func availableBytes(path string) (uint64, error) {

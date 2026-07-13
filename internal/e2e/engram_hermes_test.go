@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +29,8 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Minute)
 	defer cancel()
-	resources := prepareContainerE2E(t, ctx)
+	tmp := t.TempDir()
+	resources := prepareContainerE2E(t, ctx, vfsMinimumFreeHermesGiB)
 	doorHost := hostDoorIPv4(t)
 	providerProof := hermesProof + "\n[engram:upstream] " + hermesEngramSignalID + " " + hermesEngramProof
 	provider := newObservedProvider(t, doorHost, providerProof)
@@ -40,7 +40,6 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 	providerPort := mustPort(t, provider.URL)
 	telegramPort := mustPort(t, telegram.URL)
 	root := repositoryRoot(t)
-	tmp := t.TempDir()
 	hermes := readHermesLock(t)
 	verifyHermesArtifact(t, ctx, tmp, hermes)
 	image := hermes.Image
@@ -48,8 +47,8 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 	engramLock := readReleaseLock(t)
 	engram := materializeEngramRelease(t, ctx, tmp, engramLock)
 
-	world := "engram-hermes-e2e-" + strconv.Itoa(os.Getpid())
-	resources.trackContainer(containerName(world, 1))
+	world := e2eWorldName(t, "engram-hermes-e2e")
+	resources.trackContainer(t, ctx, world, 1)
 	stateRoot := filepath.Join(tmp, "state")
 	hermesConfig := filepath.Join(tmp, "hermes-config.yaml")
 	engramEnv := filepath.Join(tmp, "engram.env")
@@ -62,6 +61,7 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 	writeEngramCompositionEnv(t, engramEnv, telegramFixtureToken, telegramAPIBase(telegram.URL, doorHost), telegramFixtureUser, telegramFixtureUser)
 	writeEngramHermesDeclaration(t, declaration, world, image, engram, hermesConfig, engramEnv, doorHost, providerPort, doorHost, telegramPort)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
+	resources.claimImage(t, ctx, image)
 	container := containerName(world, 1)
 	waitForTmuxTarget(t, ctx, tmp, testEnv, container, "main:hermes")
 	waitForHermesTUIReady(t, ctx, tmp, testEnv, container, "main:hermes")

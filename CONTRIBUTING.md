@@ -35,17 +35,22 @@ outbound artifact/image access, and substantial temporary disk. Run the target
 relevant to your change; reserve `make e2e` for a complete 10–20 minute-per-lane
 replay.
 
-Every container-heavy proof records whether each pinned base and derived image
-existed before the test. Cleanup always attempts every tracked container, then
-removes only images the test caused Podman to acquire; operator-owned images are
-preserved, and cleanup failures are reported separately from the primary test
-failure. Before artifact downloads or image builds, rootless Podman `vfs` stores
-must have 96 GiB free. That default rounds an observed 68 GiB expanded Hermes
-footprint up with roughly 40% transient build headroom; rootless `overlay` is not
-subject to this amplification guard. Operators with a measured local footprint
+Every container-heavy proof uses a random world identity and refuses a
+pre-existing container name. Cleanup verifies Kenogram's world/generation
+labels, removes containers by immutable ID newest-first, and preserves label
+mismatches. Images absent from the pre-test snapshot are removed only after the
+test claims and re-verifies their immutable ID. Image removal is never forced;
+an image used by another workload survives as a visible cleanup failure.
+
+Before artifact downloads or image builds, rootless Podman `vfs` stores require
+lane-specific free-space floors: 24 GiB for the Engram release proof, 64 GiB for
+OpenClaw proofs, and 96 GiB for Hermes proofs. These are conservative fail-fast
+budgets, not image-size claims; the Hermes floor adds transient headroom to an
+observed 68 GiB expanded footprint. Rootless `overlay` is not subject to the
+amplification guard or its override. Operators with a measured local footprint
 may set `KENOGRAM_E2E_VFS_MIN_FREE_GIB` to a positive whole-GiB threshold. Use
-`podman system df` and the preflight's graph-root path to validate an override;
-the setting does not delete or prune storage.
+`df -h <graph-root>` for free capacity and `podman system df` for attribution.
+The setting does not delete or prune storage.
 
 | Command | Evidence |
 |---|---|

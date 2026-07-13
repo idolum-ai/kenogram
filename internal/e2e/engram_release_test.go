@@ -69,9 +69,9 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Minute)
 	defer cancel()
-	resources := prepareContainerE2E(t, ctx)
-	root := repositoryRoot(t)
 	tmp := t.TempDir()
+	resources := prepareContainerE2E(t, ctx, vfsMinimumFreeEngramGiB)
+	root := repositoryRoot(t)
 	lock := readReleaseLock(t)
 	t.Logf("evidence engram_version=%s commit=%s sha256=%s", lock.Version, lock.Commit, lock.SHA256)
 	archive := filepath.Join(tmp, lock.Asset)
@@ -101,15 +101,17 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	image := "localhost/kenogram-engram-e2e:" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	resources.trackImage(t, ctx, image)
 	run(t, ctx, tmp, nil, "podman", "build", "--pull=missing", "-t", image, "-f", containerfile, ".")
+	resources.claimImage(t, ctx, debianBookwormAMD64)
+	resources.claimImage(t, ctx, image)
 	imageDigest := strings.TrimSpace(run(t, ctx, tmp, nil, "podman", "image", "inspect", "--format", "{{.Digest}}", image))
 	if !strings.HasPrefix(imageDigest, "sha256:") || len(imageDigest) != len("sha256:")+sha256.Size*2 {
 		t.Fatalf("invalid built image digest: %q", imageDigest)
 	}
 	pinnedImage := image + "@" + imageDigest
 
-	world := "engram-e2e-" + strconv.Itoa(os.Getpid())
+	world := e2eWorldName(t, "engram-e2e")
 	for generation := 1; generation <= 3; generation++ {
-		resources.trackContainer(containerName(world, generation))
+		resources.trackContainer(t, ctx, world, generation)
 	}
 	stateRoot := filepath.Join(tmp, "state")
 	declaration := filepath.Join(tmp, "kenogram.toml")

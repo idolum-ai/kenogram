@@ -27,7 +27,8 @@ func TestEngramControlsOpenClawInsideKenogram(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	resources := prepareContainerE2E(t, ctx)
+	tmp := t.TempDir()
+	resources := prepareContainerE2E(t, ctx, vfsMinimumFreeOpenClawGiB)
 	doorHost := hostDoorIPv4(t)
 	provider := newOpenAIProvider(t, doorHost)
 	defer provider.Close()
@@ -36,7 +37,6 @@ func TestEngramControlsOpenClawInsideKenogram(t *testing.T) {
 	providerPort := mustPort(t, provider.URL)
 	telegramPort := mustPort(t, telegram.URL)
 	root := repositoryRoot(t)
-	tmp := t.TempDir()
 	openClaw := readOpenClawLock(t)
 	resources.trackImage(t, ctx, openClaw.Image)
 	engramLock := readReleaseLock(t)
@@ -56,14 +56,16 @@ USER node
 	image := "localhost/kenogram-engram-openclaw-e2e:" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	resources.trackImage(t, ctx, image)
 	run(t, ctx, tmp, nil, "podman", "build", "--pull=missing", "--build-arg", "KENOGRAM_UID="+strconv.Itoa(os.Getuid()), "--build-arg", "KENOGRAM_GID="+strconv.Itoa(os.Getgid()), "-t", image, "-f", containerfile, ".")
+	resources.claimImage(t, ctx, openClaw.Image)
+	resources.claimImage(t, ctx, image)
 	imageDigest := strings.TrimSpace(run(t, ctx, tmp, nil, "podman", "image", "inspect", "--format", "{{.Digest}}", image))
 	if !strings.HasPrefix(imageDigest, "sha256:") {
 		t.Fatalf("invalid composition image digest: %q", imageDigest)
 	}
 	pinnedImage := image + "@" + imageDigest
 
-	world := "engram-openclaw-e2e-" + strconv.Itoa(os.Getpid())
-	resources.trackContainer(containerName(world, 1))
+	world := e2eWorldName(t, "engram-openclaw-e2e")
+	resources.trackContainer(t, ctx, world, 1)
 	stateRoot := filepath.Join(tmp, "state")
 	openClawConfig := filepath.Join(tmp, "openclaw.json")
 	engramEnv := filepath.Join(tmp, "engram.env")
