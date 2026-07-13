@@ -93,9 +93,9 @@ USER node
 		out, err := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:openclaw")
 		return err == nil && strings.Contains(out, "Reply with the proof marker."), out
 	})
-	// OpenClaw treats LF as an editor newline. C-m supplies the carriage-return
-	// submit binding explicitly after Engram has proven the text reached the pane.
-	telegram.enqueueText("/key 1 C-m")
+	// OpenClaw treats tmux's synthetic Enter as an editor newline while Kitty
+	// keyboard mode is active. KPEnter preserves the supported SS3 submit key.
+	telegram.enqueueText("/key 1 KPEnter")
 	if !provider.observedWithin(30 * time.Second) {
 		pane, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", "main:openclaw")
 		audit, _ := runResult(ctx, tmp, testEnv, "podman", "exec", container, "cat", "/workspace/.engram/audit.jsonl")

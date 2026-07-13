@@ -94,7 +94,7 @@ USER node
 	assertOpenClawVersion(t, ctx, tmp, testEnv, container, openClaw.Version)
 	waitForTmuxTarget(t, ctx, tmp, testEnv, container, "main:openclaw")
 
-	instructions := fmt.Sprintf("Kenogram canary ready. Within 3 minutes send:\n/attach main:openclaw\n/text 1 Reply with %s\n/key 1 C-m", nonce)
+	instructions := fmt.Sprintf("Kenogram canary ready. Within 3 minutes send:\n/attach main:openclaw\n/text 1 Reply with %s\n/key 1 KPEnter", nonce)
 	notifyCanaryOperator(t, ctx, token, chatID, instructions)
 	t.Log(instructions)
 	provider.waitObservedContaining(t, 3*time.Minute, nonce)
