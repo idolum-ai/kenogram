@@ -246,6 +246,18 @@ func TestServiceScriptReportsStateAndBacksOff(t *testing.T) {
 	}
 }
 
+func TestInsideDocumentKeepsOptionalTransportsOutOfWorldOntology(t *testing.T) {
+	document := insideDocument()
+	if strings.Contains(strings.ToLower(document), "engram") {
+		t.Fatalf("generated world guidance names an optional transport:\n%s", document)
+	}
+	for _, required := range []string{"request as prose", "operator", "host-side declaration"} {
+		if !strings.Contains(document, required) {
+			t.Fatalf("generated world guidance is missing %q:\n%s", required, document)
+		}
+	}
+}
+
 func TestRecoveryPlanDoesNotRereadCopySource(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "secret")
 	if err := os.WriteFile(source, []byte("materialized"), 0o600); err != nil {

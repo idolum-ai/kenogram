@@ -227,3 +227,30 @@ func TestReconcileRejectsInvalidPolicyWithoutChangingCurrentPolicy(t *testing.T)
 		t.Fatal("invalid reconciliation changed current policy")
 	}
 }
+
+func TestParseDestinationRequiresCanonicalAuthority(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		host string
+		port int
+	}{
+		{raw: "example.com:443", host: "example.com", port: 443},
+		{raw: "LOCALHOST.:80", host: "LOCALHOST.", port: 80},
+		{raw: "[2001:db8::1]:8443", host: "2001:db8::1", port: 8443},
+	} {
+		got, err := ParseDestination(test.raw)
+		if err != nil || got.Host != test.host || got.Port != test.port {
+			t.Fatalf("ParseDestination(%q) = %#v, %v", test.raw, got, err)
+		}
+	}
+	for _, raw := range []string{
+		"", " example.com:443", "example.com:443 ", "example.com", "example.com:0",
+		"example.com:65536", "example.com:0443", "user@example.com:443",
+		"example.com:443/path", "example.com:443?query", "example.com:443#fragment",
+		"https://example.com:443", "2001:db8::1:443",
+	} {
+		if got, err := ParseDestination(raw); err == nil {
+			t.Fatalf("ParseDestination(%q) = %#v", raw, got)
+		}
+	}
+}

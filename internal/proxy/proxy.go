@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -358,14 +357,16 @@ func writeError(w io.Writer, status int) {
 	fmt.Fprintf(w, "HTTP/1.1 %d %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", status, http.StatusText(status))
 }
 func ParseDestination(raw string) (Destination, error) {
-	parsed, err := url.Parse("door://" + raw)
-	if err != nil {
-		return Destination{}, err
+	if raw == "" || raw != strings.TrimSpace(raw) || strings.ContainsAny(raw, "@/?#") {
+		return Destination{}, fmt.Errorf("destination must be canonical host:port")
 	}
-	host := parsed.Hostname()
-	port, err := strconv.Atoi(parsed.Port())
-	if host == "" || err != nil || port < 1 || port > 65535 {
-		return Destination{}, fmt.Errorf("destination must be host:port")
+	host, portText, err := net.SplitHostPort(raw)
+	if err != nil || host == "" || strings.ContainsAny(host, "@/?#") {
+		return Destination{}, fmt.Errorf("destination must be canonical host:port")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 || portText != strconv.Itoa(port) || net.JoinHostPort(host, portText) != raw {
+		return Destination{}, fmt.Errorf("destination must be canonical host:port")
 	}
 	return Destination{host, port}, nil
 }

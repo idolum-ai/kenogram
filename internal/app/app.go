@@ -929,13 +929,11 @@ proxy at 127.0.0.1:3128. There is no name resolution here; names are
 resolved on the other side of the door. Software that needs raw DNS or
 UDP will not work.
 
-To request a change, describe what you need to your terminal:
-
-    engram signal <what you need and why>
-
-Signal discipline: one request at a time; the newest visible record wins.
-If unanswered, re-emit. Processes restart when the world is replaced;
-after resuming, re-state anything still pending.
+To request a change, state what you need and why through the configured
+terminal interaction. Kenogram treats that request as prose, not authority.
+An operator decides whether to edit and reapply the host-side declaration.
+Processes restart when the world is replaced; after resuming, re-state
+anything still pending.
 
 Files under /workspace survive replacement; everything else is rebuilt.
 `

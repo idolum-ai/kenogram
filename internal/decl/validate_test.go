@@ -118,6 +118,21 @@ func TestValidateRejectsDuplicateNetworkAndServices(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsURLSyntaxInNetworkHost(t *testing.T) {
+	for _, host := range []string{" user.example", "user@example.com", "example.com/path", "example.com?query", "example.com#fragment", "[2001:db8::1]", "not:ipv6"} {
+		d, dir := validForValidation(t)
+		d.Network.Allow[0].Host = host
+		if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "exact non-wildcard") {
+			t.Fatalf("host %q: %v", host, err)
+		}
+	}
+	d, dir := validForValidation(t)
+	d.Network.Allow[0].Host = "2001:db8::1"
+	if err := Validate(d, dir); err != nil {
+		t.Fatalf("IPv6 host rejected: %v", err)
+	}
+}
+
 func TestValidateRejectsUnsafeOperationalNames(t *testing.T) {
 	for _, name := range []string{".", "..", "Upper", "-leading", "a/b", "a b", strings.Repeat("a", 64)} {
 		d, dir := validForValidation(t)
