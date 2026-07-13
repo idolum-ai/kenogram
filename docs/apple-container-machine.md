@@ -20,8 +20,9 @@ selecting the launcher, the operator must:
 
 1. Start Apple's container system and create a dedicated machine from an OCI
    image containing `/sbin/init`.
-2. Install the Linux Kenogram binary, `nsenter`, and rootless Podman in that
-   machine.
+2. Install a Linux Kenogram binary with exactly the same version, commit, build
+   date, and Go toolchain identity as the macOS launcher, plus `nsenter` and
+   rootless Podman, in that machine.
 3. Configure cgroups v2 and subordinate UID/GID ranges for the machine's mapped
    user. `podman info --format json` must report rootless operation, cgroups v2,
    and mappings larger than one ID.
@@ -55,8 +56,10 @@ container machine run -n <machine> -- /usr/bin/env -u KENOGRAM_RUNTIME -u KENOGR
 
 The final command uses the same prefix and the original Kenogram arguments.
 Unsetting the selector variables prevents recursive forwarding if a machine
-login profile happens to define them. A failed inspect, Linux-binary check, or
-Podman preflight prevents the requested Kenogram operation.
+login profile happens to define them. The launcher also requires the inner and
+outer `kenogram version` output to match exactly, preventing an older Linux
+implementation from silently executing newer host intent. A failed inspect,
+identity check, or Podman preflight prevents the requested Kenogram operation.
 
 ## Security boundary and open proof
 

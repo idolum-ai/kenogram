@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/idolum-ai/kenogram/internal/version"
 )
 
 const (
@@ -100,8 +102,12 @@ func (l *AppleMachineLauncher) Preflight(ctx context.Context) error {
 		return fmt.Errorf("inspect Apple container machine %q: %w", l.Machine, err)
 	}
 	machine := AppleMachineRunner{Runner: l.Runner, Machine: l.Machine}
-	if _, err := machine.Run(ctx, l.Kenogram, "version"); err != nil {
+	rawVersion, err := machine.Run(ctx, l.Kenogram, "version")
+	if err != nil {
 		return fmt.Errorf("run Linux Kenogram in Apple container machine %q: %w", l.Machine, err)
+	}
+	if inner, outer := strings.TrimSpace(string(rawVersion)), version.String(); inner != outer {
+		return fmt.Errorf("Apple container machine %q Kenogram identity is %q, want %q", l.Machine, inner, outer)
 	}
 	if err := New(machine).Preflight(ctx); err != nil {
 		return fmt.Errorf("Apple container machine %q Podman preflight: %w", l.Machine, err)

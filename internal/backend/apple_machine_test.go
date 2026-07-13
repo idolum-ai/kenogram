@@ -6,11 +6,14 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/idolum-ai/kenogram/internal/version"
 )
 
 type scriptedRunner struct {
-	calls []call
-	fail  int
+	calls         []call
+	fail          int
+	versionOutput string
 }
 
 func (r *scriptedRunner) record(name string, args ...string) error {
@@ -27,6 +30,12 @@ func (r *scriptedRunner) Run(_ context.Context, name string, args ...string) ([]
 	}
 	if name == "container" && len(args) > 13 && args[13] == "podman" {
 		return []byte(`{"host":{"security":{"rootless":true},"cgroupVersion":"v2","idMappings":{"uidmap":[{"size":65536}],"gidmap":[{"size":65536}]}}}`), nil
+	}
+	if name == "container" && len(args) > 14 && args[len(args)-1] == "version" {
+		if r.versionOutput != "" {
+			return []byte(r.versionOutput), nil
+		}
+		return []byte(version.String() + "\n"), nil
 	}
 	return []byte("ok"), nil
 }
@@ -68,10 +77,21 @@ func TestAppleMachineLaunchExactArgv(t *testing.T) {
 }
 
 func TestAppleMachinePreflightFailsBeforeUserCommand(t *testing.T) {
-	runner := &scriptedRunner{fail: 1}
+	for fail := 1; fail <= 3; fail++ {
+		runner := &scriptedRunner{fail: fail}
+		launcher := &AppleMachineLauncher{Runner: runner, Machine: "proof", Kenogram: "kenogram"}
+		err := launcher.Launch(context.Background(), []string{"destroy", "--yes", "world"})
+		if err == nil || len(runner.calls) != fail {
+			t.Fatalf("fail=%d err=%v calls=%#v", fail, err, runner.calls)
+		}
+	}
+}
+
+func TestAppleMachineRejectsDifferentKenogramIdentity(t *testing.T) {
+	runner := &scriptedRunner{versionOutput: "kenogram old commit=wrong date=wrong go=wrong"}
 	launcher := &AppleMachineLauncher{Runner: runner, Machine: "proof", Kenogram: "kenogram"}
-	err := launcher.Launch(context.Background(), []string{"destroy", "--yes", "world"})
-	if err == nil || len(runner.calls) != 1 {
+	err := launcher.Launch(context.Background(), []string{"status", "world"})
+	if err == nil || !strings.Contains(err.Error(), "identity") || len(runner.calls) != 2 {
 		t.Fatalf("err=%v calls=%#v", err, runner.calls)
 	}
 }
