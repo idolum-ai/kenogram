@@ -157,7 +157,7 @@ func writeEngramOpenClawDeclaration(t *testing.T, path, world, image, engram, op
 		t.Fatal(err)
 	}
 	tuiShell := strings.Join(openClawEnvCommand("/usr/local/bin/openclaw", "tui", "--url", "ws://127.0.0.1:18789", "--token", openClawGatewayToken, "--session", "engram-composition", "--timeout-ms", "20000"), " ")
-	tracedTUI := "/usr/bin/strace -ff -tt -xx -s 256 -e trace=read -e read=0 -o /workspace/openclaw-stdin.trace " + tuiShell
+	tracedTUI := "/usr/bin/strace -ff -tt -xx -yy -s 256 -e trace=read,readv -o /workspace/openclaw-stdin.trace " + tuiShell
 	tmuxCommand := []string{"/bin/sh", "-c", "until /usr/bin/curl --fail --silent http://127.0.0.1:18789/readyz >/dev/null; do sleep 0.1; done; cd /workspace && /usr/bin/tmux -vv new-session -d -x 120 -y 40 -s main -n openclaw " + shellQuote(tracedTUI) + " && exec /usr/bin/tmux wait-for kenogram-service-stop"}
 	tmuxJSON, err := json.Marshal(tmuxCommand)
 	if err != nil {
@@ -245,7 +245,10 @@ tmux -V
 printf 'pi-tui '
 node -p "require('/app/node_modules/@earendil-works/pi-tui/package.json').version"
 printf '%s\n' '--- tmux options ---'
-tmux show-options -g | grep -E '^(default-terminal|extended-keys|extended-keys-format|terminal-features|terminal-overrides)' || true
+for option in default-terminal extended-keys extended-keys-format terminal-features terminal-overrides; do
+  value=$(tmux show-options -Agv "$option" 2>/dev/null || tmux show-options -Asgv "$option" 2>/dev/null || true)
+  printf '%s=%s\n' "$option" "$value"
+done
 tmux display-message -p -t main:openclaw 'pane=#{pane_id} tty=#{pane_tty} term=#{client_termname} features=#{client_termfeatures}' || true
 printf '%s\n' '--- TUI process terminal state ---'
 for pid in $(pgrep -f 'openclaw.*tui'); do
@@ -255,13 +258,17 @@ for pid in $(pgrep -f 'openclaw.*tui'); do
       printf 'pid=%s stdin=%s\n' "$pid" "$tty"
       tr '\000' '\n' < "/proc/$pid/environ" | grep -E '^(TERM|COLORTERM|TERM_PROGRAM|KITTY_WINDOW_ID|TMUX)=' || true
       stty -a < "/proc/$pid/fd/0" || true
+      for fd in "/proc/$pid/fd"/*; do
+        target=$(readlink "$fd" 2>/dev/null || true)
+        case "$target" in /dev/pts/*) printf 'tty-fd=%s target=%s\n' "${fd##*/}" "$target";; esac
+      done
       ;;
   esac
 done
 printf '%s\n' '--- OpenClaw stdin reads ---'
-grep -h 'read(0,' /workspace/openclaw-stdin.trace* 2>/dev/null | tail -40 || true
+grep -Eh 'read(v)?\(.*(\\x0d|\\x52\\x65\\x70\\x6c\\x79)' /workspace/openclaw-stdin.trace* 2>/dev/null | tail -80 || true
 printf '%s\n' '--- tmux verbose input/key excerpts ---'
-grep -Ehi 'key|input|extended|0d|Enter' /workspace/tmux-*.log 2>/dev/null | tail -80 || true
+grep -Ehi 'send-keys|input_key|input_parse|input_key_build|write.*pane' /workspace/tmux-*.log 2>/dev/null | tail -120 || true
 `
 	out, err := runResult(ctx, dir, env, "podman", "exec", container, "/bin/sh", "-c", command)
 	if err != nil {
