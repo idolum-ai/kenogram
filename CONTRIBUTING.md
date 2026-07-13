@@ -18,6 +18,11 @@ Do not add third-party Go dependencies, generic runtime abstractions, or new
 integration fixtures unless they prove a boundary not already covered. Report
 security issues privately as described in [`.github/SECURITY.md`](.github/SECURITY.md).
 
+Release preparation uses a short-lived `release/vX.Y.Z` branch and the process
+in [`docs/release-strategy.md`](docs/release-strategy.md). Maintainers review
+candidate binaries, checksums, embedded source identity, and release text before
+merge; ordinary contributors never need publication credentials.
+
 ## Composition proofs
 
 All release inputs are URL- and checksum-locked under `internal/e2e/testdata`.
