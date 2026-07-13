@@ -34,6 +34,9 @@ type App struct {
 	Out        io.Writer
 	Now        func() time.Time
 	Executable string
+	// LifecycleCheckpoint is nil in production. Tests use it to terminate a
+	// process at named durable boundaries without changing runtime behavior.
+	LifecycleCheckpoint func(string)
 }
 
 func New() (*App, error) {
@@ -46,6 +49,12 @@ func New() (*App, error) {
 		return nil, err
 	}
 	return &App{Backend: backend.New(nil), BaseDir: base, Out: os.Stdout, Now: func() time.Time { return time.Now().UTC() }, Executable: executable}, nil
+}
+
+func (a *App) checkpoint(name string) {
+	if a.LifecycleCheckpoint != nil {
+		a.LifecycleCheckpoint(name)
+	}
 }
 
 type Prepared struct {
@@ -230,6 +239,7 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 		return err
 	}
 	transitionWritten = true
+	a.checkpoint("rollback-recorded")
 	if priorActive {
 		cutover = true
 		if err := a.stopProxy(l); err != nil {
@@ -238,11 +248,13 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 		if err := a.Backend.Stop(ctx, prior.Container); err != nil {
 			return a.recordFailure(l, prepared, "stop predecessor", err)
 		}
+		a.checkpoint("predecessor-stopped")
 	}
 	if err := a.Backend.Start(ctx, container); err != nil {
 		return a.recordFailure(l, prepared, "start successor", err)
 	}
 	successorStarted = true
+	a.checkpoint("successor-started")
 	evidence, err := a.Backend.Inspect(ctx, container)
 	if err != nil {
 		return a.recordFailure(l, prepared, "inspect successor", err)
@@ -250,6 +262,7 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 	if err := a.verifyRuntimeEvidence(evidence, prepared.Result, generation, mounts); err != nil {
 		return a.recordFailure(l, prepared, "verify successor before services", err)
 	}
+	a.checkpoint("boundary-verified")
 	proxyPID := 0
 	if len(prepared.Result.Plan.NetworkAllow) > 0 {
 		proxyPID, err = a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
@@ -261,6 +274,7 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 	if err := a.startServices(ctx, container, prepared.Result.Plan.Services); err != nil {
 		return a.recordFailure(l, prepared, "start services", err)
 	}
+	a.checkpoint("services-started")
 	evidence, err = a.Backend.Inspect(ctx, container)
 	if err != nil || a.verifyRuntimeEvidence(evidence, prepared.Result, generation, mounts) != nil {
 		if err == nil {
@@ -268,6 +282,7 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 		}
 		return a.recordFailure(l, prepared, "verify successor", err)
 	}
+	a.checkpoint("successor-verified")
 	after, err := worldfs.Digest(l.Workspace)
 	if err != nil {
 		return err
@@ -281,30 +296,38 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 	if err := l.WriteTransition(transition); err != nil {
 		return err
 	}
+	a.checkpoint("commit-recorded")
 	if _, err := l.WriteDigest(generation, after); err != nil {
 		return err
 	}
+	a.checkpoint("digest-written")
 	if err := l.WriteApplied(prepared.Raw); err != nil {
 		return err
 	}
+	a.checkpoint("declaration-written")
 	if err := l.WriteAppliedPlan(transition.SuccessorPlan); err != nil {
 		return err
 	}
+	a.checkpoint("recovery-plan-written")
 	if err := l.WriteState(state); err != nil {
 		return err
 	}
+	a.checkpoint("state-written")
 	if _, err := history.AppendOnce(l.History, history.Record{Action: "up", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, ImageDigests: []string{prepared.Result.Plan.World.Base}, WorkspaceDigest: after.Root, Outcome: "applied"}, a.Now()); err != nil {
 		return err
 	}
+	a.checkpoint("history-written")
 	success = true
 	if priorErr == nil && priorExists && prior.Container != "" && prior.Container != container {
 		if err := a.Backend.Destroy(ctx, prior.Container); err != nil {
 			return fmt.Errorf("applied successor but remove predecessor: %w", err)
 		}
+		a.checkpoint("predecessor-destroyed")
 	}
 	if err := l.ClearTransition(); err != nil {
 		return fmt.Errorf("applied successor but clear transition: %w", err)
 	}
+	a.checkpoint("transition-cleared")
 	fmt.Fprintf(a.Out, "applied %s generation g%d (%s)\n", prepared.Result.Plan.Name, generation, prepared.Result.PlanDigest)
 	return nil
 }
