@@ -75,6 +75,13 @@ package-manager builds are byte-identical.
 Maintainers must verify and preserve these settings for every release:
 
 - protected `main` requires current CI and review;
+- an organization ruleset requires `.github/workflows/ci.yml` from its protected
+  source revision before path-aware pull-request results replace full per-job
+  requirements;
+- `PATH_AWARE_CI_ENABLED=true` is set only after that ruleset workflow passes in
+  Evaluate mode, is activated, and proves pull-request events plus merge-group
+  events when a merge queue is enabled; leaving it unset preserves the full
+  suite;
 - the `release` Actions environment requires maintainer approval;
 - immutable GitHub Releases are enabled;
 - a `v*` tag ruleset denies update and deletion while permitting the release

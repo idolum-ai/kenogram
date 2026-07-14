@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   workflow_dispatch:
   schedule:
     - cron: "17 4 * * 2"
@@ -14,31 +15,77 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      - name: Check out trusted CI policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          go-version-file: go.mod
+          ref: ${{ github.workflow_sha }}
+          path: .ci-policy
+          persist-credentials: false
+      - name: Check out proposed tree
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+      - name: Classify change
+        id: scope
+        working-directory: source
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PATH_AWARE_ENABLED: ${{ vars.PATH_AWARE_CI_ENABLED }}
+        run: |
+          set -euo pipefail
+          mode="$(bash ../.ci-policy/scripts/select-ci-mode.sh \
+            "${EVENT_NAME}" "${BASE_SHA}" "${HEAD_SHA}" \
+            ../.ci-policy/scripts/classify-ci-paths.sh \
+            "${PATH_AWARE_ENABLED}")"
+          [[ "${mode}" = editorial || "${mode}" = full ]]
+          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
+          echo "CI mode: **${mode}**" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        if: steps.scope.outputs.mode == 'full'
+        with:
+          go-version-file: source/go.mod
           cache: false
       - name: Install check tools
         run: sudo apt-get update && sudo apt-get install -y ripgrep
-      - name: Check
+      - name: Editorial gate
+        if: steps.scope.outputs.mode == 'editorial'
+        working-directory: source
+        run: make architecture docs-freshness secrets workflow-sanity
+      - name: Full gate
+        if: steps.scope.outputs.mode == 'full'
+        working-directory: source
         run: make check
       - name: Vulnerability reachability
+        if: steps.scope.outputs.mode == 'full'
+        working-directory: source
         run: make vulncheck
       - name: Test evidence
+        if: steps.scope.outputs.mode == 'full'
+        working-directory: source
         run: make test-evidence
       - name: Retain test evidence
+        if: steps.scope.outputs.mode == 'full'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: go-test-evidence
-          path: artifacts/
+          path: source/artifacts/
           if-no-files-found: error
 
   race:
+    needs: check
+    if: needs.check.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
@@ -47,9 +94,13 @@ jobs:
         run: make test-race
 
   apple-host:
+    needs: check
+    if: needs.check.outputs.mode == 'full'
     runs-on: macos-26
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
@@ -70,9 +121,12 @@ jobs:
 
   runtime:
     needs: [check, race]
+    if: needs.check.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
@@ -138,9 +192,12 @@ jobs:
 
   runtime-hermes:
     needs: [check, race]
+    if: needs.check.outputs.mode == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
@@ -184,11 +241,37 @@ jobs:
           KENOGRAM_ENGRAM_ARCHIVE: /tmp/engram-v0.3.0-linux-amd64.tar.gz
           KENOGRAM_VERIFY_UPSTREAM: ${{ github.event_name == 'schedule' && '1' || '0' }}
 
+  required:
+    if: always()
+    needs: [check, race, apple-host, runtime, runtime-hermes]
+    runs-on: ubuntu-latest
+    env:
+      APPLE_HOST_RESULT: ${{ needs.apple-host.result }}
+      CHECK_RESULT: ${{ needs.check.result }}
+      CI_MODE: ${{ needs.check.outputs.mode }}
+      RACE_RESULT: ${{ needs.race.result }}
+      RUNTIME_HERMES_RESULT: ${{ needs.runtime-hermes.result }}
+      RUNTIME_RESULT: ${{ needs.runtime.result }}
+    steps:
+      - name: Check out trusted CI policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .ci-policy
+          persist-credentials: false
+      - name: Verify required evidence
+        run: >-
+          bash .ci-policy/scripts/verify-ci-results.sh
+          "${CI_MODE}" "${CHECK_RESULT}" "${RACE_RESULT}"
+          "${APPLE_HOST_RESULT}" "${RUNTIME_RESULT}" "${RUNTIME_HERMES_RESULT}"
+
   nightly-native:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
