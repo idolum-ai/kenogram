@@ -88,6 +88,12 @@ Maintainers must verify and preserve these settings for every release:
   environment's Actions token to create a tag;
 - Actions are restricted to reviewed, full-SHA-pinned actions.
 
+`PATH_AWARE_CI_ENABLED` is an Actions **repository variable** under **Settings →
+Secrets and variables → Actions → Variables**, not an environment variable.
+Without the organization workflow rule, enabling it and requiring only the
+aggregate `required` job is a trusted-contributor optimization, not a security
+boundary, and must not be used for public fork contributions.
+
 The workflow fails closed around existing tags and assets, but repository
 settings are the enforcement boundary after publication.
 
