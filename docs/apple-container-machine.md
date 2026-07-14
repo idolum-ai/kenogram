@@ -28,11 +28,11 @@ selecting the launcher, the operator must:
    and mappings larger than one ID.
 4. Put declarations and copied inputs somewhere visible inside the machine.
 
-Build macOS launchers with Go 1.24 or newer. Go 1.24 made the Mach-O `LC_UUID`
+Build macOS launchers with the security-patched Go version in `go.mod`'s
+`toolchain` directive. It is newer than Go 1.24, which made the Mach-O `LC_UUID`
 load command part of linker output; macOS 26 rejects older Go binaries that omit
-it. The native CI lane pins Go 1.26.4, and release automation should build both
-the outer macOS launcher and inner Linux binary with the same pinned toolchain
-so their version reports match.
+it. Native CI and release automation consume the same directive so outer macOS
+launchers and inner Linux binaries can report matching toolchain provenance.
 
 Apple documents that `container machine run` boots a stopped machine. Kenogram
 therefore requires an existing machine but does not create, configure, stop, or

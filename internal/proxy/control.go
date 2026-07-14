@@ -106,17 +106,11 @@ func sendControlContext(ctx context.Context, conn net.Conn, request ControlReque
 	})
 	defer stopCancellation()
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		return err
+		return controlContextError(ctx, err)
 	}
 	var response ControlResponse
 	if err := json.NewDecoder(conn).Decode(&response); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		return err
+		return controlContextError(ctx, err)
 	}
 	if !response.OK {
 		if response.Error == "" {
@@ -125,4 +119,16 @@ func sendControlContext(ctx context.Context, conn net.Conn, request ControlReque
 		return fmt.Errorf("proxy: %s", response.Error)
 	}
 	return nil
+}
+
+func controlContextError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	deadline, hasDeadline := ctx.Deadline()
+	var netErr net.Error
+	if hasDeadline && !time.Now().Before(deadline) && errors.As(err, &netErr) && netErr.Timeout() {
+		return context.DeadlineExceeded
+	}
+	return err
 }

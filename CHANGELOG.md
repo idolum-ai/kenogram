@@ -4,6 +4,9 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+- Pin CI and release builds to a supported Go security patch while retaining
+  Go 1.22 as the module compatibility floor, and gate changes and releases on
+  reachable vulnerability analysis.
 - Restart and re-establish services for a stopped authoritative successor during committed-transition recovery.
 - Make confirmed destruction remove every generation in an unresolved transition without first reviving the world.
 - Require proxy process identity and a control round trip before declaring the network door ready.

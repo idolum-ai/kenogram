@@ -61,6 +61,8 @@ jobs:
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
       - name: Full gate
         run: make check
+      - name: Vulnerability reachability
+        run: make vulncheck
       - name: Race detector
         run: make test-race
       - name: Real runtime integration
