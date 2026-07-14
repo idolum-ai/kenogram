@@ -213,7 +213,6 @@ func TestNamespaceHelperCancellationAfterControlMessageReturnsCauseAndClosesRigh
 }
 
 func TestSendConnectionTransfersBidirectionalTCPDescriptorWithoutLeaks(t *testing.T) {
-	baseline := openFDCount(t)
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		if errors.Is(err, syscall.EPERM) {
@@ -221,6 +220,10 @@ func TestSendConnectionTransfersBidirectionalTCPDescriptorWithoutLeaks(t *testin
 		}
 		t.Fatal(err)
 	}
+	defer listener.Close()
+	// Creating the listener initializes Go's process-wide network poller. Keep
+	// the listener open in both observations so its descriptor cancels out.
+	baseline := openFDCount(t)
 	serverDone := make(chan error, 1)
 	go func() {
 		connection, acceptErr := listener.Accept()
@@ -228,18 +231,21 @@ func TestSendConnectionTransfersBidirectionalTCPDescriptorWithoutLeaks(t *testin
 			serverDone <- acceptErr
 			return
 		}
-		defer connection.Close()
-		payload := make([]byte, 4)
-		if _, readErr := io.ReadFull(connection, payload); readErr != nil {
-			serverDone <- readErr
-			return
-		}
-		if string(payload) != "ping" {
-			serverDone <- errors.New("transferred connection changed upload")
-			return
-		}
-		_, writeErr := connection.Write([]byte("pong"))
-		serverDone <- writeErr
+		result := func() error {
+			defer connection.Close()
+			payload := make([]byte, 4)
+			if _, readErr := io.ReadFull(connection, payload); readErr != nil {
+				return readErr
+			}
+			if string(payload) != "ping" {
+				return errors.New("transferred connection changed upload")
+			}
+			_, writeErr := connection.Write([]byte("pong"))
+			return writeErr
+		}()
+		// The nested function closes the accepted descriptor before completion
+		// is observable, so the process-wide descriptor proof cannot race defer.
+		serverDone <- result
 	}()
 	parent, child := controlPair(t)
 	if err := parent.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -274,14 +280,12 @@ func TestSendConnectionTransfersBidirectionalTCPDescriptorWithoutLeaks(t *testin
 	connection.Close()
 	parent.Close()
 	child.Close()
-	listener.Close()
 	if got := openFDCount(t); got != baseline {
 		t.Fatalf("round trip left %d descriptors, want %d", got, baseline)
 	}
 }
 
 func TestSendConnectionReturnsDialDiagnosticWithoutDescriptorLeaks(t *testing.T) {
-	baseline := openFDCount(t)
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		if errors.Is(err, syscall.EPERM) {
@@ -293,6 +297,9 @@ func TestSendConnectionReturnsDialDiagnosticWithoutDescriptorLeaks(t *testing.T)
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// Count after the temporary listener has initialized Go's network poller
+	// and closed, leaving only descriptors that should remain process-wide.
+	baseline := openFDCount(t)
 	parent, child := controlPair(t)
 	if err := parent.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
