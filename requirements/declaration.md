@@ -12,11 +12,13 @@ Unknown keys and tables are errors. Duplicate keys and table declarations are
 errors. Array elements must have one scalar type. Integer overflow, invalid UTF-8,
 trailing material, and malformed escapes are errors with line attribution.
 
-Schema version 1 is the only accepted version. Names and service names are
+Schema version 1 is the only accepted version. World, service, and interface names are
 unique, targets and workspace paths are absolute and clean, reserved paths cannot
 be covered, mount targets cannot overlap, resources are positive, network ports
 are 1–65535, restart is `never`, `on-failure`, or `always`, and declared source
 paths must exist. Secret file sources must not grant group or other permission.
+Interface addresses are canonical `127.0.0.1:port` endpoints: wildcard, host,
+URL, non-loopback, noncanonical, and caller-selected addresses are rejected.
 
 The world `name` is its stable operational address; changing it addresses a
 different world. This namespace rule does not claim that names determine
@@ -33,6 +35,7 @@ behavioral or ontological identity.
 | `[[copies]]` | `source`, `target`, `mode`, `secret` | zero or more |
 | `[[mounts]]` | `source`, `target`, `mode` | zero or more |
 | `[[network.allow]]` | `host`, `port` | zero or more |
+| `[[interfaces]]` | `name`, `address` | zero or more |
 | `[[services]]` | `name`, `command`, `autostart`, `restart` | zero or more |
 
 The parser, not this summary, is authoritative about required keys and defaults.

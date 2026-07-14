@@ -2,6 +2,7 @@ package decl
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -103,6 +104,24 @@ func Validate(d Declaration, declarationDir string) error {
 		seenNetwork[key] = true
 	}
 	seenServices := map[string]bool{}
+	seenInterfaces := map[string]bool{}
+	for i, endpoint := range d.Interfaces {
+		if err := naming.Interface(endpoint.Name); err != nil {
+			return fmt.Errorf("interfaces[%d].name: %w", i, err)
+		}
+		if seenInterfaces[endpoint.Name] {
+			return fmt.Errorf("duplicate interface name %q", endpoint.Name)
+		}
+		seenInterfaces[endpoint.Name] = true
+		host, portText, err := net.SplitHostPort(endpoint.Address)
+		if err != nil || host != "127.0.0.1" {
+			return fmt.Errorf("interfaces[%d].address must be canonical 127.0.0.1:port", i)
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 || net.JoinHostPort(host, strconv.Itoa(port)) != endpoint.Address {
+			return fmt.Errorf("interfaces[%d].address must be canonical 127.0.0.1:port", i)
+		}
+	}
 	for i, service := range d.Services {
 		if err := naming.Service(service.Name); err != nil {
 			return fmt.Errorf("services[%d].name: %w", i, err)

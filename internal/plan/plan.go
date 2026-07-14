@@ -26,6 +26,7 @@ type Plan struct {
 	Copies        []Copy         `json:"copies"`
 	Mounts        []Mount        `json:"mounts"`
 	NetworkAllow  []NetworkAllow `json:"network_allow"`
+	Interfaces    []Interface    `json:"interfaces,omitempty"`
 	Services      []Service      `json:"services"`
 }
 
@@ -55,6 +56,10 @@ type Mount struct {
 type NetworkAllow struct {
 	Host string `json:"host"`
 	Port int64  `json:"port"`
+}
+type Interface struct {
+	Name    string `json:"name"`
+	Address string `json:"address"`
 }
 type Service struct {
 	Name      string   `json:"name"`
@@ -98,7 +103,7 @@ func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) 
 		Resources: Resources{CPUs: d.Resources.CPUs, MemoryBytes: d.Resources.MemoryBytes, PIDs: d.Resources.PIDs},
 		Workspace: append([]string{}, d.Workspace.Paths...),
 		Copies:    make([]Copy, 0, len(d.Copies)), Mounts: make([]Mount, 0, len(d.Mounts)),
-		NetworkAllow: make([]NetworkAllow, 0, len(d.Network.Allow)), Services: make([]Service, 0, len(d.Services)),
+		NetworkAllow: make([]NetworkAllow, 0, len(d.Network.Allow)), Interfaces: make([]Interface, 0, len(d.Interfaces)), Services: make([]Service, 0, len(d.Services)),
 	}
 	for _, c := range d.Copies {
 		source := resolve(dir, c.Source)
@@ -113,6 +118,9 @@ func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) 
 	}
 	for _, a := range d.Network.Allow {
 		p.NetworkAllow = append(p.NetworkAllow, NetworkAllow{Host: a.Host, Port: a.Port})
+	}
+	for _, endpoint := range d.Interfaces {
+		p.Interfaces = append(p.Interfaces, Interface{Name: endpoint.Name, Address: endpoint.Address})
 	}
 	for _, s := range d.Services {
 		p.Services = append(p.Services, Service{Name: s.Name, Command: append([]string{}, s.Command...), Autostart: s.Autostart, Restart: s.Restart})

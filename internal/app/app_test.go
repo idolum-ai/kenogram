@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +24,8 @@ type runtimeRunner struct {
 	network     string
 	mountSource string
 	containers  string
+	planDigest  string
+	declDigest  string
 }
 
 type destroyFailRunner struct{ runtimeRunner }
@@ -96,7 +99,14 @@ func (r *runtimeRunner) Run(_ context.Context, _ string, args ...string) ([]byte
 		if network == "" {
 			network = "none"
 		}
-		return []byte(fmt.Sprintf(`[{"Name":%q,"BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":%q,"io.kenogram.plan-digest":"pd","io.kenogram.declaration-digest":"dd"}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, container, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), strconv.Itoa(generation), network, r.mountSource)), nil
+		planDigest, declDigest := r.planDigest, r.declDigest
+		if planDigest == "" {
+			planDigest = "pd"
+		}
+		if declDigest == "" {
+			declDigest = "dd"
+		}
+		return []byte(fmt.Sprintf(`[{"Name":%q,"BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":%q,"io.kenogram.plan-digest":%q,"io.kenogram.declaration-digest":%q}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, container, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), strconv.Itoa(generation), planDigest, declDigest, network, r.mountSource)), nil
 	}
 	if len(args) > 0 && args[0] == "ps" {
 		if r.containers != "" {
@@ -115,6 +125,7 @@ func (r *runtimeRunner) Interactive(_ context.Context, _ string, args ...string)
 func testBackend(r backend.Runner) *backend.Podman {
 	podman := backend.New(r)
 	podman.ReadProcStatus = func(int) ([]byte, error) { return []byte("Seccomp:\t2\n"), nil }
+	podman.ReadProcessStart = func(int) string { return "test-process-start" }
 	podman.MountIdentity = func(int, string, string) (bool, error) { return true, nil }
 	return podman
 }
@@ -426,6 +437,128 @@ func TestRecoveryPlanDoesNotRereadCopySource(t *testing.T) {
 	}
 	if prepared.Result.Plan.Copies[0].SourceDigest != "content-digest" {
 		t.Fatal("recovery intent changed")
+	}
+}
+
+func TestRecoveryAcceptsLegacyAppliedPlanWithoutInterfacesField(t *testing.T) {
+	result := preparedFixture().Result
+	canonical, err := plan.Canonical(result.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(canonical, []byte(`"interfaces"`)) {
+		t.Fatalf("empty interfaces changed legacy canonical plan: %s", canonical)
+	}
+	result.PlanDigest = DeclarationDigest(canonical)
+	declaration := []byte("legacy declaration")
+	result.DeclarationDigest = DeclarationDigest(declaration)
+	rawPlan, err := encodeRecoveryPlan(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(rawPlan, []byte(`"interfaces"`)) {
+		t.Fatalf("legacy recovery fixture unexpectedly contains interfaces: %s", rawPlan)
+	}
+	state := worldfs.State{PlanDigest: result.PlanDigest, DeclarationDigest: result.DeclarationDigest}
+	if _, err := preparedFromRecovery(declaration, rawPlan, "applied.toml", state); err != nil {
+		t.Fatalf("legacy applied plan rejected after upgrade: %v", err)
+	}
+}
+
+func TestConnectUsesOnlyDeclaredInterfaceOnVerifiedAuthoritativeGeneration(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.EnsureWorkspace("/workspace"); err != nil {
+		t.Fatal(err)
+	}
+	prepared := preparedFixture()
+	prepared.Result.Plan.Interfaces = []plan.Interface{{Name: "ssh", Address: "127.0.0.1:2222"}}
+	canonical, err := plan.Canonical(prepared.Result.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Raw = []byte("retained declaration")
+	prepared.Result.PlanDigest = DeclarationDigest(canonical)
+	prepared.Result.DeclarationDigest = DeclarationDigest(prepared.Raw)
+	rawPlan, err := encodeRecoveryPlan(prepared.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteApplied(prepared.Raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteAppliedPlan(rawPlan); err != nil {
+		t.Fatal(err)
+	}
+	state := worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, Status: "running"}
+	if err := layout.WriteState(state); err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeRunner{mountSource: layout.WorkspacePath("/workspace"), planDigest: state.PlanDigest, declDigest: state.DeclarationDigest}
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close() })
+	called := false
+	podman := testBackend(runner)
+	a := &App{Backend: podman, BaseDir: base, acquireConnection: func(_ context.Context, pid int, processStart, address string, revalidate func() error) (net.Conn, error) {
+		called = true
+		if pid != 123 || processStart != "test-process-start" || address != "127.0.0.1:2222" {
+			t.Fatalf("pid=%d processStart=%q address=%q", pid, processStart, address)
+		}
+		if err := revalidate(); err != nil {
+			return nil, err
+		}
+		return client, nil
+	}}
+	connection, err := a.Connect(context.Background(), "w", "ssh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.Close()
+	if !called {
+		t.Fatal("namespace connection was not acquired")
+	}
+	successor := prepared.Result
+	successor.Plan.Interfaces[0].Address = "127.0.0.1:3333"
+	successorCanonical, err := plan.Canonical(successor.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor.PlanDigest = DeclarationDigest(successorCanonical)
+	successorRaw, err := encodeRecoveryPlan(successor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteTransition(worldfs.Transition{Version: 1, Phase: "rollback", Prior: &state, PriorDeclaration: prepared.Raw, PriorPlan: rawPlan, Successor: worldfs.State{Name: "w", Generation: 2, Container: "kenogram-w-g2", PlanDigest: successor.PlanDigest, DeclarationDigest: successor.DeclarationDigest}, SuccessorDeclaration: prepared.Raw, SuccessorPlan: successorRaw}); err != nil {
+		t.Fatal(err)
+	}
+	connection, err = a.Connect(context.Background(), "w", "ssh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.Close()
+	if _, err := a.Connect(context.Background(), "w", "undeclared"); err == nil || !strings.Contains(err.Error(), "not declared") {
+		t.Fatalf("undeclared interface: %v", err)
+	}
+	identityReads := 0
+	podman.ReadProcessStart = func(int) string {
+		identityReads++
+		if identityReads <= 2 {
+			return "test-process-start"
+		}
+		return "replacement-process-start"
+	}
+	if _, err := a.Connect(context.Background(), "w", "ssh"); err == nil || !strings.Contains(err.Error(), "identity changed after namespace pin") {
+		t.Fatalf("changed runtime identity: %v", err)
+	}
+}
+
+func TestConnectMissingWorldHasAnOperatorFacingError(t *testing.T) {
+	a := &App{BaseDir: t.TempDir()}
+	if _, err := a.Connect(context.Background(), "absent", "ssh"); err == nil || err.Error() != `world "absent" does not exist` {
+		t.Fatalf("missing world: %v", err)
 	}
 }
 func TestUpRejectsBadRuntimeEvidence(t *testing.T) {

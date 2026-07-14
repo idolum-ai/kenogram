@@ -10,6 +10,9 @@ plan; changing configuration bytes changes its exact fingerprint. Live mounts
 and carried workspace are evidenced separately because their bytes intentionally
 drift.
 
+Named loopback interfaces are semantic plan fields. Changing a name or address
+therefore changes the plan digest and requires ordinary generation replacement.
+
 The plan digest is lowercase SHA-256 over the canonical semantic JSON followed by
 one newline. The declaration digest is lowercase SHA-256 over the exact input
 bytes. Both are printed by dry-run and present in JSON output.

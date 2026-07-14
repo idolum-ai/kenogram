@@ -136,6 +136,24 @@ func decodeDeclaration(root table) (Declaration, error) {
 		}
 	}
 
+	interfaceItems, err := r.children("interfaces")
+	if err != nil {
+		return d, err
+	}
+	for _, item := range interfaceItems {
+		var endpoint Interface
+		if endpoint.Name, err = item.string("name", true); err != nil {
+			return d, err
+		}
+		if endpoint.Address, err = item.string("address", true); err != nil {
+			return d, err
+		}
+		if err = item.done(); err != nil {
+			return d, err
+		}
+		d.Interfaces = append(d.Interfaces, endpoint)
+	}
+
 	serviceItems, err := r.children("services")
 	if err != nil {
 		return d, err

@@ -236,6 +236,7 @@ func crashPrepared(marker string, pids int64) Prepared {
 func crashBackend(runner *crashRunner) *backend.Podman {
 	podman := backend.New(runner)
 	podman.ReadProcStatus = func(int) ([]byte, error) { return []byte("Seccomp:\t2\n"), nil }
+	podman.ReadProcessStart = func(int) string { return "test-process-start" }
 	podman.MountIdentity = func(int, string, string) (bool, error) { return true, nil }
 	return podman
 }

@@ -19,6 +19,9 @@ func World(value string) error { return validate("world", value) }
 // Service validates a service name before it is used as a generated filename.
 func Service(value string) error { return validate("service", value) }
 
+// Interface validates an operator-facing interface name.
+func Interface(value string) error { return validate("interface", value) }
+
 // Host validates an exact, non-wildcard network name or IP address.
 func Host(value string) error {
 	if value == "" {

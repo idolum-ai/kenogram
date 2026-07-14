@@ -31,9 +31,9 @@ evaluation but outside the supported Linux runtime promise.
 | Contract | Strongest automated evidence | Known limit / next proof | Release posture |
 |---|---|---|---|
 | Declaration and plan | Unit, parser seeds, scheduled fuzzing, canonical digest, strict names, and staged-byte recheck | Snapshot-grade handling of an adversarially mutating source tree | Accepted for v0.x |
-| Operations | Signal-aware CLI, complete host doctor, transition recovery tests, ownership-aware E2E image cleanup, rootless-vfs capacity policy, Engram v0.3.0 lifecycle E2E, and OpenClaw/Hermes compositions | Exhaustive CLI fault matrix and concurrent mutation stress | Before stable |
+| Operations | Signal-aware CLI, complete host doctor, transition recovery tests, ownership-aware E2E image cleanup, rootless-vfs capacity policy, SSH loopback composition, Engram v0.3.0 lifecycle E2E, and OpenClaw/Hermes compositions | Exhaustive CLI fault matrix and concurrent mutation stress | Before stable |
 | Security | Exact Podman argv/mount-inode/seccomp evidence, rootless preflight, secret failure canaries, OpenClaw/Hermes absence checks, runtime-socket E2E | Seccomp profile identity and a supported Podman/kernel matrix | Before stable |
-| Network | Multi-megabyte CONNECT, per-connection resolution, removal/expiry closure, declaration reconciliation, identity-bound proxy readiness, Git/TLS fixture, and rootless integration | Full ten-invariant replay after every adoption path | Before stable |
+| Network | Multi-megabyte CONNECT, per-connection resolution, removal/expiry closure, declaration reconciliation, identity-bound proxy readiness, Git/TLS fixture, declared loopback SSH without a host listener, and rootless integration | Full ten-invariant replay after every adoption path | Before stable |
 | Lifecycle | Durable rollback/commit transition, persisted-runtime 14-boundary SIGKILL recovery-only matrix, stopped-commit restart, terminal transition destruction, replay-safe service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Syscall-granular power-loss testing and exhaustive non-`up` action failpoints | Before stable |
 | History | Tamper/truncated-tail unit tests plus E2E tombstone outcomes | Power-loss testing on multiple filesystems | Before stable |
 | Experimental Apple transport | Canonical shell-inert argv envelope, explicit stdin/TTY flags, remote exit-status preservation, graceful signal forwarding, Darwin/arm64 cross-build, and native macOS launcher smoke test | Real Apple machine argv/TTY/signal proof, nested rootless Podman, and the full lifecycle/network matrix | Experimental |
@@ -43,6 +43,8 @@ evaluation but outside the supported Linux runtime promise.
 - `make test` runs unit, contract, and parser fuzz-seed tests.
 - `make test-evidence` retains structured test events and a coverage profile.
 - `make integration` runs the rootless Podman boundary contract and is mandatory in CI.
+- `make e2e-ssh` proves a key-authenticated SSH stream to a declared world-
+  loopback interface without a published host port.
 - `make e2e-release` proves the checksum-pinned Engram `v0.3.0` lifecycle.
 - `make e2e-openclaw` proves checksum-pinned OpenClaw `2026.6.11` isolation and TUI use.
 - `make e2e-composition` proves fake Telegram text through Engram and the
@@ -50,7 +52,7 @@ evaluation but outside the supported Linux runtime promise.
 - `make e2e-hermes` proves checksum-pinned Hermes Agent `v2026.7.7.2` isolation, native fake
   Telegram, lifecycle, and TUI use.
 - `make e2e-hermes-composition` proves fake Telegram text through Engram and the
-  isolated Hermes TUI, plus attachment ingestion into its workspace; `make e2e` runs all five.
+  isolated Hermes TUI, plus attachment ingestion into its workspace; `make e2e` runs all six.
 - `make e2e-telegram-canary` is an operator-assisted, protected-environment
   proof of the real Telegram path and is never a pull-request gate.
 - Container-heavy E2Es lease random world names and snapshot image references
