@@ -72,7 +72,7 @@ package-manager builds are byte-identical.
 
 ## Repository settings
 
-Before the first release, maintainers must verify:
+Maintainers must verify and preserve these settings for every release:
 
 - protected `main` requires current CI and review;
 - the `release` Actions environment requires maintainer approval;

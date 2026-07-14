@@ -27,11 +27,12 @@ tool and storage set in [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 ## Prepare the reference world
 
-Set the release you installed. Download and inspect its standalone preparation
-script:
+The commands below use the first release,
+[`v0.1.0`](https://github.com/idolum-ai/kenogram/releases/tag/v0.1.0). Download
+and inspect its standalone preparation script:
 
 ```sh
-version=vX.Y.Z
+version=v0.1.0
 curl --fail --location --proto '=https' --tlsv1.2 \
   --output prepare-first-world.sh \
   "https://github.com/idolum-ai/kenogram/releases/download/${version}/prepare-first-world.sh"

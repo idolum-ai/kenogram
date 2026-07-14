@@ -5,29 +5,78 @@
 # Kenogram
 
 Kenogram lets you give an agent a whole small computer without giving it your
-computer. One declaration says what the world contains. Everything inside
-belongs to its inhabitant; everything else is absent.
+computer.
 
-Anything admitted into an AI's context can change what follows. Kenogram
-therefore treats absence—not concealment behind another approval prompt—as the
-first boundary: an undeclared capability should not be present in the agent's
-world at all. Declared worlds still rely on isolation, validation, resource and
-network limits, provenance, and recovery; absence does not replace those
-controls.
+Kenogram materializes rootless Linux worlds for AI agents from host-authored
+declarations. A declaration selects the image and admits host files, mounts,
+secrets, resource limits, durable TCP destinations, and named loopback
+interfaces. Kenogram adds no ambient host filesystem access; the inhabitant may
+freely use what the image and declaration make available.
 
-Idolum's projects repeatedly separate speech from authority, representation
-from truth, and capability from ambient context. Kenogram gives that posture an
-environmental form. An agent can work freely inside a faithful world, while the
-human retains authority over what may exist in that world at all.
+Anything admitted into an AI's context can change what follows. Ambient
+capabilities determine what that changed agent can affect. Kenogram limits
+those consequences structurally: ambient capability is absent unless the host
+operator admits it explicitly. Requests expressed through terminal interaction
+do not change world authority. Applying a declaration grants durable authority;
+`allow` can grant time-bounded TCP egress.
 
-## Install and check the host
+Kenogram is for developers, security teams, and platform operators who want a
+tool-using agent to have a useful environment without inheriting the
+operator's ambient computer.
 
-Kenogram's released binaries support Linux on amd64 and arm64. Download the
-standalone installer for the release you intend to trust, inspect it, then run
-it:
+## Security boundary
+
+Kenogram is an execution boundary for untrusted agent processes, not a prompt
+filter. It makes admitted host authority explicit and inspects the resulting
+runtime before starting declared services.
+
+| Condition | Enforced observation |
+|---|---|
+| Host access | Undeclared mounts are rejected. The exact declared mount set and bind-source filesystem identity are verified, and no host container-runtime control socket is mounted. |
+| Network | A base world is loopback-only, with no working resolver or exterior TCP/UDP route. Declared or temporarily granted TCP destinations pass through a host-held exact-destination proxy; direct IP dialing remains unroutable. |
+| Runtime | Rootless execution, private network/PID/IPC/UTS namespaces, an empty capability bounding set, `no-new-privileges`, active seccomp, no added devices, and CPU/memory/PID limits are inspected before services start. |
+| Authority | The host-authored declaration admits durable capabilities; an explicit, time-bounded `allow` command may grant temporary TCP egress. A named operator interface reaches one declared world-loopback service without publishing a host port. |
+| Replacement | A successor is inspected before it is recorded as applied. Durable transition state identifies the authoritative generation after interruption. |
+
+This constrains what a compromised or prompt-contaminated agent can reach. It
+does not detect or prevent prompt injection, protect declared writable mounts
+or secrets from world processes, prevent exfiltration to a destination the
+operator admits, or authenticate, encrypt, authorize, or interpret
+`kenogram connect` traffic. Kenogram relies on the Linux kernel and rootless
+Podman and does not claim to harden a hostile multi-tenant host or independently
+prevent a kernel or runtime escape.
+
+The [security contract](requirements/security.md), [network
+invariants](requirements/network.md), and [evidence and known
+limits](requirements/INDEX.md#evidence-and-known-limits) define the exact
+claim. Kenogram is a composable control within a larger system, not a claim of
+compliance or certification for that system.
+
+## Status and supported runtime
+
+[Kenogram v0.1.0](https://github.com/idolum-ai/kenogram/releases/tag/v0.1.0)
+is evaluation software and does not make a production-stability claim. Release
+binaries support Linux on amd64 and arm64. The runtime exercised in mandatory
+CI requires rootless Podman on cgroups v2, `nsenter`, and subordinate UID/GID
+ranges for the current user. Kenogram fails closed rather than weakening the
+boundary when those prerequisites are absent.
+
+The [experimental Apple container-machine
+launcher](docs/apple-container-machine.md) transports explicit operations into
+an operator-managed Linux machine. It is not macOS runtime support; the real
+Apple-machine lifecycle and network evidence remains open.
+
+The Kenogram binary has no third-party Go modules. Operation still depends on
+the Linux kernel, rootless Podman, cgroups v2, and `nsenter`.
+
+## Install and start one world
+
+Install the first release,
+[`v0.1.0`](https://github.com/idolum-ai/kenogram/releases/tag/v0.1.0), after
+inspecting its standalone installer:
 
 ```sh
-version=vX.Y.Z
+version=v0.1.0
 curl --fail --location --proto '=https' --tlsv1.2 \
   --output install-release.sh \
   "https://github.com/idolum-ai/kenogram/releases/download/${version}/install-release.sh"
@@ -37,90 +86,102 @@ export PATH="${HOME}/.local/bin:${PATH}"
 kenogram doctor
 ```
 
-The installer verifies the release checksum and embedded version before
-installing to `~/.local/bin`. `doctor` does not mutate Kenogram worlds or
-durable state and reports every missing host prerequisite in one run; Podman
-may initialize its own rootless runtime metadata while answering the preflight.
-`doctor --json` is additive automation output: consume checks by `name`, not
-array position. It does not inspect a future world image: every image still
-needs `/usr/bin/tail`, `/bin/sh`, the declared user, and its declared service binaries. Normal
-`kenogram enter` additionally expects `/usr/bin/tmux` and a `main` session;
-`enter --repair` needs only `/bin/sh`.
+The installer checks the release checksum and embedded version before an
+atomic installation under `~/.local/bin`. Checksums detect transfer corruption
+and inconsistent assets within one GitHub release; they are not signatures or
+independent provenance. `kenogram doctor` does not mutate Kenogram worlds or
+durable state and reports every missing host prerequisite in one run, although
+Podman may initialize its own rootless metadata during preflight.
 
-To build, enter, restart, and destroy a minimal live world, follow the
-[first-world guide](docs/getting-started.md). It includes the rootless host
-preflight and uses the release-covered `prepare-first-world.sh` to produce a
-small host-bound image and apply-ready declaration.
-
-After authoring and dry-running a real declaration, the lifecycle follows this
-illustrative sequence:
+The [first-world guide](docs/getting-started.md) builds a small host-bound image
+from release-covered source and exercises the complete lifecycle:
 
 ```sh
+kenogram up --dry-run ./world.toml
 kenogram up --yes ./world.toml
-kenogram status engineering
-kenogram enter engineering       # or: kenogram enter --repair engineering
-kenogram down engineering
-kenogram up --yes ./world.toml   # restart or reconcile
-kenogram destroy --yes engineering
+kenogram status first
+kenogram enter first
+kenogram down first
+kenogram up --yes ./world.toml
+kenogram destroy --yes first
 ```
 
-Replace `engineering` with the declaration's name. Durable state lives
-under `$XDG_DATA_HOME/kenogram/worlds` (normally
-`~/.local/share/kenogram/worlds`); tests and automation may set
-`KENOGRAM_STATE_DIR`.
+## Proof, not promises
 
-The contracts in [`requirements/`](requirements/) are binding. Their
-[evidence table](requirements/INDEX.md#evidence-and-known-limits) separates
-what is proven from the next proof and says whether each limit constrains v0.x,
-a future stable claim, or an experimental surface. See the [declaration
-schema](requirements/declaration.md), [operations and
-recovery](requirements/operations.md), and [contributor contract](CONTRIBUTING.md).
+Requirements are binding contracts; tests are evidence. The [evidence
+table](requirements/INDEX.md#evidence-and-known-limits) separates what is
+exercised today from the next proof and labels each open boundary as accepted
+for v0.x, required before a stable claim, or experimental.
+
+| Boundary | Evidence earned | Explicit limit |
+|---|---|---|
+| [Runtime isolation](requirements/security.md) | Mandatory rootless-Podman CI inspects namespaces, mount identity, seccomp, resource limits, and absence of the runtime socket. | No supported Podman/kernel matrix or seccomp-profile identity yet. |
+| [Network absence](requirements/network.md) | Real-runtime CI exercises loopback-only networking, failed direct TCP/UDP/DNS, exact proxy admission, revoke/expiry, proxy-death closure, and a declared SSH interface without a host listener. | The full ten-invariant replay after every adoption path remains open. |
+| [Replacement recovery](requirements/lifecycle.md) | A fresh process recovers persisted runtime state across fourteen injected `SIGKILL` boundaries. | Process-crash evidence is not syscall-granular power-loss proof across filesystems. |
+| [Compositions](docs/compositions/README.md) | Pinned Engram, OpenClaw, and Hermes artifacts and a real OpenSSH client/server path are exercised end to end. | Model and Telegram services are deterministic local fixtures in pull-request CI; real Telegram is a protected operator-assisted canary. |
+
+These are automated, replayable compatibility and boundary observations, not
+endorsements, universal compatibility claims, or a production-stability claim.
+
+## Choose an evaluation path
+
+- **Evaluate the boundary:** build and replace a minimal world with the
+  [first-world guide](docs/getting-started.md).
+- **Use an ordinary operator protocol:** reach a declared loopback service
+  without a host listener through the [SSH composition](docs/compositions/ssh.md).
+- **Run an agent composition:** follow the maintained guides for
+  [Engram](docs/compositions/engram.md),
+  [OpenClaw](docs/compositions/openclaw.md), or
+  [Hermes Agent](docs/compositions/hermes-agent.md).
+
+The composition guides state the exact versions exercised, trust and secret
+boundaries, network grants, resource requirements, and differences between
+hermetic CI fixtures and real services.
+
+## Adjacent systems
+
+Kenogram belongs to a growing family of agent execution environments. These
+systems are adjacent rather than interchangeable; the table compares documented
+architectural choices, not overall security or product quality.
+
+Comparison reviewed against the linked vendor documentation on 2026-07-14;
+that documentation remains authoritative.
+
+| System | Runtime boundary | Documented network default | Policy and lifecycle emphasis |
+|---|---|---|---|
+| **Kenogram** | Rootless Podman container sharing the host kernel | Loopback only; no resolver or exterior TCP/UDP route | Host-authored declaration, exact outbound `host:port`, inspected generations, and durable replacement recovery |
+| [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/security/) | Dedicated microVM and private Docker Engine | Default HTTP/HTTPS domain allowlist; other domains and raw TCP, UDP, and ICMP blocked | Local or organization policy, host-side credential injection, and persistent coding-agent workspaces |
+| [E2B](https://e2b.dev/docs/network/internet-access) | Isolated Linux VM | Internet enabled by default; configurable block, IP/CIDR, and domain rules | Cloud API sandboxes, templates, and pause/resume persistence |
+| [Modal Sandboxes](https://modal.com/docs/guide/sandbox-networking) | gVisor by default; [VM runtime](https://modal.com/docs/guide/vm-sandboxes) in beta | Public outbound access by default; block, CIDR, and beta TLS-domain controls | Hosted programmable sandboxes integrated with Modal applications and resources |
+| [Daytona](https://www.daytona.io/docs/en/sandboxes/) | Container, Linux VM, and Windows runtime options | [Tier-dependent policy](https://www.daytona.io/docs/en/network-limits/) with essential services; configurable block, CIDR, and domain rules | API-managed agent computers, resource classes, snapshots, and organization controls |
+
+MicroVM systems provide a separate-kernel boundary that Kenogram does not
+claim. Kenogram instead focuses on a local, host-owned declaration; observable
+absence and exact admission; and evidence that replacement, interruption, and
+reapplication preserve declared authority. Upstream products and defaults
+change, so review their linked documentation before making a deployment or
+procurement decision.
+
+## Why Idolum, and why the name
+
+Idolum separates speech from authority, representation from truth, and
+capability from ambient context. Kenogram gives that posture an environmental
+form: the inhabitant controls its declared world, while only the host operator
+can apply a change to which host capabilities enter it.
 
 The name is a deliberate but limited adaptation of the kenogrammatic lineage
-begun by Gotthard Günther and developed by Rudolf Kaehr and Thomas Mahler: the
-project privileges observable patterns over the identity of their realization,
-without claiming to implement a morphogrammatic calculus.
-[`docs/kenogrammatics.md`](docs/kenogrammatics.md) records that lineage, the
+begun by Gotthard Günther and developed by Rudolf Kaehr and Thomas Mahler. The
+project privileges observable patterns over the identity of their realization;
+it does not claim to implement a morphogrammatic calculus. The
+[kenogrammatics note](docs/kenogrammatics.md) records that lineage, the
 engineering analogy, and its limits.
 
-Kenogram is pre-release and uses the Go standard library exclusively. Its
-proven runtime is Linux; it requires
-rootless Podman on cgroups v2, `nsenter`, and configured subordinate UID/GID
-ranges. `make integration` verifies the real namespace boundary; it is mandatory
-in CI and intentionally fails rather than weakening isolation when those host
-prerequisites are absent.
+## Project paths
 
-An [experimental Apple container-machine launcher](docs/apple-container-machine.md)
-can carry an encoded Linux operation from macOS into an operator-managed
-machine. It preserves argv across Apple's shell-mediated machine command and
-retains the Podman checks rather than treating Apple's container CLI as an
-equivalent isolation backend. The launcher is unit-tested and cross-compiled,
-but still needs real Apple-silicon proof before release support.
-
-`make e2e` runs release-pinned agent proofs and a distro-current SSH
-compatibility proof. Kenogram isolates
-OpenClaw `2026.6.11` with deterministic fake Telegram and model services,
-Hermes Agent `v2026.7.7.2` with the same hermetic boundaries, and accepts the
-Engram `v0.3.0` release. Separate proofs cover each agent's native Telegram
-path and fake-Telegram → Engram → tmux → agent path. Pull requests require
-both isolation and Engram composition proofs.
-
-For the smallest direct composition, a declared world-loopback service can be
-reached without a host port through `kenogram connect`. The [SSH
-guide](docs/compositions/ssh.md) proves that path with ordinary SSH keys while
-keeping SSH out of Kenogram's reference image and core ontology.
-
-The [composition guides](docs/compositions/README.md) turn those proofs into
-operator-facing version, trust, secret, network, and capacity guidance for
-SSH, Engram, OpenClaw, and Hermes Agent.
-
-The operator-assisted `make e2e-telegram-canary` is deliberately separate. It
-uses a protected canary bot to prove the real Telegram path and never runs on a
-pull request. Exact commands and secret requirements are in
-[`CONTRIBUTING.md`](CONTRIBUTING.md#composition-proofs). Security reports belong
-in GitHub's private vulnerability-reporting flow.
-
-Contributors build and replay evidence from a checkout as described in
-[`CONTRIBUTING.md`](CONTRIBUTING.md). The reviewed candidate and immutable
-publication contract is documented in
-[`docs/release-strategy.md`](docs/release-strategy.md).
+- [Requirements and evidence](requirements/)
+- [Declaration schema](requirements/declaration.md)
+- [Operations and recovery](requirements/operations.md)
+- [Contributing and evidence replay](CONTRIBUTING.md)
+- [Security policy and private reporting](.github/SECURITY.md)
+- [Release and immutable-publication contract](docs/release-strategy.md)
+- [MIT License](LICENSE)
