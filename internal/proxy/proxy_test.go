@@ -3,6 +3,8 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +13,42 @@ import (
 	"testing"
 	"time"
 )
+
+func TestControlPingProvesRoundTrip(t *testing.T) {
+	p := New(nil, Options{})
+	client, server := net.Pipe()
+	go p.control(server)
+	defer client.Close()
+	if err := json.NewEncoder(client).Encode(ControlRequest{Operation: "ping"}); err != nil {
+		t.Fatal(err)
+	}
+	var response ControlResponse
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK || response.Error != "" {
+		t.Fatalf("ping response = %#v", response)
+	}
+}
+
+func TestSendControlContextStopsWaitingForUnresponsivePeer(t *testing.T) {
+	client, server := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer server.Close()
+		var request ControlRequest
+		_ = json.NewDecoder(server).Decode(&request)
+		_, _ = io.Copy(io.Discard, server)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := sendControlContext(ctx, client, ControlRequest{Operation: "ping"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("unresponsive peer error = %v", err)
+	}
+	<-done
+}
 
 type resolver struct {
 	mu    sync.Mutex

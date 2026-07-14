@@ -37,6 +37,9 @@ type App struct {
 	// lifecycleCheckpoint is nil in production. Tests use it to terminate a
 	// process at named durable boundaries without changing runtime behavior.
 	lifecycleCheckpoint func(string)
+	// proxyReady is nil in production. Lifecycle crash tests replace the real
+	// control round trip because their proxy process is a persistence fixture.
+	proxyReady func(worldfs.Layout) bool
 }
 
 func New() (*App, error) {
@@ -55,6 +58,18 @@ func (a *App) checkpoint(name string) {
 	if a.lifecycleCheckpoint != nil {
 		a.lifecycleCheckpoint(name)
 	}
+}
+
+func (a *App) proxyIsReady(ctx context.Context, l worldfs.Layout) bool {
+	if a.proxyReady != nil {
+		return a.proxyReady(l)
+	}
+	if !a.proxyAlive(l) {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	return proxy.SendControlContext(probeCtx, l.ProxySocket, proxy.ControlRequest{Operation: "ping"}) == nil
 }
 
 type Prepared struct {
@@ -372,7 +387,7 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 			for _, allowed := range prepared.Result.Plan.NetworkAllow {
 				destinations = append(destinations, proxy.Destination{Host: allowed.Host, Port: int(allowed.Port)})
 			}
-			err = proxy.SendControl(l.ProxySocket, proxy.ControlRequest{Operation: "reconcile", Destinations: destinations})
+			err = proxy.SendControlContext(ctx, l.ProxySocket, proxy.ControlRequest{Operation: "reconcile", Destinations: destinations})
 		}
 		if !a.proxyAlive(l) || err != nil {
 			proxyPID, err = a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
@@ -539,25 +554,39 @@ func (a *App) recoverTransition(ctx context.Context, l worldfs.Layout) error {
 		return fmt.Errorf("committed successor %s is absent; preserving commit transition", transition.Successor.Container)
 	}
 	evidence, inspectErr := a.Backend.Inspect(ctx, transition.Successor.Container)
-	mounts, mountsErr := a.mounts(l, prepared.Result)
 	if inspectErr != nil {
 		return fmt.Errorf("inspect committed successor; preserving commit transition: %w", inspectErr)
 	}
+	restarted := false
+	if !evidence.Running {
+		if err := a.Backend.Start(ctx, transition.Successor.Container); err != nil {
+			return fmt.Errorf("restart committed successor; preserving commit transition: %w", err)
+		}
+		restarted = true
+		evidence, inspectErr = a.Backend.Inspect(ctx, transition.Successor.Container)
+		if inspectErr != nil {
+			return fmt.Errorf("inspect restarted committed successor; preserving commit transition: %w", inspectErr)
+		}
+	}
+	mounts, mountsErr := a.mounts(l, prepared.Result)
 	if mountsErr != nil {
 		return fmt.Errorf("reconstruct committed successor mounts; preserving commit transition: %w", mountsErr)
 	}
 	if verifyErr := a.verifyRuntimeEvidence(evidence, prepared.Result, transition.Successor.Generation, mounts); verifyErr != nil {
 		return fmt.Errorf("verify committed successor; preserving commit transition: %w", verifyErr)
 	}
-	if len(prepared.Result.Plan.NetworkAllow) > 0 && !a.proxyAlive(l) {
+	if len(prepared.Result.Plan.NetworkAllow) > 0 && (restarted || !a.proxyIsReady(ctx, l)) {
 		pid, err := a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
 		if err != nil {
-			return err
+			return fmt.Errorf("restore committed successor proxy; preserving commit transition: %w", err)
 		}
 		transition.Successor.ProxyPID = pid
 		if err := l.WriteTransition(transition); err != nil {
 			return err
 		}
+	}
+	if err := a.startServices(ctx, transition.Successor.Container, prepared.Result.Plan.Services); err != nil {
+		return fmt.Errorf("restore committed successor services; preserving commit transition: %w", err)
 	}
 	if _, err := l.WriteDigest(transition.Successor.Generation, transition.Workspace); err != nil {
 		return err
@@ -1012,20 +1041,25 @@ func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, allows 
 		return 0, err
 	}
 	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(l.ProxySocket); err == nil {
+	for {
+		if a.proxyIsReady(ctx, l) {
 			return processPID, nil
 		}
-		time.Sleep(50 * time.Millisecond)
+		if time.Now().After(deadline) {
+			return 0, errors.Join(fmt.Errorf("proxy did not become ready"), a.stopProxy(l))
+		}
+		select {
+		case <-ctx.Done():
+			return 0, errors.Join(ctx.Err(), a.stopProxy(l))
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
-	_ = syscall.Kill(processPID, syscall.SIGTERM)
-	return 0, fmt.Errorf("proxy did not become ready")
 }
 func netJoin(host string, port int) string { return net.JoinHostPort(host, strconv.Itoa(port)) }
 func (a *App) stopProxy(l worldfs.Layout) error {
 	raw, err := os.ReadFile(l.ProxyPID)
 	if os.IsNotExist(err) {
-		return nil
+		return removeIfExists(l.ProxySocket)
 	}
 	if err != nil {
 		return err
@@ -1121,33 +1155,12 @@ func (a *App) Destroy(ctx context.Context, name string) error {
 		lock.Release()
 		return fmt.Errorf("runtime preflight: %w", err)
 	}
-	if err := a.recoverTransition(ctx, l); err != nil {
-		lock.Release()
-		return fmt.Errorf("recover interrupted transition: %w", err)
-	}
-	s, err := l.ReadState()
+	s, detail, err := a.destroyRuntime(ctx, l)
 	if err != nil {
 		lock.Release()
 		return err
 	}
-	if s.Container != "" {
-		exists, err := a.Backend.Exists(ctx, s.Container)
-		if err != nil {
-			lock.Release()
-			return err
-		}
-		if exists {
-			if err := a.Backend.Destroy(ctx, s.Container); err != nil {
-				lock.Release()
-				return err
-			}
-		}
-	}
-	if err := a.stopProxy(l); err != nil {
-		lock.Release()
-		return err
-	}
-	if _, err := history.Append(l.History, history.Record{Action: "destroy", PlanDigest: s.PlanDigest, DeclarationDigest: s.DeclarationDigest, Outcome: "destroyed"}, a.Now()); err != nil {
+	if _, err := history.Append(l.History, history.Record{Action: "destroy", PlanDigest: s.PlanDigest, DeclarationDigest: s.DeclarationDigest, Outcome: "destroyed", Detail: detail}, a.Now()); err != nil {
 		lock.Release()
 		return err
 	}
@@ -1181,6 +1194,59 @@ func (a *App) Destroy(ctx context.Context, name string) error {
 		}
 	}
 	return syncDirectory(tombstone)
+}
+
+func (a *App) destroyRuntime(ctx context.Context, l worldfs.Layout) (worldfs.State, string, error) {
+	transition, transitionErr := l.ReadTransition()
+	if transitionErr != nil && !os.IsNotExist(transitionErr) {
+		return worldfs.State{}, "", fmt.Errorf("read transition before destroy: %w", transitionErr)
+	}
+
+	states := []worldfs.State{}
+	authoritative := worldfs.State{}
+	detail := ""
+	if transitionErr == nil {
+		current, candidate := transitionAuthority(transition)
+		if current != nil {
+			authoritative = *current
+			states = append(states, *current)
+		}
+		if candidate != nil {
+			states = append(states, *candidate)
+		}
+		if authoritative.Container == "" {
+			authoritative = transition.Successor
+		}
+		detail = "removed unresolved " + transition.Phase + " transition"
+	} else {
+		state, err := l.ReadState()
+		if err != nil {
+			return worldfs.State{}, "", err
+		}
+		authoritative = state
+		states = append(states, state)
+	}
+
+	seen := map[string]bool{}
+	for _, state := range states {
+		if state.Container == "" || seen[state.Container] {
+			continue
+		}
+		seen[state.Container] = true
+		exists, err := a.Backend.Exists(ctx, state.Container)
+		if err != nil {
+			return worldfs.State{}, "", err
+		}
+		if exists {
+			if err := a.Backend.Destroy(ctx, state.Container); err != nil {
+				return worldfs.State{}, "", err
+			}
+		}
+	}
+	if err := a.stopProxy(l); err != nil {
+		return worldfs.State{}, "", err
+	}
+	return authoritative, detail, nil
 }
 
 func syncDirectory(path string) error {

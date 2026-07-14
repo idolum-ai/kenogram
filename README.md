@@ -20,6 +20,10 @@ binary; executables may come from the base or declared copies. Normal
 `kenogram enter` also expects `/usr/bin/tmux` and a `main` session;
 `enter --repair` needs only `/bin/sh`.
 
+To build, enter, restart, and destroy a minimal live world, follow the
+[first-world guide](docs/getting-started.md). It includes the rootless host
+preflight, a small base image, and an apply-ready declaration.
+
 After authoring and dry-running a real declaration, the lifecycle follows this
 illustrative sequence:
 

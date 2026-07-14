@@ -13,7 +13,9 @@ Before the first cutover mutation, `up` fsyncs a transition record that retains
 both declarations and identifies the authoritative recovery direction. Before
 durable successor state is written, that record advances from rollback to
 commit. The next `up` completes either direction idempotently before planning a
-new generation; an unrecoverable observation leaves the record intact.
+new generation. Commit recovery restarts a stopped authoritative successor and
+re-establishes its declared services before completing durable state. An
+unrecoverable observation leaves the record intact.
 
 The transition phase defines authority for `status`, `worlds`, and repair entry.
 During rollback the predecessor remains authoritative and the successor is a
@@ -21,7 +23,8 @@ candidate; during commit the successor is authoritative and the predecessor is
 the displaced candidate. `status` reports both roles and `enter --repair`
 attaches only to the authoritative generation. If rollback has no predecessor,
 Kenogram reports that no authoritative generation exists rather than entering
-the candidate.
+the candidate. Confirmed destruction is terminal: it removes every distinct
+generation named by the transition without first starting either one.
 
 Workspace data is host-side, carried, and represented by a deterministic digest
 tree. Configuration is regenerated from the declaration. Confirmation surfaces
