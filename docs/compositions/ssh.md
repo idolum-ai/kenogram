@@ -46,13 +46,17 @@ DisableForwarding yes
 StrictModes yes
 ```
 
-Add these sections to a first-world declaration. Replace `base` with
-`image_id` and the numeric user with `id -u` and `id -g`:
+In the declaration's existing `[world]` table, replace `base` with `image_id`
+and `user` with the numeric output of `id -u` and `id -g`:
 
 ```toml
-[world]
 base = "sha256:..."
 user = "1000:1000"
+```
+
+Then append the copied files, interface, and service:
+
+```toml
 
 [[copies]]
 source = "./sshd_config"
@@ -94,6 +98,7 @@ ssh -o 'ProxyCommand=kenogram connect first ssh' \
   -F /dev/null -i ./client-key \
   -o BatchMode=yes -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=yes \
+  -o GlobalKnownHostsFile=/dev/null \
   -o HostKeyAlias=first -o UserKnownHostsFile=./known_hosts agent@first
 ```
 
@@ -102,10 +107,12 @@ network namespace, not the host. `connect` rejects addresses supplied by the
 caller, undeclared interface names, stopped worlds, and runtime evidence that
 does not match the authoritative generation.
 
-If the first connection races daemon startup, retry it after a moment. Keep the
-host private key readable only by its operator and dedicate it to one world.
-Anyone who obtains that key can impersonate the world; rotate the key and the
-matching `known_hosts` entry after suspected disclosure or world destruction.
+If the first connection races daemon startup, retry it after a moment. Restrict
+the host-source private key to its operator and dedicate it to one world. The
+copied key is necessarily readable by `sshd` inside that world: `secret = true`
+keeps its bytes out of rendered plans and history, but does not hide them from
+world processes. Treat world compromise as key disclosure, then rotate the key
+and matching `known_hosts` entry after disclosure or world destruction.
 
 `make e2e-ssh` generates fresh client and host keys and proves the real OpenSSH
 client path, a forced terminal on both remote standard streams, wrong client-

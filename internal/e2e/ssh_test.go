@@ -77,9 +77,11 @@ func TestSSHComposition(t *testing.T) {
 	testEnv := append(os.Environ(), "KENOGRAM_STATE_DIR="+stateRoot)
 
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
-	if version, versionErr := runResult(ctx, tmp, testEnv, "ssh", "-V"); versionErr == nil {
-		t.Logf("SSH client: %s", strings.TrimSpace(version))
+	version, versionErr := runResult(ctx, tmp, testEnv, "ssh", "-V")
+	if versionErr != nil || strings.TrimSpace(version) == "" {
+		t.Fatalf("observe SSH client version err=%v output=%q", versionErr, version)
 	}
+	t.Logf("SSH client: %s", strings.TrimSpace(version))
 	assertSSHEffectiveConfig(t, ctx, tmp, testEnv, world, 1)
 	assertNoHostListener(t, port)
 	assertSSHProof(t, ctx, tmp, testEnv, kenogram, world, clientKey, knownHosts, "one")
@@ -215,7 +217,7 @@ func assertSSHProof(t *testing.T, ctx context.Context, dir string, env []string,
 func assertSSHPTYProof(t *testing.T, ctx context.Context, dir string, env []string, kenogram, world, key, knownHosts string) {
 	t.Helper()
 	proxy := kenogram + " connect " + world + " ssh"
-	out, err := runResult(ctx, dir, env, "ssh", "-tt", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile="+knownHosts, "-o", "HostKeyAlias="+world, "-o", "ProxyCommand="+proxy, "-i", key, "agent@"+world, "test -t 0 && test -t 1 && printf 'KENOGRAM_SSH_TTY_PROOF\\n'")
+	out, err := runResult(ctx, dir, env, "ssh", "-tt", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile="+knownHosts, "-o", "GlobalKnownHostsFile=/dev/null", "-o", "HostKeyAlias="+world, "-o", "ProxyCommand="+proxy, "-i", key, "agent@"+world, "test -t 0 && test -t 1 && printf 'KENOGRAM_SSH_TTY_PROOF\\n'")
 	if err != nil || !strings.Contains(out, "KENOGRAM_SSH_TTY_PROOF") {
 		t.Fatalf("SSH PTY proof err=%v output=%q", err, out)
 	}
@@ -229,14 +231,16 @@ func assertSSHEffectiveConfig(t *testing.T, ctx context.Context, dir string, env
 			t.Fatalf("effective sshd configuration lacks %q:\n%s", want, out)
 		}
 	}
-	if version, err := runResult(ctx, dir, env, "podman", "exec", containerName(world, generation), "/usr/sbin/sshd", "-V"); err == nil {
-		t.Logf("SSH server: %s", strings.TrimSpace(version))
+	version, err := runResult(ctx, dir, env, "podman", "exec", containerName(world, generation), "/usr/sbin/sshd", "-V")
+	if err != nil || strings.TrimSpace(version) == "" {
+		t.Fatalf("observe SSH server version err=%v output=%q", err, version)
 	}
+	t.Logf("SSH server: %s", strings.TrimSpace(version))
 }
 
 func runSSH(ctx context.Context, dir string, env []string, kenogram, world, key, knownHosts string) (string, error) {
 	proxy := kenogram + " connect " + world + " ssh"
-	return runResult(ctx, dir, env, "ssh", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile="+knownHosts, "-o", "HostKeyAlias="+world, "-o", "ProxyCommand="+proxy, "-i", key, "agent@"+world, "printf '"+sshProof+":'; cat /etc/ssh-revision")
+	return runResult(ctx, dir, env, "ssh", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile="+knownHosts, "-o", "GlobalKnownHostsFile=/dev/null", "-o", "HostKeyAlias="+world, "-o", "ProxyCommand="+proxy, "-i", key, "agent@"+world, "printf '"+sshProof+":'; cat /etc/ssh-revision")
 }
 
 func unusedLoopbackPort(t *testing.T) int {

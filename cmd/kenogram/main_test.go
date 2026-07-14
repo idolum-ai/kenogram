@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -207,11 +208,14 @@ func TestRelayConnectionPreservesUploadAfterServerHalfClosesOutput(t *testing.T)
 
 	inputReader, inputWriter := io.Pipe()
 	var output bytes.Buffer
+	outputReady := make(chan struct{})
+	notifyingOutput := &notifyingWriter{writer: &output, ready: outputReady}
 	relayDone := make(chan error, 1)
-	go func() { relayDone <- relayConnection(context.Background(), inputReader, &output, client) }()
-	waitForOutput := time.Now().Add(time.Second)
-	for output.String() != "ready" && time.Now().Before(waitForOutput) {
-		time.Sleep(time.Millisecond)
+	go func() { relayDone <- relayConnection(context.Background(), inputReader, notifyingOutput, client) }()
+	select {
+	case <-outputReady:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for server output")
 	}
 	if output.String() != "ready" {
 		t.Fatalf("server output = %q", output.String())
@@ -228,6 +232,20 @@ func TestRelayConnectionPreservesUploadAfterServerHalfClosesOutput(t *testing.T)
 	if err := <-serverDone; err != nil {
 		t.Fatal(err)
 	}
+}
+
+type notifyingWriter struct {
+	writer io.Writer
+	ready  chan struct{}
+	once   sync.Once
+}
+
+func (w *notifyingWriter) Write(payload []byte) (int, error) {
+	n, err := w.writer.Write(payload)
+	if n > 0 {
+		w.once.Do(func() { close(w.ready) })
+	}
+	return n, err
 }
 
 func TestDoctorReportsEveryObservationInTextAndJSON(t *testing.T) {

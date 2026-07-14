@@ -72,6 +72,10 @@ func AcquireConnection(ctx context.Context, pid int, processStart, address strin
 	command.ExtraFiles = []*os.File{child, userNS, networkNS}
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
+	return runNamespaceConnectionHelper(helperContext, command, parent, child, &stderr)
+}
+
+func runNamespaceConnectionHelper(ctx context.Context, command *exec.Cmd, parent *net.UnixConn, child *os.File, stderr *bytes.Buffer) (net.Conn, error) {
 	if err := command.Start(); err != nil {
 		return nil, fmt.Errorf("start namespace connection helper: %w", err)
 	}
@@ -88,13 +92,19 @@ func AcquireConnection(ctx context.Context, pid int, processStart, address strin
 	case message = <-received:
 		select {
 		case waitErr = <-waited:
-		case <-helperContext.Done():
+		case <-ctx.Done():
 			_ = command.Process.Kill()
 			waitErr = <-waited
 			closeReceivedDescriptors(message.control)
-			return nil, context.Cause(helperContext)
+			return nil, context.Cause(ctx)
 		}
 	case waitErr = <-waited:
+		if cause := context.Cause(ctx); cause != nil {
+			_ = parent.Close()
+			message = <-received
+			closeReceivedDescriptors(message.control)
+			return nil, cause
+		}
 		if waitErr != nil {
 			_ = parent.Close()
 			message = <-received
@@ -102,13 +112,13 @@ func AcquireConnection(ctx context.Context, pid int, processStart, address strin
 			return nil, namespaceHelperError(waitErr, stderr.String(), message.payload)
 		}
 		message = <-received
-	case <-helperContext.Done():
+	case <-ctx.Done():
 		_ = parent.Close()
 		_ = command.Process.Kill()
 		waitErr = <-waited
 		message = <-received
 		closeReceivedDescriptors(message.control)
-		return nil, context.Cause(helperContext)
+		return nil, context.Cause(ctx)
 	}
 	if message.err != nil {
 		closeReceivedDescriptors(message.control)
@@ -143,6 +153,12 @@ func receiveControl(connection *net.UnixConn) controlMessage {
 	})
 	if message.err == nil && err != nil {
 		message.err = err
+	}
+	if n < 0 {
+		n = 0
+	}
+	if controlN < 0 {
+		controlN = 0
 	}
 	message.payload = message.payload[:n]
 	message.control = message.control[:controlN]
