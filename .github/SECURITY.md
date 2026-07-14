@@ -2,9 +2,11 @@
 
 ## Supported versions
 
-Before the first Kenogram release, security fixes are made on `main`. During
-v0.x, only the latest published release receives security fixes. Older v0.x
-releases are unsupported; users may need to upgrade to receive a fix.
+During v0.x, only the latest published release receives security fixes. The
+current supported release is
+[`v0.1.0`](https://github.com/idolum-ai/kenogram/releases/tag/v0.1.0). Older
+v0.x releases are unsupported; users may need to upgrade to receive a fix.
+`main` is the development branch, not a supported release.
 
 Kenogram does not currently promise acknowledgement or remediation service
 levels. Confirmed vulnerabilities affecting the supported version are tracked

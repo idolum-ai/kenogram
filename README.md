@@ -54,12 +54,12 @@ compliance or certification for that system.
 
 ## Status and supported runtime
 
-Kenogram has not published its first release. The planned v0.x artifacts are
-evaluation software and do not make a production-stability claim. Release
-binaries will target Linux on amd64 and arm64. The runtime exercised in
-mandatory CI requires rootless Podman on cgroups v2, `nsenter`, and subordinate
-UID/GID ranges for the current user. Kenogram fails closed rather than
-weakening the boundary when those prerequisites are absent.
+[Kenogram v0.1.0](https://github.com/idolum-ai/kenogram/releases/tag/v0.1.0)
+is evaluation software and does not make a production-stability claim. Release
+binaries support Linux on amd64 and arm64. The runtime exercised in mandatory
+CI requires rootless Podman on cgroups v2, `nsenter`, and subordinate UID/GID
+ranges for the current user. Kenogram fails closed rather than weakening the
+boundary when those prerequisites are absent.
 
 The [experimental Apple container-machine
 launcher](docs/apple-container-machine.md) transports explicit operations into
@@ -71,12 +71,12 @@ the Linux kernel, rootless Podman, cgroups v2, and `nsenter`.
 
 ## Install and start one world
 
-After a release is published, choose the tag you intend to trust from [Kenogram
-Releases](https://github.com/idolum-ai/kenogram/releases), inspect its
-standalone installer, then run it:
+Install the first release,
+[`v0.1.0`](https://github.com/idolum-ai/kenogram/releases/tag/v0.1.0), after
+inspecting its standalone installer:
 
 ```sh
-version=vX.Y.Z
+version=v0.1.0
 curl --fail --location --proto '=https' --tlsv1.2 \
   --output install-release.sh \
   "https://github.com/idolum-ai/kenogram/releases/download/${version}/install-release.sh"
