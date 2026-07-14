@@ -11,6 +11,7 @@ type Declaration struct {
 	Copies        []Copy
 	Mounts        []Mount
 	Network       Network
+	Interfaces    []Interface
 	Services      []Service
 }
 
@@ -51,6 +52,13 @@ type Network struct {
 type NetworkAllow struct {
 	Host string
 	Port int64
+}
+
+// Interface names an operator-facing byte stream whose listener remains on
+// loopback inside the world's otherwise isolated network namespace.
+type Interface struct {
+	Name    string
+	Address string
 }
 
 type Service struct {

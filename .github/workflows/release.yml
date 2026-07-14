@@ -27,7 +27,7 @@ jobs:
       RELEASE_TITLE: ${{ github.event.pull_request.title }}
       RELEASE_URL: ${{ github.event.pull_request.html_url }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -100,7 +100,7 @@ jobs:
       SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
       TAG: ${{ needs.build.outputs.tag }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
           ref: ${{ needs.build.outputs.source_sha }}
@@ -121,7 +121,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          expected_assets="$(printf '%s\n' checksums.txt install-release.sh "kenogram-${TAG}-linux-amd64.tar.gz" "kenogram-${TAG}-linux-arm64.tar.gz" prepare-first-world.sh reference-world.Containerfile)"
+          expected_assets="$(printf '%s\n' checksums.txt install-release.sh "kenogram-${TAG}-linux-amd64.tar.gz" "kenogram-${TAG}-linux-arm64.tar.gz" prepare-first-world.sh reference-world.Containerfile ssh-world.Containerfile)"
           verify_release() {
             [[ "$(gh release view "${TAG}" --json name --jq .name)" = "${TAG}" ]] || return 1
             [[ "$(gh release view "${TAG}" --json body --jq .body)" = "$(cat release-notes.md)" ]] || return 1

@@ -26,6 +26,11 @@ limits before any service starts. The runtime socket is never mounted. Kenogram 
 kernel, rootless runtime, and its own correctness; declared rw mounts and secrets
 remain world-owned input by design.
 
+Named interfaces are trusted host-operator capability. Kenogram verifies the
+declaration and generation but does not authenticate, encrypt, authorize, or
+interpret relayed bytes; the composed protocol must do so. An interface is not
+an input-sanitization or prompt-contamination boundary.
+
 ## Trust boundary
 
 The host operator and host-authored declaration are trusted authority. World

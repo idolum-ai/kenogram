@@ -14,6 +14,7 @@ also reports the byte-sensitive declaration digest.
 | `down <world>` | stop the active generation | yes |
 | `destroy --yes <world>` | remove all recorded generations and tombstone history | yes |
 | `enter [--repair] <world>` | attach to the world | world processes may |
+| `connect <world> <interface>` | relay stdin/stdout to one declared loopback stream | world processes may |
 | `status <world>` / `worlds` | report recorded and observed state | no |
 | `allow … --for <duration>` | grant temporary destination access | yes |
 | `revoke <world> <destination>` | remove access and close admitted connections | yes |
@@ -49,6 +50,13 @@ destinations and clears temporary grants; process liveness alone is not policy
 evidence. Destinations accepted by `allow` and `revoke` use canonical
 `host:port` syntax, including brackets around IPv6 addresses, with no URL
 userinfo, path, query, or fragment.
+
+`connect` writes no framing or status text to stdout. It validates the applied
+authoritative plan and exact runtime evidence under the world lock, acquires a
+connected descriptor inside that generation's user and network namespaces,
+then releases the lock before relaying bytes. It accepts a declared name only;
+the caller cannot supply a socket address. Errors go to stderr. On macOS the
+existing container-machine launcher carries the operation into Linux.
 
 `allow`, `revoke`, and `repair-history` reject mutation while a durable
 transition is unresolved. `up` and `down` first converge the recorded authority;

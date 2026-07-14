@@ -57,10 +57,12 @@ func ProcessStart(pid int) string {
 	if err != nil {
 		return ""
 	}
-	return processStartFromStat(string(raw))
+	return ProcessStartFromStat(string(raw))
 }
 
-func processStartFromStat(text string) string {
+// ProcessStartFromStat parses a Linux proc stat record without assuming that
+// the parenthesized command contains no spaces or closing parentheses.
+func ProcessStartFromStat(text string) string {
 	end := strings.LastIndex(text, ")")
 	if end < 0 {
 		return ""

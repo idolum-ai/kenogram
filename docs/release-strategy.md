@@ -46,6 +46,7 @@ Kenogram is Linux-only. Each release contains:
 - `install-release.sh`
 - `prepare-first-world.sh`
 - `reference-world.Containerfile`
+- `ssh-world.Containerfile`
 - `checksums.txt`
 
 Every archive contains `kenogram`, `README.md`, and `LICENSE`. Binaries are
@@ -53,7 +54,7 @@ static, built with `-trimpath`, and report their version, source commit, build
 date, and Go version through `kenogram version`. Archives use source-commit time
 and normalized ownership for reproducibility.
 
-`checksums.txt` covers both archives and all three standalone onboarding
+`checksums.txt` covers both archives and all four standalone onboarding
 assets. Checksums detect corruption or asset substitution when the checksum
 file is obtained from the same release. They are not code signing or
 independent provenance, and this process does not claim either.
@@ -90,7 +91,7 @@ settings are the enforcement boundary after publication.
 - [ ] Compatibility, migration, and known limits are explicit.
 - [ ] `make check`, `make test-race`, and `make integration` pass.
 - [ ] Both Linux candidate archives exist and report the intended identity.
-- [ ] `checksums.txt` covers exactly both archives and the three standalone onboarding assets.
+- [ ] `checksums.txt` covers exactly both archives and the four standalone onboarding assets.
 - [ ] No declaration, credential, state, transcript, or runtime artifact ships.
 - [ ] Protected environment, immutable releases, and tag rules are enabled.
 

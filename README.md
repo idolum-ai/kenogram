@@ -97,16 +97,22 @@ retains the Podman checks rather than treating Apple's container CLI as an
 equivalent isolation backend. The launcher is unit-tested and cross-compiled,
 but still needs real Apple-silicon proof before release support.
 
-`make e2e` runs the release-pinned composition proofs. Kenogram isolates
+`make e2e` runs release-pinned agent proofs and a distro-current SSH
+compatibility proof. Kenogram isolates
 OpenClaw `2026.6.11` with deterministic fake Telegram and model services,
 Hermes Agent `v2026.7.7.2` with the same hermetic boundaries, and accepts the
 Engram `v0.3.0` release. Separate proofs cover each agent's native Telegram
 path and fake-Telegram → Engram → tmux → agent path. Pull requests require
 both isolation and Engram composition proofs.
 
+For the smallest direct composition, a declared world-loopback service can be
+reached without a host port through `kenogram connect`. The [SSH
+guide](docs/compositions/ssh.md) proves that path with ordinary SSH keys while
+keeping SSH out of Kenogram's reference image and core ontology.
+
 The [composition guides](docs/compositions/README.md) turn those proofs into
 operator-facing version, trust, secret, network, and capacity guidance for
-Engram, OpenClaw, and Hermes Agent.
+SSH, Engram, OpenClaw, and Hermes Agent.
 
 The operator-assisted `make e2e-telegram-canary` is deliberately separate. It
 uses a protected canary bot to prove the real Telegram path and never runs on a

@@ -116,6 +116,7 @@ func TestAppleMachineTTYPolicyPreservesMachineReadableOutput(t *testing.T) {
 		{name: "confirmed up", args: []string{"up", "--yes", "world.toml"}},
 		{name: "dry run", args: []string{"up", "--dry-run", "world.toml"}},
 		{name: "JSON status", args: []string{"status", "--json", "world"}},
+		{name: "connect stream", args: []string{"connect", "world", "ssh"}},
 		{name: "enter help", args: []string{"enter", "--help"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

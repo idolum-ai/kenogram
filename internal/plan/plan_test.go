@@ -67,6 +67,29 @@ func TestBuildDoesNotWarnForExactLocalImageID(t *testing.T) {
 	}
 }
 
+func TestInterfaceIsRenderedAndChangesSemanticIdentity(t *testing.T) {
+	d, path, data := fixture(t, "")
+	without, err := Build(d, path, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Interfaces = []decl.Interface{{Name: "ssh", Address: "127.0.0.1:2222"}}
+	with, err := Build(d, path, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if with.PlanDigest == without.PlanDigest {
+		t.Fatal("declared interface did not change plan identity")
+	}
+	var output bytes.Buffer
+	if err := RenderText(&output, with); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "interface: ssh address=127.0.0.1:2222") {
+		t.Fatalf("rendered plan lacks interface: %s", output.String())
+	}
+}
+
 func TestRenderDoesNotReadOrPrintSourceContents(t *testing.T) {
 	d, path, data := fixture(t, "")
 	secret := "CONTENT-MUST-NOT-APPEAR"
