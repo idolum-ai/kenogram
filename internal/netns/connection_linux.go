@@ -98,7 +98,7 @@ func runNamespaceConnectionHelper(ctx context.Context, command *exec.Cmd, parent
 			}
 		case <-ctx.Done():
 			_ = command.Process.Kill()
-			waitErr = <-waited
+			<-waited
 			closeReceivedDescriptors(message.control)
 			return nil, context.Cause(ctx)
 		}
@@ -119,7 +119,7 @@ func runNamespaceConnectionHelper(ctx context.Context, command *exec.Cmd, parent
 	case <-ctx.Done():
 		_ = parent.Close()
 		_ = command.Process.Kill()
-		waitErr = <-waited
+		<-waited
 		message = <-received
 		closeReceivedDescriptors(message.control)
 		return nil, context.Cause(ctx)
