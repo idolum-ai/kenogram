@@ -11,7 +11,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/naming"
 )
 
-var pinnedImage = regexp.MustCompile(`@sha256:[0-9a-fA-F]{64}$`)
+var pinnedImage = regexp.MustCompile(`(?:@sha256:|^sha256:)[0-9a-fA-F]{64}$`)
 
 // Validate checks schema constraints that depend on values and host metadata.
 func Validate(d Declaration, declarationDir string) error {

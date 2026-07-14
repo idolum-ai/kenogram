@@ -1,6 +1,6 @@
 # Operations contract
 
-Status: binding contract. Evidence and open boundaries are indexed in `INDEX.md`.
+Status: binding contract. Evidence and known limits are indexed in `INDEX.md`.
 
 `kenogram up --dry-run <file>` parses, validates, resolves, and renders a plan
 without changing runtime or durable world state. `--json` emits one JSON object.
@@ -18,12 +18,22 @@ also reports the byte-sensitive declaration digest.
 | `allow … --for <duration>` | grant temporary destination access | yes |
 | `revoke <world> <destination>` | remove access and close admitted connections | yes |
 | `repair-history --yes <world>` | remove one proven truncated final fragment | yes |
+| `doctor [--json]` | report all host prerequisites and image-entry notes | no |
 
 `up` renders the full successor plan, exact semantic changes, and workspace
 drift before an interactive confirmation or `--yes`. It stages and verifies the
 successor before recording it applied. `down`, `destroy`, `enter --repair`,
 `status`, `allow`, and `worlds` operate only from host-side state. `version`
 reports build provenance.
+
+`doctor` observes Linux, cgroups v2, the rootless Podman executable and info
+surface, subordinate ID mappings, `nsenter`, state storage, and the rootless
+container graph root. It reports every check even when one fails and exits 1 if
+any required observation fails. Informational checks distinguish the `/bin/sh`
+repair-entry surface from the tmux-backed normal-entry surface without claiming
+to inspect an image that has not been declared. `doctor --json` emits the stable
+`ready` boolean and ordered `checks` objects with `name`, `status`, `observed`,
+and optional `remediation` fields.
 
 `status` names the authoritative generation and, while a durable transition
 exists, the candidate generation and recovery phase separately. `enter

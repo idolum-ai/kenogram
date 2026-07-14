@@ -20,17 +20,23 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
 6. [`lifecycle.md`](lifecycle.md) — materialization and binary replacement contract.
 7. [`history.md`](history.md) — durable state, evidence, and hash-chain contract.
 
-## Evidence and open boundaries
+## Evidence and known limits
 
-| Contract | Strongest automated evidence | Boundary still open |
-|---|---|---|
-| Declaration and plan | Unit, parser seeds, scheduled fuzzing, canonical digest, strict names, and staged-byte recheck | Snapshot-grade handling of an adversarially mutating source tree |
-| Operations | Signal-aware CLI, transition recovery tests, ownership-aware E2E image cleanup, rootless-vfs capacity policy, Engram v0.3.0 lifecycle E2E, and OpenClaw/Hermes compositions | Exhaustive CLI fault matrix and concurrent mutation stress |
-| Security | Exact Podman argv/mount-inode/seccomp evidence, rootless preflight, secret failure canaries, OpenClaw/Hermes absence checks, runtime-socket E2E | Seccomp profile identity and a supported Podman/kernel matrix |
-| Network | Multi-megabyte CONNECT, per-connection resolution, removal/expiry closure, declaration reconciliation, identity-bound proxy readiness, Git/TLS fixture, and rootless integration | Full ten-invariant replay after every adoption path |
-| Lifecycle | Durable rollback/commit transition, persisted-runtime 14-boundary SIGKILL recovery-only matrix, stopped-commit restart, terminal transition destruction, replay-safe service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Syscall-granular power-loss testing and exhaustive non-`up` action failpoints |
-| History | Tamper/truncated-tail unit tests plus E2E tombstone outcomes | Power-loss testing on multiple filesystems |
-| Experimental Apple transport | Canonical shell-inert argv envelope, explicit stdin/TTY flags, remote exit-status preservation, graceful signal forwarding, Darwin/arm64 cross-build, and native macOS launcher smoke test | Real Apple machine argv/TTY/signal proof, nested rootless Podman, and the full lifecycle/network matrix |
+The final column says how an unproved boundary constrains the promise. **Accepted
+for v0.x** means it is useful next evidence, not an incomplete advertised
+feature. **Before stable** means the project should earn it before making a
+production-stability claim. **Experimental** means the surface is available for
+evaluation but outside the supported Linux runtime promise.
+
+| Contract | Strongest automated evidence | Known limit / next proof | Release posture |
+|---|---|---|---|
+| Declaration and plan | Unit, parser seeds, scheduled fuzzing, canonical digest, strict names, and staged-byte recheck | Snapshot-grade handling of an adversarially mutating source tree | Accepted for v0.x |
+| Operations | Signal-aware CLI, complete host doctor, transition recovery tests, ownership-aware E2E image cleanup, rootless-vfs capacity policy, Engram v0.3.0 lifecycle E2E, and OpenClaw/Hermes compositions | Exhaustive CLI fault matrix and concurrent mutation stress | Before stable |
+| Security | Exact Podman argv/mount-inode/seccomp evidence, rootless preflight, secret failure canaries, OpenClaw/Hermes absence checks, runtime-socket E2E | Seccomp profile identity and a supported Podman/kernel matrix | Before stable |
+| Network | Multi-megabyte CONNECT, per-connection resolution, removal/expiry closure, declaration reconciliation, identity-bound proxy readiness, Git/TLS fixture, and rootless integration | Full ten-invariant replay after every adoption path | Before stable |
+| Lifecycle | Durable rollback/commit transition, persisted-runtime 14-boundary SIGKILL recovery-only matrix, stopped-commit restart, terminal transition destruction, replay-safe service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Syscall-granular power-loss testing and exhaustive non-`up` action failpoints | Before stable |
+| History | Tamper/truncated-tail unit tests plus E2E tombstone outcomes | Power-loss testing on multiple filesystems | Before stable |
+| Experimental Apple transport | Canonical shell-inert argv envelope, explicit stdin/TTY flags, remote exit-status preservation, graceful signal forwarding, Darwin/arm64 cross-build, and native macOS launcher smoke test | Real Apple machine argv/TTY/signal proof, nested rootless Podman, and the full lifecycle/network matrix | Experimental |
 
 ## Executable checks
 

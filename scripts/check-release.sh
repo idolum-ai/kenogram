@@ -20,8 +20,14 @@ RELEASE_TARGETS=linux/amd64 RELEASE_COMMIT="${commit}" RELEASE_DATE=1970-01-01T0
   ./scripts/package-release.sh "${version}" "${tmp_dir}/second" >/dev/null
 cmp "${tmp_dir}/first/${asset}" "${tmp_dir}/second/${asset}"
 cmp "${tmp_dir}/first/checksums.txt" "${tmp_dir}/second/checksums.txt"
-[[ "$(wc -l < "${tmp_dir}/first/checksums.txt")" -eq 1 ]] || { echo "checksums must name exactly one test asset" >&2; exit 1; }
+[[ "$(wc -l < "${tmp_dir}/first/checksums.txt")" -eq 4 ]] || { echo "checksums must name the archive, installers, and reference-world source" >&2; exit 1; }
 grep -F "  ${asset}" "${tmp_dir}/first/checksums.txt" >/dev/null
+grep -F "  install-release.sh" "${tmp_dir}/first/checksums.txt" >/dev/null
+grep -F "  prepare-first-world.sh" "${tmp_dir}/first/checksums.txt" >/dev/null
+grep -F "  reference-world.Containerfile" "${tmp_dir}/first/checksums.txt" >/dev/null
+cmp ./scripts/install-release.sh "${tmp_dir}/first/install-release.sh"
+cmp ./scripts/prepare-first-world.sh "${tmp_dir}/first/prepare-first-world.sh"
+cmp ./images/reference-world/Containerfile "${tmp_dir}/first/reference-world.Containerfile"
 [[ "$(tar -tzf "${tmp_dir}/first/${asset}" | LC_ALL=C sort)" = "$(printf '%s\n' LICENSE README.md kenogram)" ]] || {
   echo "archive contents are incorrect" >&2; exit 1;
 }
@@ -40,14 +46,52 @@ done
 cp "${KENOGRAM_TEST_DIST}/${url##*/}" "${destination}"
 MOCK
 chmod 0755 "${tmp_dir}/mock-bin/curl"
+cp "${tmp_dir}/first/install-release.sh" "${tmp_dir}/install-release.sh"
+chmod 0755 "${tmp_dir}/install-release.sh"
 PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" KENOGRAM_INSTALL_DIR="${tmp_dir}/install" \
-  ./scripts/install-release.sh "${version}" >/dev/null
+  "${tmp_dir}/install-release.sh" "${version}" >/dev/null
 "${tmp_dir}/install/kenogram" version | grep -F "kenogram ${version} commit=${commit}" >/dev/null
+printf '{"tag_name":"%s"}\n' "${version}" > "${tmp_dir}/first/latest"
+mkdir "${tmp_dir}/latest-install"
+PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" KENOGRAM_INSTALL_DIR="${tmp_dir}/latest-install" \
+  "${tmp_dir}/install-release.sh" >/dev/null
+"${tmp_dir}/latest-install/kenogram" version | grep -F "kenogram ${version} commit=${commit}" >/dev/null
+
+cat > "${tmp_dir}/mock-bin/podman" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  build) exit 0 ;;
+  image)
+    [[ "${2:-}" = inspect ]] || exit 2
+    printf 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n'
+    ;;
+  *) exit 2 ;;
+esac
+MOCK
+chmod 0755 "${tmp_dir}/mock-bin/podman"
+mkdir "${tmp_dir}/first-world"
+cp "${tmp_dir}/first/prepare-first-world.sh" "${tmp_dir}/prepare-first-world.sh"
+chmod 0755 "${tmp_dir}/prepare-first-world.sh"
+(
+  cd "${tmp_dir}/first-world"
+  PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" \
+    "${tmp_dir}/prepare-first-world.sh" "${version}" world.toml >/dev/null
+  grep -F 'base = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"' world.toml >/dev/null
+  grep -F "user = \"$(id -u):$(id -g)\"" world.toml >/dev/null
+  if PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" \
+    "${tmp_dir}/prepare-first-world.sh" "${version}" world.toml >/dev/null 2>&1; then
+    echo "first-world preparer overwrote an existing declaration" >&2; exit 1
+  fi
+)
+
 mkdir "${tmp_dir}/bad" "${tmp_dir}/bad-install"
 cp "${tmp_dir}/first/${asset}" "${tmp_dir}/bad/${asset}"
 printf '%064d  %s\n' 0 "${asset}" > "${tmp_dir}/bad/checksums.txt"
 if PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/bad" KENOGRAM_INSTALL_DIR="${tmp_dir}/bad-install" \
-  ./scripts/install-release.sh "${version}" >/dev/null 2>&1; then echo "installer accepted checksum mismatch" >&2; exit 1; fi
+  "${tmp_dir}/install-release.sh" "${version}" >/dev/null 2>&1; then echo "installer accepted checksum mismatch" >&2; exit 1; fi
+if PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" KENOGRAM_INSTALL_DIR="${tmp_dir}/bad-install" \
+  "${tmp_dir}/install-release.sh" v01.2.3 >/dev/null 2>&1; then echo "standalone installer accepted invalid version" >&2; exit 1; fi
 
 cat > "${tmp_dir}/notes.md" <<'NOTES'
 ## Summary

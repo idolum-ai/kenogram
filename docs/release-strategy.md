@@ -43,6 +43,9 @@ Kenogram is Linux-only. Each release contains:
 
 - `kenogram-vX.Y.Z-linux-amd64.tar.gz`
 - `kenogram-vX.Y.Z-linux-arm64.tar.gz`
+- `install-release.sh`
+- `prepare-first-world.sh`
+- `reference-world.Containerfile`
 - `checksums.txt`
 
 Every archive contains `kenogram`, `README.md`, and `LICENSE`. Binaries are
@@ -50,14 +53,21 @@ static, built with `-trimpath`, and report their version, source commit, build
 date, and Go version through `kenogram version`. Archives use source-commit time
 and normalized ownership for reproducibility.
 
-Checksums detect corruption or asset substitution when the checksum file is
-obtained from the same release. They are not code signing or independent
-provenance, and this process does not claim either.
+`checksums.txt` covers both archives and all three standalone onboarding
+assets. Checksums detect corruption or asset substitution when the checksum
+file is obtained from the same release. They are not code signing or
+independent provenance, and this process does not claim either.
 
 `scripts/install-release.sh` downloads the matching host archive and checksum,
 checks exact archive contents and embedded identity, then atomically installs
 the binary under `~/.local/bin` by default. It does not install Podman or host
 prerequisites and does not touch a running world.
+
+`prepare-first-world.sh` verifies the release's
+`reference-world.Containerfile`, builds it for the current host identity from a
+registry-digest-pinned base, and writes a declaration naming the resulting
+exact local image ID. It neither publishes an image nor claims that independent
+package-manager builds are byte-identical.
 
 ## Repository settings
 
@@ -80,7 +90,7 @@ settings are the enforcement boundary after publication.
 - [ ] Compatibility, migration, and known limits are explicit.
 - [ ] `make check`, `make test-race`, and `make integration` pass.
 - [ ] Both Linux candidate archives exist and report the intended identity.
-- [ ] `checksums.txt` covers exactly those archives.
+- [ ] `checksums.txt` covers exactly both archives and the three standalone onboarding assets.
 - [ ] No declaration, credential, state, transcript, or runtime artifact ships.
 - [ ] Protected environment, immutable releases, and tag rules are enabled.
 

@@ -1,106 +1,60 @@
 # First world
 
-This guide builds one small local image, materializes a world, enters its tmux
-session, stops and restarts it, then destroys it. It is a local proof of the
-Kenogram lifecycle, not a production image recipe.
+This guide starts from a released Kenogram binary, prepares one small local
+image, materializes a world, enters it, stops and restarts it, then destroys it.
+It is a local proof of the Kenogram lifecycle, not a production image recipe.
 
-## Host preflight
+## Check the host
 
 Kenogram currently requires Linux, cgroups v2, rootless Podman, `nsenter`, and
-subordinate UID and GID ranges for the current user. Verify the runtime before
-creating any files:
+subordinate UID and GID ranges for the current user. Run the complete read-only
+preflight before downloading an image or authoring a declaration:
 
 ```sh
-podman info --format json >/dev/null
-podman unshare true
-test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
-test "$(podman info --format '{{.Host.CgroupVersion}}')" = v2
-grep -q "^$(id -un):" /etc/subuid
-grep -q "^$(id -un):" /etc/subgid
-command -v nsenter >/dev/null
+kenogram doctor
 ```
 
-Install or configure the missing host prerequisite if any command fails. Do not
-work around the preflight by running Kenogram as root.
+Every failed check includes its observation and remedy. Do not work around a
+failure by running Kenogram as root. Automation can consume the same ordered
+checks with `kenogram doctor --json`.
 
-## Build the local base
+This is the **use** dependency set. Building Kenogram additionally needs Go,
+Make, Git, and `rg`; replaying all composition evidence needs the much larger
+tool and storage set in [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 
-From the Kenogram repository root, create a temporary authoring directory:
+## Prepare the reference world
+
+Set the release you installed. Download and inspect its standalone preparation
+script:
 
 ```sh
-make build
-export KENOGRAM="$(pwd)/bin/kenogram"
-mkdir -p /tmp/kenogram-first-world
-cd /tmp/kenogram-first-world
+version=vX.Y.Z
+curl --fail --location --proto '=https' --tlsv1.2 \
+  --output prepare-first-world.sh \
+  "https://github.com/idolum-ai/kenogram/releases/download/${version}/prepare-first-world.sh"
+less prepare-first-world.sh
+bash prepare-first-world.sh "${version}" world.toml
 ```
 
-Create `Containerfile`:
+The script downloads the checksum-covered `reference-world.Containerfile` from
+the same release, verifies it, and builds it for the current host UID/GID from
+a digest-pinned Ubuntu base. It writes `world.toml` with Podman's exact local
+image ID, not a mutable tag. It refuses to overwrite an existing declaration.
 
-```Dockerfile
-FROM docker.io/library/ubuntu:24.04
+The resulting image contains only the common first-world surface: a shell,
+`tail`, certificates, the host-bound user, and tmux. Custom images remain fully
+supported. The image build has ordinary outbound package-manager access; the
+materialized Kenogram world does not inherit that access.
 
-ARG USER_ID
-ARG GROUP_ID
+## Plan, apply, and enter
 
-RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates tmux \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --non-unique --gid "${GROUP_ID}" agent \
-    && useradd --non-unique --uid "${USER_ID}" --gid "${GROUP_ID}" --create-home agent
-
-ENV HOME=/home/agent
-```
-
-Build it for the current host identity:
+Review the generated declaration, then run:
 
 ```sh
-podman build \
-  --build-arg USER_ID="$(id -u)" \
-  --build-arg GROUP_ID="$(id -g)" \
-  --tag localhost/kenogram-first-world:latest \
-  .
-```
-
-## Declare and enter the world
-
-Create `world.toml`. The local image is deliberately admitted as unpinned so
-this first run does not pretend to be reproducible:
-
-```sh
-cat > world.toml <<EOF
-version = 1
-name = "first"
-allow_unpinned = true
-
-[world]
-hostname = "first"
-base = "localhost/kenogram-first-world:latest"
-workdir = "/workspace"
-user = "$(id -u):$(id -g)"
-
-[resources]
-cpus = 1
-memory_bytes = 536870912
-pids = 128
-
-[workspace]
-paths = ["/workspace"]
-
-[[services]]
-name = "tmux"
-command = ["/bin/sh", "-c", "/usr/bin/tmux new-session -d -s main && exec /usr/bin/tmux wait-for kenogram-stop"]
-autostart = true
-restart = "never"
-EOF
-```
-
-Plan, apply, inspect, and enter it using the binary from the repository:
-
-```sh
-"$KENOGRAM" up --dry-run ./world.toml
-"$KENOGRAM" up --yes ./world.toml
-"$KENOGRAM" status first
-"$KENOGRAM" enter first
+kenogram up --dry-run ./world.toml
+kenogram up --yes ./world.toml
+kenogram status first
+kenogram enter first
 ```
 
 Detach from tmux with `Ctrl-b d`. The workspace remains on the host under
@@ -109,12 +63,29 @@ Kenogram's state directory.
 ## Restart and remove it
 
 ```sh
-"$KENOGRAM" down first
-"$KENOGRAM" up --yes ./world.toml
-"$KENOGRAM" enter first
-"$KENOGRAM" destroy --yes first
+kenogram down first
+kenogram up --yes ./world.toml
+kenogram enter first
+kenogram destroy --yes first
 ```
 
-For a durable declaration, publish or otherwise obtain the base image by digest
-and replace the local tag with an immutable `name@sha256:...` reference. Then
-remove `allow_unpinned = true`.
+An exact local image ID proves which built image was applied on this host; it
+does not make separately built images byte-identical. Production declarations
+should use an independently reviewed registry image pinned by repository digest
+when the same realization must be shared across machines.
+
+## Host preparation by distribution
+
+Package names vary, but the contract does not:
+
+- Debian and Ubuntu commonly provide Podman, `uidmap`, `fuse-overlayfs`, and
+  `nsenter` through the `podman`, `uidmap`, `fuse-overlayfs`, and `util-linux`
+  packages.
+- Fedora commonly provides Podman, `shadow-utils` for subordinate IDs, and
+  `util-linux`.
+- On any distribution, confirm that `/etc/subuid` and `/etc/subgid` contain a
+  range for the current user and migrate an older rootless Podman store if its
+  mappings were created before those ranges.
+
+Treat the distribution's maintained documentation as authoritative for package
+installation. `kenogram doctor` remains the final observation boundary.

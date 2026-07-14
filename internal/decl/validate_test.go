@@ -48,6 +48,14 @@ func TestValidateRejectsUnpinnedImage(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsExactLocalImageID(t *testing.T) {
+	d, dir := validForValidation(t)
+	d.World.Base = "sha256:" + strings.Repeat("b", 64)
+	if err := Validate(d, dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateRejectsPermissiveSecret(t *testing.T) {
 	d, dir := validForValidation(t)
 	if err := os.Chmod(filepath.Join(dir, "secret"), 0o640); err != nil {

@@ -50,6 +50,17 @@ for target in "${targets[@]}"; do
   assets+=("${asset}")
 done
 
+installer="install-release.sh"
+cp "scripts/${installer}" "${output_dir}/${installer}"
+chmod 0755 "${output_dir}/${installer}"
+assets+=("${installer}")
+
+first_world="prepare-first-world.sh"
+cp "scripts/${first_world}" "${output_dir}/${first_world}"
+chmod 0755 "${output_dir}/${first_world}"
+cp "images/reference-world/Containerfile" "${output_dir}/reference-world.Containerfile"
+assets+=("${first_world}" "reference-world.Containerfile")
+
 (
   cd "${output_dir}"
   if command -v sha256sum >/dev/null 2>&1; then

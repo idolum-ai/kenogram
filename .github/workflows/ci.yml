@@ -83,6 +83,18 @@ jobs:
         run: |
           podman info --format json
           podman unshare true
+          go run ./cmd/kenogram doctor --json | tee doctor.json
+          grep -F '"ready": true' doctor.json
+      - name: Reference-world surface
+        run: |
+          set -euo pipefail
+          tag="localhost/kenogram-reference-ci:${GITHUB_SHA}"
+          trap 'podman image rm "${tag}" >/dev/null 2>&1 || true' EXIT
+          podman build --pull=missing \
+            --build-arg "USER_ID=$(id -u)" --build-arg "GROUP_ID=$(id -g)" \
+            --tag "${tag}" --file images/reference-world/Containerfile images/reference-world
+          podman run --rm --userns keep-id --user "$(id -u):$(id -g)" \
+            --entrypoint /bin/sh "${tag}" -c 'test -x /usr/bin/tail && test -x /bin/sh && test -x /usr/bin/tmux && tmux -V'
       - name: Integration
         run: make integration
       - name: Restore immutable Engram fixture
