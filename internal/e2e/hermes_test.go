@@ -63,6 +63,8 @@ func TestHermesInsideKenogram(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Minute)
 	defer cancel()
+	tmp := t.TempDir()
+	resources := prepareContainerE2E(t, ctx, e2eLaneHermes)
 	doorHost := hostDoorIPv4(t)
 	provider := newObservedProvider(t, doorHost, hermesProof)
 	defer provider.Close()
@@ -71,14 +73,17 @@ func TestHermesInsideKenogram(t *testing.T) {
 	providerPort := mustPort(t, provider.URL)
 	telegramPort := mustPort(t, telegram.URL)
 	root := repositoryRoot(t)
-	tmp := t.TempDir()
 	lock := readHermesLock(t)
 	t.Logf("evidence hermes_release=%s version=%s commit=%s source_sha256=%s image=%s", lock.Release, lock.Version, lock.Commit, lock.SourceSHA256, lock.Image)
 	verifyHermesArtifact(t, ctx, tmp, lock)
 	image := lock.Image
+	resources.trackImage(t, ctx, image)
 
-	world := "hermes-e2e-" + strconv.Itoa(os.Getpid())
 	stateRoot := filepath.Join(tmp, "state")
+	world := e2eWorldName(t, "hermes-e2e", stateRoot)
+	for generation := 1; generation <= 3; generation++ {
+		resources.trackContainer(t, ctx, world, generation)
+	}
 	configSource := filepath.Join(tmp, "hermes-config.yaml")
 	revisionSource := filepath.Join(tmp, "revision")
 	declaration := filepath.Join(tmp, "kenogram.toml")
@@ -86,19 +91,11 @@ func TestHermesInsideKenogram(t *testing.T) {
 	run(t, ctx, root, append(os.Environ(), "CGO_ENABLED=0"), "go", "build", "-buildvcs=false", "-o", kenogram, "./cmd/kenogram")
 	testEnv := append(os.Environ(), "KENOGRAM_STATE_DIR="+stateRoot)
 
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cleanupCancel()
-		for generation := 1; generation <= 3; generation++ {
-			_ = exec.CommandContext(cleanupCtx, "podman", "rm", "--force", containerName(world, generation)).Run()
-		}
-	})
-
 	writeHermesConfig(t, configSource, doorHost, providerPort, hermesTelegramAPIBase(telegram.URL, doorHost))
 	mustWrite(t, revisionSource, []byte("one\n"), 0o600)
 	writeHermesDeclaration(t, declaration, world, image, configSource, revisionSource, doorHost, providerPort, doorHost, telegramPort)
 	getMeCount, getUpdatesCount := telegram.methodCount("getMe"), telegram.methodCount("getUpdates")
-	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
+	runImageAcquisition(t, ctx, resources, []string{image}, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	first := containerName(world, 1)
 	waitForHermesTelegramAfter(t, telegram, 45*time.Second, getMeCount, getUpdatesCount)
 	assertHermesVersion(t, ctx, tmp, testEnv, first, lock.Version)

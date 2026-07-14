@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -42,13 +41,15 @@ func TestLiveTelegramOpenClawCanary(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Minute)
 	defer cancel()
+	tmp := t.TempDir()
+	resources := prepareContainerE2E(t, ctx, e2eLaneOpenClaw)
 	doorHost := hostDoorIPv4(t)
 	provider := newOpenAIProvider(t, doorHost)
 	defer provider.Close()
 	providerPort := mustPort(t, provider.URL)
 	root := repositoryRoot(t)
-	tmp := t.TempDir()
 	openClaw := readOpenClawLock(t)
+	resources.trackImage(t, ctx, openClaw.Image)
 	engramLock := readReleaseLock(t)
 	t.Logf("evidence engram=%s@%s openclaw=%s image=%s", engramLock.Version, engramLock.Commit, openClaw.Version, openClaw.Image)
 	engram := materializeEngramRelease(t, ctx, tmp, engramLock)
@@ -64,27 +65,22 @@ USER node
 `, openClaw.Image)
 	mustWrite(t, containerfile, []byte(containerBody), 0o600)
 	image := "localhost/kenogram-telegram-canary:" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	run(t, ctx, tmp, nil, "podman", "build", "--pull=missing", "--build-arg", "KENOGRAM_UID="+strconv.Itoa(os.Getuid()), "--build-arg", "KENOGRAM_GID="+strconv.Itoa(os.Getgid()), "-t", image, "-f", containerfile, ".")
+	resources.trackImage(t, ctx, image)
+	runImageAcquisition(t, ctx, resources, []string{openClaw.Image, image}, tmp, nil, "podman", "build", "--pull=missing", "--build-arg", "KENOGRAM_UID="+strconv.Itoa(os.Getuid()), "--build-arg", "KENOGRAM_GID="+strconv.Itoa(os.Getgid()), "-t", image, "-f", containerfile, ".")
 	imageDigest := strings.TrimSpace(run(t, ctx, tmp, nil, "podman", "image", "inspect", "--format", "{{.Digest}}", image))
 	if !strings.HasPrefix(imageDigest, "sha256:") {
 		t.Fatalf("invalid live-canary image digest: %q", imageDigest)
 	}
 
-	world := "telegram-canary-" + strconv.Itoa(os.Getpid())
 	stateRoot := filepath.Join(tmp, "state")
+	world := e2eWorldName(t, "telegram-canary", stateRoot)
+	resources.trackContainer(t, ctx, world, 1)
 	openClawConfig := filepath.Join(tmp, "openclaw.json")
 	engramEnv := filepath.Join(tmp, "engram.env")
 	declaration := filepath.Join(tmp, "kenogram.toml")
 	kenogram := filepath.Join(tmp, "kenogram")
 	run(t, ctx, root, append(os.Environ(), "CGO_ENABLED=0"), "go", "build", "-buildvcs=false", "-o", kenogram, "./cmd/kenogram")
 	testEnv := append(os.Environ(), "KENOGRAM_STATE_DIR="+stateRoot)
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cleanupCancel()
-		_ = exec.CommandContext(cleanupCtx, "podman", "rm", "--force", containerName(world, 1)).Run()
-		_ = exec.CommandContext(cleanupCtx, "podman", "rmi", "--force", image).Run()
-	})
-
 	writeOpenClawConfig(t, openClawConfig, doorHost, providerPort, "")
 	writeEngramCompositionEnv(t, engramEnv, token, "https://api.telegram.org", allowedUserID, chatID)
 	writeEngramOpenClawDeclaration(t, declaration, world, image+"@"+imageDigest, engram, openClawConfig, engramEnv, doorHost, providerPort, "api.telegram.org", 443)

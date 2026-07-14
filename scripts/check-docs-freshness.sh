@@ -28,6 +28,32 @@ done
 e2e_count="$(awk '/^e2e:/ { print NF - 1; exit }' Makefile)"
 test "$e2e_count" -eq 5
 rg -Fq '`make e2e` runs all five' requirements/INDEX.md
+rg -Fq 'KENOGRAM_E2E_VFS_MIN_FREE_GIB' CONTRIBUTING.md
+rg -Fq 'vfsMinimumFreeHermesGiB = uint64(96)' internal/e2e/container_storage_test.go
+rg -Fq 'Hermes lanes require 96 GiB free' CONTRIBUTING.md
+rg -Fq 'Engram and OpenClaw do not yet have a' CONTRIBUTING.md
+rg -Fq 'never force image removal' requirements/INDEX.md
+rg -q 'cleanupOverallTimeout[[:space:]]*=[[:space:]]*2 \* time.Minute' internal/e2e/container_storage_test.go
+rg -q 'imageRemove:[[:space:]]*90 \* time.Second' internal/e2e/container_storage_test.go
+rg -Fq 'inside a two-minute overall cleanup budget' CONTRIBUTING.md
+container_e2e_inventory=(
+  'engram_release_test.go:e2eLaneEngram'
+  'openclaw_test.go:e2eLaneOpenClaw'
+  'engram_openclaw_test.go:e2eLaneOpenClaw'
+  'telegram_canary_test.go:e2eLaneOpenClaw'
+  'hermes_test.go:e2eLaneHermes'
+  'engram_hermes_test.go:e2eLaneHermes'
+)
+test "$(rg -l 'prepareContainerE2E\(t, ctx,' internal/e2e/*_test.go | wc -l)" -eq "${#container_e2e_inventory[@]}"
+for entry in "${container_e2e_inventory[@]}"; do
+  source="internal/e2e/${entry%%:*}"
+  lane="${entry##*:}"
+  test "$(rg -c "prepareContainerE2E\\(t, ctx, $lane\\)" "$source")" -eq 1
+  test "$(rg -c 'runImageAcquisition\(t, ctx, resources,' "$source")" -eq 1
+  tmp_line="$(rg -n -m1 'tmp := t.TempDir\(\)' "$source" | cut -d: -f1)"
+  prepare_line="$(rg -n -m1 'prepareContainerE2E\(t, ctx,' "$source" | cut -d: -f1)"
+  test "$tmp_line" -lt "$prepare_line"
+done
 lifecycle_checkpoint_count="$(sed -n '/var lifecycleCrashCheckpoints = \[\]string{/,/^}/p' internal/app/lifecycle_crash_test.go | rg -o '"[^"]+"' | wc -l)"
 test "$lifecycle_checkpoint_count" -eq 14
 rg -Fq 'fourteen lifecycle boundaries' requirements/lifecycle.md

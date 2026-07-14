@@ -41,6 +41,27 @@ outbound artifact/image access, and substantial temporary disk. Run the target
 relevant to your change; reserve `make e2e` for a complete 10–20 minute-per-lane
 replay.
 
+Every container-heavy proof uses a random world identity and refuses a
+pre-existing container name. Cleanup verifies Kenogram's world/generation
+labels, removes containers by immutable ID newest-first, and preserves label
+mismatches. The pre-test snapshot includes both references and the complete set
+of image IDs. Newly materialized IDs are removed only after re-verification; if
+the test merely added a tag to cached content, cleanup untags that exact ID/name
+association. Image removal is never forced, so content used by another workload
+survives as a visible cleanup failure. Observation, container-removal, and
+image-removal commands receive 10-, 30-, and 90-second limits respectively
+inside a two-minute overall cleanup budget.
+
+Before artifact downloads or image builds, the Hermes lanes require 96 GiB free
+on rootless Podman `vfs`. This evidence-backed floor adds transient headroom to
+an observed 68 GiB expanded footprint. Engram and OpenClaw do not yet have a
+reproducible `vfs` peak, so their `vfs` lanes fail closed instead of inventing a
+default: set `KENOGRAM_E2E_VFS_MIN_FREE_GIB` to a locally measured positive
+whole-GiB threshold. Record peak graph-root usage and headroom when proposing a
+new default. Rootless `overlay` is not subject to the amplification guard or its
+override. Use `df -h <graph-root>` for free capacity and `podman system df` for
+attribution. The setting does not delete or prune storage.
+
 | Command | Evidence |
 |---|---|
 | `make e2e-release` | Engram v0.3.0 materialization, replacement, restart, and destruction |
