@@ -11,3 +11,8 @@ func diskFree(path string) (uint64, error) {
 	}
 	return stat.Bavail * uint64(stat.Bsize), nil
 }
+
+func directoryAccess(path string) error {
+	const writeAndTraverse = 2 | 1 // access(2): W_OK | X_OK
+	return syscall.Access(path, writeAndTraverse)
+}

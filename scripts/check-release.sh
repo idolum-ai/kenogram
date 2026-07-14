@@ -10,6 +10,9 @@ for version in v0.0.0 v1.2.3-rc.1 v1.2.3-alpha-7; do ./scripts/validate-release-
 for version in 1.2.3 v01.2.3 v1.02.3 v1.2.3. v1.2.3-01 v1.2.3-rc. v1.2.3-a..b v1.2.3+meta; do
   if ./scripts/validate-release-version.sh "${version}" >/dev/null 2>&1; then echo "validator accepted ${version}" >&2; exit 1; fi
 done
+diff -u \
+  <(sed -n '/^validate_version()/,/^}/p' ./scripts/install-release.sh) \
+  <(sed -n '/^validate_version()/,/^}/p' ./scripts/prepare-first-world.sh)
 
 version=v0.0.0-check
 commit=releasecheck
@@ -48,8 +51,10 @@ MOCK
 chmod 0755 "${tmp_dir}/mock-bin/curl"
 cp "${tmp_dir}/first/install-release.sh" "${tmp_dir}/install-release.sh"
 chmod 0755 "${tmp_dir}/install-release.sh"
-PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" KENOGRAM_INSTALL_DIR="${tmp_dir}/install" \
-  "${tmp_dir}/install-release.sh" "${version}" >/dev/null
+install_output="$(PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" KENOGRAM_INSTALL_DIR="${tmp_dir}/install" \
+  "${tmp_dir}/install-release.sh" "${version}")"
+grep -F "${tmp_dir}/install/kenogram doctor" <<< "${install_output}" >/dev/null
+grep -F "export PATH=\"${tmp_dir}/install:\$PATH\"" <<< "${install_output}" >/dev/null
 "${tmp_dir}/install/kenogram" version | grep -F "kenogram ${version} commit=${commit}" >/dev/null
 printf '{"tag_name":"%s"}\n' "${version}" > "${tmp_dir}/first/latest"
 mkdir "${tmp_dir}/latest-install"
@@ -61,10 +66,16 @@ cat > "${tmp_dir}/mock-bin/podman" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-}" in
-  build) exit 0 ;;
-  image)
-    [[ "${2:-}" = inspect ]] || exit 2
-    printf 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n'
+  build)
+    iidfile=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in --iidfile) iidfile="$2"; shift 2 ;; *) shift ;; esac
+    done
+    [[ -n "${iidfile}" ]] || exit 2
+    if [[ -n "${KENOGRAM_TEST_CREATE_OUTPUT:-}" ]]; then
+      printf 'concurrent owner\n' > "${KENOGRAM_TEST_CREATE_OUTPUT}"
+    fi
+    printf 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n' > "${iidfile}"
     ;;
   *) exit 2 ;;
 esac
@@ -85,6 +96,16 @@ chmod 0755 "${tmp_dir}/prepare-first-world.sh"
   fi
 )
 
+mkdir "${tmp_dir}/raced-world"
+(
+  cd "${tmp_dir}/raced-world"
+  if PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" KENOGRAM_TEST_CREATE_OUTPUT=world.toml \
+    "${tmp_dir}/prepare-first-world.sh" "${version}" world.toml >/dev/null 2>&1; then
+    echo "first-world preparer replaced a declaration created during the image build" >&2; exit 1
+  fi
+  [[ "$(cat world.toml)" = "concurrent owner" ]] || { echo "concurrent declaration was modified" >&2; exit 1; }
+)
+
 mkdir "${tmp_dir}/bad" "${tmp_dir}/bad-install"
 cp "${tmp_dir}/first/${asset}" "${tmp_dir}/bad/${asset}"
 printf '%064d  %s\n' 0 "${asset}" > "${tmp_dir}/bad/checksums.txt"
@@ -92,6 +113,11 @@ if PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/bad" KENOGR
   "${tmp_dir}/install-release.sh" "${version}" >/dev/null 2>&1; then echo "installer accepted checksum mismatch" >&2; exit 1; fi
 if PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" KENOGRAM_INSTALL_DIR="${tmp_dir}/bad-install" \
   "${tmp_dir}/install-release.sh" v01.2.3 >/dev/null 2>&1; then echo "standalone installer accepted invalid version" >&2; exit 1; fi
+for invalid in 1.2.3 v01.2.3 v1.02.3 v1.2.3. v1.2.3-01 v1.2.3-rc. v1.2.3-a..b v1.2.3+meta; do
+  if "${tmp_dir}/prepare-first-world.sh" "${invalid}" "${tmp_dir}/invalid-world.toml" >/dev/null 2>&1; then
+    echo "first-world preparer accepted invalid version ${invalid}" >&2; exit 1
+  fi
+done
 
 cat > "${tmp_dir}/notes.md" <<'NOTES'
 ## Summary

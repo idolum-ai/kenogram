@@ -1,4 +1,4 @@
-# World-pattern observations
+# Observation-profile proposal
 
 Status: design proposal; not a binding contract or public data format.
 
@@ -12,9 +12,10 @@ This proposal separates those questions before introducing another digest.
 
 ## Proposed observation model
 
-A world-pattern is a canonical projection of an already validated plan and its
-verified runtime evidence. Its first version should contain only relations for
-which Kenogram already has a contract:
+An observation profile is an ordinary Boolean, canonical record projected from
+an already validated plan and its verified runtime evidence. It is not a
+kenogrammatic structure or an identity criterion. Its first version should
+contain only relations for which Kenogram already has a contract:
 
 - workspace loci and which loci are carried across replacement;
 - visible mount targets, their read/write and executable posture, but not host
@@ -42,7 +43,7 @@ by its canonical tuple, encode it with the same deterministic discipline as the
 plan, and compute:
 
 ```text
-world-pattern/v1:<sha256(canonical observations)>
+world-observation/v1:<sha256(canonical observations)>
 ```
 
 Keep this value adjacent to—not in place of—the declaration and plan digests.
@@ -52,13 +53,13 @@ equivalence proof than the exact plan digest it would replace.
 ## Required proofs before a public format
 
 1. Two sequential generations with different container and process identities
-   produce the same pattern when their promised observations are unchanged.
+   produce the same profile when their promised observations are unchanged.
 2. Renaming a world and its generation changes provenance but not the projected
-   relational pattern.
+   observation profile.
 3. Changing one mount mode, resource limit, service relation, carried locus, or
-   network destination changes the pattern.
+   network destination changes the profile.
 4. Changing a secret value, host source path, timestamp, or staging location
-   does not reveal or accidentally fingerprint that value in the pattern.
+   does not reveal or accidentally fingerprint that value in the profile.
 5. Two runtime mechanisms may receive the same conformance result only after
    both produce the complete required boundary evidence; absence of evidence is
    not equivalence.
@@ -68,7 +69,7 @@ equivalence proof than the exact plan digest it would replace.
 ## First operational use
 
 The first use should be explanatory: `status --json` may eventually report the
-pattern beside exact provenance so an operator can see that replacement changed
+profile beside exact provenance so an operator can see that replacement changed
 the inscription while preserving the promised world. It must not become an
 authorization shortcut, generic backend interface, or claim of formal morphic
 bisimulation.
@@ -76,3 +77,8 @@ bisimulation.
 Implementation should wait for a second real realization or another concrete
 operation that needs this distinction. Until then, the existing contracts and
 exact digests remain authoritative.
+
+The broader term *world-pattern* remains a methodological analogy for the
+relational posture described in [`kenogrammatics.md`](kenogrammatics.md). It is
+reserved here until Kenogram has a model of loci and relations that earns a
+stronger use.

@@ -36,6 +36,11 @@ definition. It risks turning a kenogram into one privileged symbol for absence.
 The technical idea is plural and relational: identity is suspended so that a
 pattern of sameness and difference across places can appear.
 
+An isolated kenogram is neither identifiable with nor distinguishable from
+another isolated kenogram. Sameness and difference arise only within a
+complexion. Re-inscription therefore preserves an internal relational
+decomposition, not identities carried between marks.
+
 ## The engineering adaptation
 
 Kenogram is a Linux world provisioner, not a morphogrammatic calculus. Its name
@@ -47,8 +52,8 @@ translation:
 - Replacement may change the inscription while preserving the required
   observations.
 - Runtime invariants judge realizations by behavior, not by an implementation's
-  internal identity. In this limited engineering sense, conforming mechanisms
-  are behaviorally equivalent.
+  internal identity. Conforming mechanisms satisfy the same finite observation
+  contract; Kenogram makes no claim of equivalence beyond that contract.
 - The provisioner contributes no request or policy authority from inside the
   world. It faithfully materializes the host-authored declaration.
 
@@ -75,9 +80,9 @@ not enough to adopt runtime state.
 Kenogram retains stable names, sequential generations, cryptographic hashes,
 host-authored declarations, and ordinary Boolean validation. It defines no
 morphogrammatic operators, retrograde continuations, or formal morphic
-bisimulation. Terms such as *world-pattern*, *inscription*, and *behavioral
-equivalence* in this repository are disciplined analogies, not claims of formal
-equivalence with Kaehr's system.
+bisimulation. Terms such as *world-pattern* and *inscription* in this repository
+are disciplined analogies, not claims of formal equivalence with Kaehr's
+system.
 
 The principle that absence precedes denial is Kenogram's own security posture.
 It means an undeclared capability should not be present and then refused; it

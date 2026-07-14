@@ -7,16 +7,19 @@ It is a local proof of the Kenogram lifecycle, not a production image recipe.
 ## Check the host
 
 Kenogram currently requires Linux, cgroups v2, rootless Podman, `nsenter`, and
-subordinate UID and GID ranges for the current user. Run the complete read-only
-preflight before downloading an image or authoring a declaration:
+subordinate UID and GID ranges for the current user. Run the complete
+non-world-mutating preflight before downloading an image or authoring a
+declaration:
 
 ```sh
 kenogram doctor
 ```
 
-Every failed check includes its observation and remedy. Do not work around a
-failure by running Kenogram as root. Automation can consume the same ordered
-checks with `kenogram doctor --json`.
+Every failed check includes its observation and remedy. `doctor` does not alter
+a Kenogram world or its durable state; Podman may initialize its own rootless
+runtime metadata while answering `podman info`. Do not work around a failure by
+running Kenogram as root. Automation can consume the additive JSON report with
+`kenogram doctor --json` and should select checks by `name`, not array position.
 
 This is the **use** dependency set. Building Kenogram additionally needs Go,
 Make, Git, and `rg`; replaying all composition evidence needs the much larger

@@ -33,14 +33,17 @@ curl --fail --location --proto '=https' --tlsv1.2 \
   "https://github.com/idolum-ai/kenogram/releases/download/${version}/install-release.sh"
 less install-release.sh
 bash install-release.sh "${version}"
+export PATH="${HOME}/.local/bin:${PATH}"
 kenogram doctor
 ```
 
 The installer verifies the release checksum and embedded version before
-installing to `~/.local/bin`. `doctor` is read-only and reports every missing
-host prerequisite in one run; `doctor --json` is stable automation output. It
-does not inspect a future world image: every image still needs `/usr/bin/tail`,
-`/bin/sh`, the declared user, and its declared service binaries. Normal
+installing to `~/.local/bin`. `doctor` does not mutate Kenogram worlds or
+durable state and reports every missing host prerequisite in one run; Podman
+may initialize its own rootless runtime metadata while answering the preflight.
+`doctor --json` is additive automation output: consume checks by `name`, not
+array position. It does not inspect a future world image: every image still
+needs `/usr/bin/tail`, `/bin/sh`, the declared user, and its declared service binaries. Normal
 `kenogram enter` additionally expects `/usr/bin/tmux` and a `main` session;
 `enter --repair` needs only `/bin/sh`.
 

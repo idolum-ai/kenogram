@@ -23,18 +23,21 @@ checksum_file() {
 validate_version() {
   local version="${1:-}" value core prerelease part identifier
   local -a core_parts identifiers
-  [[ "${version}" == v* && "${version}" != *+* ]] || die "version must be Semantic Versioning with a v prefix"
+  [[ "${version}" == v* && "${version}" != *+* ]] || die "release version must be Semantic Versioning with a v prefix; got ${version:-<empty>}"
   value="${version#v}"
   if [[ "${value}" == *-* ]]; then core="${value%%-*}"; prerelease="${value#*-}"; else core="${value}"; prerelease=""; fi
+  [[ "${core}" != .* && "${core}" != *. && "${core}" != *..* ]] || die "invalid release version: ${version}"
   IFS=. read -r -a core_parts <<< "${core}"
-  [[ "${#core_parts[@]}" -eq 3 ]] || die "invalid version: ${version}"
-  for part in "${core_parts[@]}"; do [[ "${part}" =~ ^(0|[1-9][0-9]*)$ ]] || die "invalid version: ${version}"; done
+  [[ "${#core_parts[@]}" -eq 3 ]] || die "invalid release version: ${version}"
+  for part in "${core_parts[@]}"; do
+    [[ "${part}" =~ ^(0|[1-9][0-9]*)$ ]] || die "invalid release version: ${version}"
+  done
   if [[ "${value}" == *-* ]]; then
-    [[ -n "${prerelease}" && "${prerelease}" != .* && "${prerelease}" != *. && "${prerelease}" != *..* ]] || die "invalid version: ${version}"
+    [[ -n "${prerelease}" && "${prerelease}" != .* && "${prerelease}" != *. && "${prerelease}" != *..* ]] || die "invalid release version: ${version}"
     IFS=. read -r -a identifiers <<< "${prerelease}"
     for identifier in "${identifiers[@]}"; do
-      [[ -n "${identifier}" && "${identifier}" =~ ^[0-9A-Za-z-]+$ ]] || die "invalid version: ${version}"
-      [[ ! "${identifier}" =~ ^[0-9]+$ || "${identifier}" =~ ^(0|[1-9][0-9]*)$ ]] || die "invalid version: ${version}"
+      [[ -n "${identifier}" && "${identifier}" =~ ^[0-9A-Za-z-]+$ ]] || die "invalid release version: ${version}"
+      [[ ! "${identifier}" =~ ^[0-9]+$ || "${identifier}" =~ ^(0|[1-9][0-9]*)$ ]] || die "invalid release version: ${version}"
     done
   fi
   printf '%s\n' "${version}"
@@ -43,7 +46,7 @@ validate_version() {
 version="$(validate_version "${1:-}")"
 output="${2:-world.toml}"
 [[ ! -e "${output}" ]] || die "refusing to overwrite ${output}"
-for command in podman id awk mktemp; do command -v "${command}" >/dev/null 2>&1 || die "required command not found: ${command}"; done
+for command in podman id awk mktemp tr; do command -v "${command}" >/dev/null 2>&1 || die "required command not found: ${command}"; done
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
@@ -54,17 +57,22 @@ expected="$(awk '$2 == "reference-world.Containerfile" { print $1; exit }' "${tm
 [[ -n "${expected}" ]] || die "release checksum for reference-world.Containerfile is missing"
 [[ "$(checksum_file "${tmp_dir}/Containerfile")" = "${expected}" ]] || die "reference-world Containerfile checksum mismatch"
 
-tag="localhost/kenogram-reference-world:${version}"
-podman build --pull=missing --build-arg "USER_ID=$(id -u)" --build-arg "GROUP_ID=$(id -g)" --tag "${tag}" --file "${tmp_dir}/Containerfile" "${tmp_dir}"
-image_id="$(podman image inspect --format '{{.Id}}' "${tag}")"
+podman build --pull=missing --build-arg "USER_ID=$(id -u)" --build-arg "GROUP_ID=$(id -g)" \
+  --iidfile "${tmp_dir}/image-id" --file "${tmp_dir}/Containerfile" "${tmp_dir}"
+image_id="$(tr -d '[:space:]' < "${tmp_dir}/image-id")"
 [[ "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Podman returned an invalid image ID: ${image_id}"
 
-umask 077
-{
-  printf 'version = 1\nname = "first"\n\n'
-  printf '[world]\nhostname = "first"\nbase = "%s"\nworkdir = "/workspace"\nuser = "%s:%s"\n\n' "${image_id}" "$(id -u)" "$(id -g)"
-  printf '[resources]\ncpus = 1\nmemory_bytes = 536870912\npids = 128\n\n'
-  printf '[workspace]\npaths = ["/workspace"]\n\n'
-  printf '[[services]]\nname = "tmux"\ncommand = ["/bin/sh", "-c", "/usr/bin/tmux new-session -d -s main && exec /usr/bin/tmux wait-for kenogram-stop"]\nautostart = true\nrestart = "never"\n'
-} > "${output}"
+if ! (
+  set -o noclobber
+  umask 077
+  {
+    printf 'version = 1\nname = "first"\n\n'
+    printf '[world]\nhostname = "first"\nbase = "%s"\nworkdir = "/workspace"\nuser = "%s:%s"\n\n' "${image_id}" "$(id -u)" "$(id -g)"
+    printf '[resources]\ncpus = 1\nmemory_bytes = 536870912\npids = 128\n\n'
+    printf '[workspace]\npaths = ["/workspace"]\n\n'
+    printf '[[services]]\nname = "tmux"\ncommand = ["/bin/sh", "-c", "/usr/bin/tmux new-session -d -s main && exec /usr/bin/tmux wait-for kenogram-stop"]\nautostart = true\nrestart = "never"\n'
+  } > "${output}"
+); then
+  die "refusing to overwrite ${output}"
+fi
 printf 'Wrote %s with exact local image %s\n' "${output}" "${image_id}"

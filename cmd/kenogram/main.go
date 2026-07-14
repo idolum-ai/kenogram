@@ -133,9 +133,6 @@ var newApp = func(stdout io.Writer) (*app.App, error) {
 		return nil, err
 	}
 	a.Out = stdout
-	if base := strings.TrimSpace(os.Getenv("KENOGRAM_STATE_DIR")); base != "" {
-		a.BaseDir = base
-	}
 	return a, nil
 }
 
@@ -170,9 +167,9 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		}
 	} else {
 		for _, check := range report.Checks {
-			fmt.Fprintf(stdout, "%s\t%s\t%s\n", strings.ToUpper(check.Status), check.Name, check.Observed)
+			fmt.Fprintf(stdout, "%s\t%s\t%s\n", strings.ToUpper(check.Status), check.Name, terminalField(check.Observed))
 			if check.Status == "fail" && check.Remediation != "" {
-				fmt.Fprintf(stdout, "  remedy: %s\n", check.Remediation)
+				fmt.Fprintf(stdout, "  remedy: %s\n", terminalField(check.Remediation))
 			}
 		}
 		fmt.Fprintf(stdout, "ready: %t\n", report.Ready)
@@ -181,6 +178,29 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 1
 	}
 	return 0
+}
+
+func terminalField(value string) string {
+	var clean strings.Builder
+	for _, r := range value {
+		switch r {
+		case '\n':
+			clean.WriteString(`\n`)
+		case '\r':
+			clean.WriteString(`\r`)
+		case '\t':
+			clean.WriteString(`\t`)
+		case '\x1b':
+			clean.WriteString(`\u001b`)
+		default:
+			if r < ' ' || r == '\x7f' {
+				fmt.Fprintf(&clean, `\u%04x`, r)
+			} else {
+				clean.WriteRune(r)
+			}
+		}
+	}
+	return clean.String()
 }
 
 func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {

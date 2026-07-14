@@ -21,9 +21,10 @@ and clears ephemeral grants. This also restores a declaration-backed allowance
 removed by `revoke`; `revoke` changes live policy, not declaration authority.
 
 The invariants, rather than the internal mechanism, define network conformance.
-Implementations that preserve the same observations are behaviorally equivalent
-for this contract. This is an engineering criterion informed by Kenogram's
-conceptual lineage; it is not a claim to implement formal morphic bisimulation.
+Conforming mechanisms satisfy the same finite observation contract; Kenogram
+makes no claim of equivalence beyond that contract. This engineering criterion
+is informed by Kenogram's conceptual lineage; it is not a claim to implement
+formal morphic bisimulation.
 
 The mechanism uses a short-lived `nsenter` helper to create the listener inside
 the world's user and network namespaces and transfer its descriptor over an

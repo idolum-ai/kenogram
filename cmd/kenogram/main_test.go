@@ -129,21 +129,27 @@ func TestSubcommandHelpIsSuccessful(t *testing.T) {
 
 func TestDoctorReportsEveryObservationInTextAndJSON(t *testing.T) {
 	previous := inspectHost
-	inspectHost = func(context.Context, string) doctor.Report {
+	wantState := t.TempDir()
+	var observedState string
+	inspectHost = func(_ context.Context, stateDir string) doctor.Report {
+		observedState = stateDir
 		return doctor.Report{Ready: false, Checks: []doctor.Check{
 			{Name: "podman_rootless", Status: "pass", Observed: "rootless=true"},
-			{Name: "nsenter_executable", Status: "fail", Observed: "not found", Remediation: "install util-linux"},
+			{Name: "nsenter_executable", Status: "fail", Observed: "not found\nretry", Remediation: "install util-linux"},
 			{Name: "normal_entry_surface", Status: "info", Observed: "needs tmux"},
 		}}
 	}
 	t.Cleanup(func() { inspectHost = previous })
-	t.Setenv("KENOGRAM_STATE_DIR", t.TempDir())
+	t.Setenv("KENOGRAM_STATE_DIR", wantState)
 
 	var stdout, stderr bytes.Buffer
 	if code := runDoctor(context.Background(), nil, &stdout, &stderr); code != 1 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	for _, want := range []string{"PASS\tpodman_rootless", "FAIL\tnsenter_executable", "remedy: install util-linux", "INFO\tnormal_entry_surface", "ready: false"} {
+	if observedState != wantState {
+		t.Fatalf("doctor inspected state %q, want %q", observedState, wantState)
+	}
+	for _, want := range []string{"PASS\tpodman_rootless", "FAIL\tnsenter_executable\tnot found" + `\nretry`, "remedy: install util-linux", "INFO\tnormal_entry_surface", "ready: false"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("text output missing %q: %s", want, stdout.String())
 		}

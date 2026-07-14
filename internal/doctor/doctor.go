@@ -39,11 +39,13 @@ type Probe struct {
 	LookPath func(string) (string, error)
 	ReadFile func(string) ([]byte, error)
 	Run      func(context.Context, string, ...string) ([]byte, error)
+	Stat     func(string) (os.FileInfo, error)
+	Access   func(string) error
 	DiskFree func(string) (uint64, error)
 	StateDir string
 }
 
-// Inspect observes the real host without changing it.
+// Inspect observes the real host without changing Kenogram worlds or state.
 func Inspect(ctx context.Context, stateDir string) Report {
 	p := Probe{
 		GOOS:     runtime.GOOS,
@@ -56,6 +58,8 @@ func Inspect(ctx context.Context, stateDir string) Report {
 			}
 			return out, nil
 		},
+		Stat:     os.Stat,
+		Access:   directoryAccess,
 		DiskFree: diskFree,
 		StateDir: stateDir,
 	}
@@ -64,6 +68,14 @@ func Inspect(ctx context.Context, stateDir string) Report {
 
 // Inspect executes all independent checks and never stops at the first failure.
 func (p Probe) Inspect(ctx context.Context) Report {
+	stat := p.Stat
+	if stat == nil {
+		stat = os.Stat
+	}
+	access := p.Access
+	if access == nil {
+		access = directoryAccess
+	}
 	checks := []Check{}
 	add := func(name string, ok bool, observed, remediation string) {
 		status := "pass"
@@ -77,7 +89,8 @@ func (p Probe) Inspect(ctx context.Context) Report {
 
 	add("operating_system", p.GOOS == "linux", p.GOOS, "run Kenogram on Linux, or select an operator-managed Apple container machine")
 	controllers, cgroupErr := p.ReadFile("/sys/fs/cgroup/cgroup.controllers")
-	add("cgroups_v2", cgroupErr == nil, observation(controllers, cgroupErr), "enable the unified cgroups v2 hierarchy")
+	controllersOK, controllerObservation := requiredControllers(controllers, cgroupErr)
+	add("cgroups_v2", controllersOK, controllerObservation, "enable cgroups v2 with the cpu, memory, and pids controllers available")
 
 	podmanPath, podmanPathErr := p.LookPath("podman")
 	add("podman_executable", podmanPathErr == nil, observation([]byte(podmanPath), podmanPathErr), "install rootless Podman")
@@ -116,18 +129,22 @@ func (p Probe) Inspect(ctx context.Context) Report {
 		add("podman_cgroups_v2", info.Host.CgroupVersion == "v2", info.Host.CgroupVersion, "configure Podman to use cgroups v2")
 		uidSize, gidSize := mappingSize(info.Host.IDMappings.UIDMap), mappingSize(info.Host.IDMappings.GIDMap)
 		add("subordinate_ids", uidSize > 1 && gidSize > 1, fmt.Sprintf("uid_range=%d gid_range=%d", uidSize, gidSize), "configure /etc/subuid and /etc/subgid for the current user, then migrate the rootless Podman store if required")
+	} else {
+		add("podman_rootless", false, "not observed: podman_info failed", "repair podman_info, then rerun doctor")
+		add("podman_cgroups_v2", false, "not observed: podman_info failed", "repair podman_info, then rerun doctor")
+		add("subordinate_ids", false, "not observed: podman_info failed", "repair podman_info, then rerun doctor")
 	}
 
 	nsenterPath, nsenterErr := p.LookPath("nsenter")
 	add("nsenter_executable", nsenterErr == nil, observation([]byte(nsenterPath), nsenterErr), "install util-linux so Kenogram can hand a listener into the world network namespace")
 
-	statePath := nearestExisting(p.StateDir)
-	stateFree, stateErr := p.DiskFree(statePath)
-	add("state_storage", stateErr == nil && stateFree > 0, diskObservation(statePath, stateFree, stateErr), "make the Kenogram state filesystem available and writable")
+	stateOK, stateObserved := storageObservation(p.StateDir, stat, access, p.DiskFree)
+	add("state_storage", stateOK, stateObserved, "make the Kenogram state filesystem available with effective write and traverse access")
 	if podmanInfoOK {
-		storePath := nearestExisting(info.Store.GraphRoot)
-		storeFree, storeErr := p.DiskFree(storePath)
-		add("container_storage", storeErr == nil && storeFree > 0, diskObservation(storePath, storeFree, storeErr), "free space in the rootless Podman graph root; composition guides state their larger lane-specific floors")
+		storeOK, storeObserved := storageObservation(info.Store.GraphRoot, stat, access, p.DiskFree)
+		add("container_storage", storeOK, storeObserved, "make the rootless Podman graph root accessible and free space; composition guides state their larger lane-specific floors")
+	} else {
+		add("container_storage", false, "not observed: podman_info failed", "repair podman_info, then rerun doctor")
 	}
 
 	checks = append(checks,
@@ -162,21 +179,65 @@ func observation(value []byte, err error) string {
 	return trimmed
 }
 
-func nearestExisting(path string) string {
+func requiredControllers(value []byte, err error) (bool, string) {
+	if err != nil {
+		return false, err.Error()
+	}
+	present := map[string]bool{}
+	for _, controller := range strings.Fields(string(value)) {
+		present[controller] = true
+	}
+	missing := []string{}
+	for _, required := range []string{"cpu", "memory", "pids"} {
+		if !present[required] {
+			missing = append(missing, required)
+		}
+	}
+	observed := strings.TrimSpace(string(value))
+	if observed == "" {
+		observed = "none"
+	}
+	if len(missing) != 0 {
+		return false, fmt.Sprintf("missing=%s observed=%s", strings.Join(missing, ","), observed)
+	}
+	return true, observed
+}
+
+func nearestExisting(path string, stat func(string) (os.FileInfo, error)) (string, error) {
 	if path == "" {
-		return "."
+		path = "."
 	}
 	path = filepath.Clean(path)
 	for {
-		if _, err := os.Stat(path); err == nil {
-			return path
+		if _, err := stat(path); err == nil {
+			return path, nil
+		} else if !os.IsNotExist(err) {
+			return path, err
 		}
 		parent := filepath.Dir(path)
 		if parent == path {
-			return path
+			return path, fmt.Errorf("no existing ancestor")
 		}
 		path = parent
 	}
+}
+
+func storageObservation(path string, stat func(string) (os.FileInfo, error), access func(string) error, freeSpace func(string) (uint64, error)) (bool, string) {
+	if strings.TrimSpace(path) == "" {
+		return false, "path not reported"
+	}
+	existing, err := nearestExisting(path, stat)
+	if err != nil {
+		return false, fmt.Sprintf("%s: %v", existing, err)
+	}
+	if err := access(existing); err != nil {
+		return false, fmt.Sprintf("%s: effective write/traverse access: %v", existing, err)
+	}
+	free, err := freeSpace(existing)
+	if err != nil || free == 0 {
+		return false, diskObservation(existing, free, err)
+	}
+	return true, diskObservation(existing, free, nil) + "; effective write/traverse access confirmed"
 }
 
 func diskObservation(path string, free uint64, err error) string {

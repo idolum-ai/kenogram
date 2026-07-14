@@ -26,14 +26,19 @@ successor before recording it applied. `down`, `destroy`, `enter --repair`,
 `status`, `allow`, and `worlds` operate only from host-side state. `version`
 reports build provenance.
 
-`doctor` observes Linux, cgroups v2, the rootless Podman executable and info
-surface, subordinate ID mappings, `nsenter`, state storage, and the rootless
-container graph root. It reports every check even when one fails and exits 1 if
+`doctor` observes Linux, the required cgroups v2 CPU/memory/PID controllers,
+the rootless Podman executable and info surface, subordinate ID mappings,
+`nsenter`, effective state-directory access and free space, and the rootless
+container graph root. It reports every named check even when an earlier
+observation blocks it and exits 1 if
 any required observation fails. Informational checks distinguish the `/bin/sh`
 repair-entry surface from the tmux-backed normal-entry surface without claiming
-to inspect an image that has not been declared. `doctor --json` emits the stable
-`ready` boolean and ordered `checks` objects with `name`, `status`, `observed`,
-and optional `remediation` fields.
+to inspect an image that has not been declared. It does not mutate Kenogram
+worlds or durable state, although Podman may initialize its own rootless runtime
+metadata while answering `podman info`. `doctor --json` emits `ready` and an
+additive set of `checks` objects with stable `name`, `pass`/`fail`/`info`
+`status`, `observed`, and optional `remediation` fields. Consumers select checks
+by name; order and the complete set of names are not a versioned API in v0.x.
 
 `status` names the authoritative generation and, while a durable transition
 exists, the candidate generation and recovery phase separately. `enter

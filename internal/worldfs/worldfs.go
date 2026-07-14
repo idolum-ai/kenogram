@@ -15,6 +15,9 @@ import (
 type Layout struct{ Root, Workspace, Digests, Staging, Applied, AppliedPlan, State, History, Transition, Lock, ProxySocket, ProxyPID string }
 
 func BaseDir() (string, error) {
+	if base := strings.TrimSpace(os.Getenv("KENOGRAM_STATE_DIR")); base != "" {
+		return filepath.Clean(base), nil
+	}
 	if xdg := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdg != "" {
 		return filepath.Join(xdg, "kenogram", "worlds"), nil
 	}

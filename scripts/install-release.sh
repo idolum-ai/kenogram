@@ -83,4 +83,8 @@ install -m 0755 "${tmp_dir}/kenogram" "${install_tmp}"
 mv -f "${install_tmp}" "${KENOGRAM_INSTALL_DIR}/kenogram"
 [[ -f "${KENOGRAM_INSTALL_DIR}/kenogram" && ! -L "${KENOGRAM_INSTALL_DIR}/kenogram" && -x "${KENOGRAM_INSTALL_DIR}/kenogram" ]] || die "installed binary is invalid"
 printf 'Installed %s to %s/kenogram\n' "${version}" "${KENOGRAM_INSTALL_DIR}"
-printf 'Host prerequisites remain explicit; verify with: %s/kenogram version\n' "${KENOGRAM_INSTALL_DIR}"
+printf 'Check host prerequisites with: %s/kenogram doctor\n' "${KENOGRAM_INSTALL_DIR}"
+case ":${PATH}:" in
+  *":${KENOGRAM_INSTALL_DIR}:"*) ;;
+  *) printf 'To run kenogram by name in this shell: export PATH="%s:$PATH"\n' "${KENOGRAM_INSTALL_DIR}" ;;
+esac
