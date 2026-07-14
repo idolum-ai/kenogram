@@ -14,6 +14,7 @@ import (
 
 	"github.com/idolum-ai/kenogram/internal/app"
 	"github.com/idolum-ai/kenogram/internal/backend"
+	"github.com/idolum-ai/kenogram/internal/doctor"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
 
@@ -111,7 +112,7 @@ func TestJSONDryRun(t *testing.T) {
 }
 
 func TestSubcommandHelpIsSuccessful(t *testing.T) {
-	for _, command := range []string{"up", "down", "destroy", "enter", "status", "allow", "revoke", "repair-history", "worlds"} {
+	for _, command := range []string{"up", "down", "destroy", "enter", "status", "allow", "revoke", "repair-history", "worlds", "doctor"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run([]string{command, "--help"}, &stdout, &stderr)
@@ -123,6 +124,48 @@ func TestSubcommandHelpIsSuccessful(t *testing.T) {
 				t.Fatalf("down help advertises destroy-only confirmation: %q", output)
 			}
 		})
+	}
+}
+
+func TestDoctorReportsEveryObservationInTextAndJSON(t *testing.T) {
+	previous := inspectHost
+	wantState := t.TempDir()
+	var observedState string
+	inspectHost = func(_ context.Context, stateDir string) doctor.Report {
+		observedState = stateDir
+		return doctor.Report{Ready: false, Checks: []doctor.Check{
+			{Name: "podman_rootless", Status: "pass", Observed: "rootless=true"},
+			{Name: "nsenter_executable", Status: "fail", Observed: "not found\nretry", Remediation: "install util-linux"},
+			{Name: "normal_entry_surface", Status: "info", Observed: "needs tmux"},
+		}}
+	}
+	t.Cleanup(func() { inspectHost = previous })
+	t.Setenv("KENOGRAM_STATE_DIR", wantState)
+
+	var stdout, stderr bytes.Buffer
+	if code := runDoctor(context.Background(), nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if observedState != wantState {
+		t.Fatalf("doctor inspected state %q, want %q", observedState, wantState)
+	}
+	for _, want := range []string{"PASS\tpodman_rootless", "FAIL\tnsenter_executable\tnot found" + `\nretry`, "remedy: install util-linux", "INFO\tnormal_entry_surface", "ready: false"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("text output missing %q: %s", want, stdout.String())
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runDoctor(context.Background(), []string{"--json"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var report doctor.Report
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Ready || len(report.Checks) != 3 || report.Checks[1].Remediation != "install util-linux" {
+		t.Fatalf("report = %#v", report)
 	}
 }
 

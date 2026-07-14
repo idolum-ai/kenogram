@@ -38,7 +38,10 @@ behavioral or ontological identity.
 The parser, not this summary, is authoritative about required keys and defaults.
 Start from [`../kenogram.example.toml`](../kenogram.example.toml) and use
 `kenogram up --dry-run` as the validation boundary. The example proves planning,
-not image compatibility. Before start, the materialized world must contain
+not image compatibility. `world.base` is immutable when expressed as either a
+registry reference ending in `@sha256:<64 hex digits>` or an exact local image
+ID `sha256:<64 hex digits>`; any tag requires the explicit `allow_unpinned =
+true` escape hatch. Before start, the materialized world must contain
 `/usr/bin/tail`, `/bin/sh`, the declared user, and every executable named by an
 autostart service; executables may come from the base or declared copies. Normal
 `enter` additionally requires `/usr/bin/tmux` and a `main` session.

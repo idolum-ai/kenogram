@@ -55,6 +55,18 @@ func TestBuildWarnsForExplicitlyAllowedUnpinnedImage(t *testing.T) {
 	}
 }
 
+func TestBuildDoesNotWarnForExactLocalImageID(t *testing.T) {
+	d, path, data := fixture(t, "")
+	d.World.Base = "sha256:" + strings.Repeat("b", 64)
+	result, err := Build(d, path, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("warnings: %#v", result.Warnings)
+	}
+}
+
 func TestRenderDoesNotReadOrPrintSourceContents(t *testing.T) {
 	d, path, data := fixture(t, "")
 	secret := "CONTENT-MUST-NOT-APPEAR"

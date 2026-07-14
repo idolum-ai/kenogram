@@ -9,6 +9,19 @@ import (
 	"github.com/idolum-ai/kenogram/internal/plan"
 )
 
+func TestBaseDirUsesExplicitStateOverride(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "custom", "worlds")
+	t.Setenv("KENOGRAM_STATE_DIR", want)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "ignored"))
+	got, err := BaseDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("BaseDir() = %q, want %q", got, want)
+	}
+}
+
 func TestStateAppliedAndGeneration(t *testing.T) {
 	l := For(t.TempDir(), "x")
 	if err := l.Ensure(); err != nil {

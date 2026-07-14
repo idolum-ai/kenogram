@@ -17,6 +17,7 @@ import (
 
 	"github.com/idolum-ai/kenogram/internal/app"
 	"github.com/idolum-ai/kenogram/internal/backend"
+	"github.com/idolum-ai/kenogram/internal/doctor"
 	"github.com/idolum-ai/kenogram/internal/netns"
 	"github.com/idolum-ai/kenogram/internal/plan"
 	"github.com/idolum-ai/kenogram/internal/proxy"
@@ -86,6 +87,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runRepairHistory(args[1:], stdout, stderr)
 	case "worlds":
 		return runWorlds(args[1:], stdout, stderr)
+	case "doctor":
+		return runDoctor(ctx, args[1:], stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "unknown command:", args[0])
 		printHelp(stderr)
@@ -130,10 +133,74 @@ var newApp = func(stdout io.Writer) (*app.App, error) {
 		return nil, err
 	}
 	a.Out = stdout
-	if base := strings.TrimSpace(os.Getenv("KENOGRAM_STATE_DIR")); base != "" {
-		a.BaseDir = base
-	}
 	return a, nil
+}
+
+var inspectHost = doctor.Inspect
+
+func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram doctor [--json]"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprintln(stderr, usage) }
+	jsonOut := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fs.Usage()
+		return 2
+	}
+	stateDir, err := worldfs.BaseDir()
+	if err != nil {
+		fmt.Fprintln(stderr, "doctor:", err)
+		return 1
+	}
+	report := inspectHost(ctx, stateDir)
+	if *jsonOut {
+		if code := encode(stdout, stderr, report); code != 0 {
+			return code
+		}
+	} else {
+		for _, check := range report.Checks {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\n", strings.ToUpper(check.Status), check.Name, terminalField(check.Observed))
+			if check.Status == "fail" && check.Remediation != "" {
+				fmt.Fprintf(stdout, "  remedy: %s\n", terminalField(check.Remediation))
+			}
+		}
+		fmt.Fprintf(stdout, "ready: %t\n", report.Ready)
+	}
+	if !report.Ready {
+		return 1
+	}
+	return 0
+}
+
+func terminalField(value string) string {
+	var clean strings.Builder
+	for _, r := range value {
+		switch r {
+		case '\n':
+			clean.WriteString(`\n`)
+		case '\r':
+			clean.WriteString(`\r`)
+		case '\t':
+			clean.WriteString(`\t`)
+		case '\x1b':
+			clean.WriteString(`\u001b`)
+		default:
+			if r < ' ' || r == '\x7f' {
+				fmt.Fprintf(&clean, `\u%04x`, r)
+			} else {
+				clean.WriteRune(r)
+			}
+		}
+	}
+	return clean.String()
 }
 
 func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -605,6 +672,7 @@ func printHelp(w io.Writer) {
   kenogram revoke <world> <host>:<port>
   kenogram repair-history --yes <world>
   kenogram worlds [--json]
+  kenogram doctor [--json]
   kenogram version
   kenogram help
 `)

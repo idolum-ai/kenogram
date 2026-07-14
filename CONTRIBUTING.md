@@ -2,6 +2,11 @@
 
 Kenogram accepts small changes that strengthen an observable contract.
 
+Released users do not need Go or a repository checkout. Contributors need the
+Go version declared by `go.mod`, Make, Git, and `rg`; build the development
+binary with `make build`. Runtime and evidence dependencies are separate and
+listed below.
+
 1. Read the relevant file in `requirements/` and keep contract, evidence, and
    implementation claims distinct.
 2. Add the smallest test that would fail without the change. Prefer standard
@@ -30,6 +35,11 @@ candidate binaries, checksums, embedded source identity, and release text before
 merge; ordinary contributors never need publication credentials.
 
 ## Composition proofs
+
+Operator-facing recipes and their shared trust model live in
+[`docs/compositions/`](docs/compositions/README.md). Keep versions, image
+digests, capacity claims, and proof links synchronized with the locks and tests
+when changing a composition.
 
 All release inputs are URL- and checksum-locked under `internal/e2e/testdata`.
 Local archive variables avoid repeated downloads without weakening digest

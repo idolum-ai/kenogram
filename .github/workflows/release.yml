@@ -121,7 +121,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          expected_assets="$(printf '%s\n' checksums.txt "kenogram-${TAG}-linux-amd64.tar.gz" "kenogram-${TAG}-linux-arm64.tar.gz")"
+          expected_assets="$(printf '%s\n' checksums.txt install-release.sh "kenogram-${TAG}-linux-amd64.tar.gz" "kenogram-${TAG}-linux-arm64.tar.gz" prepare-first-world.sh reference-world.Containerfile)"
           verify_release() {
             [[ "$(gh release view "${TAG}" --json name --jq .name)" = "${TAG}" ]] || return 1
             [[ "$(gh release view "${TAG}" --json body --jq .body)" = "$(cat release-notes.md)" ]] || return 1

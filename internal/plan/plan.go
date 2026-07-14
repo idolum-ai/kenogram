@@ -10,13 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 
 	"github.com/idolum-ai/kenogram/internal/decl"
 )
-
-var pinnedImage = regexp.MustCompile(`@sha256:[0-9a-fA-F]{64}$`)
 
 // Plan is the fully resolved, canonical provisioning intent at M1.
 type Plan struct {
@@ -126,7 +123,7 @@ func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) 
 	}
 	planSum, declarationSum := sha256.Sum256(canonical), sha256.Sum256(declarationBytes)
 	result := Result{PlanDigest: hex.EncodeToString(planSum[:]), DeclarationDigest: hex.EncodeToString(declarationSum[:]), Warnings: []string{}, Plan: p}
-	if !pinnedImage.MatchString(d.World.Base) {
+	if !decl.ImagePinned(d.World.Base) {
 		result.Warnings = append(result.Warnings, "UNPINNED BASE IMAGE: reproducibility depends on mutable external state")
 	}
 	return result, nil

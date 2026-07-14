@@ -3,12 +3,21 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 rg -q 'Status: binding contract' requirements/declaration.md
-rg -q 'Evidence and open boundaries' requirements/INDEX.md
+rg -q 'Evidence and known limits' requirements/INDEX.md
+for posture in 'Accepted for v0.x' 'Before stable' 'Experimental'; do
+  rg -Fq "${posture}" requirements/INDEX.md
+done
 rg -q 'make integration' README.md requirements/INDEX.md
 rg -q 'make e2e' README.md requirements/INDEX.md
 rg -q 'first-world guide' README.md
-rg -q 'podman unshare true' docs/getting-started.md
+rg -q 'kenogram doctor' README.md docs/getting-started.md requirements/INDEX.md
+rg -q 'prepare-first-world.sh' README.md docs/getting-started.md docs/release-strategy.md
+rg -q 'exact local image ID' docs/getting-started.md requirements/declaration.md
 rg -q 'not a morphogrammatic calculus' docs/kenogrammatics.md
+rg -Fq 'Natural Numbers in Trans-Classic' docs/kenogrammatics.md
+rg -Fq 'Morphogrammatik: Eine Einführung' docs/kenogrammatics.md
+rg -Fq 'Morphogrammatics for' docs/kenogrammatics.md
+rg -q 'Status: design proposal' docs/world-pattern-proposal.md
 rg -q 'candidate-reviewed tree' docs/release-strategy.md
 rg -q 'scripts/install-release.sh' README.md docs/release-strategy.md
 rg -q 'macos-26' .github/workflows/ci.yml docs/apple-container-machine.md
@@ -26,6 +35,9 @@ for evidence in \
   '2026.6.11' \
   'v2026.7.7.2'; do
   rg -Fq "$evidence" requirements/INDEX.md
+done
+for guide in docs/compositions/README.md docs/compositions/engram.md docs/compositions/openclaw.md docs/compositions/hermes-agent.md; do
+  test -s "${guide}"
 done
 e2e_count="$(awk '/^e2e:/ { print NF - 1; exit }' Makefile)"
 test "$e2e_count" -eq 5

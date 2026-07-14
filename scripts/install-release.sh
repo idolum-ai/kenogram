@@ -28,6 +28,28 @@ latest_version() {
   download "https://api.github.com/repos/${KENOGRAM_RELEASE_REPO}/releases/latest" "$1"
   sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$1" | head -n1
 }
+validate_version() {
+  local version="${1:-}" value core prerelease part identifier
+  local -a core_parts identifiers
+  [[ "${version}" == v* && "${version}" != *+* ]] || die "release version must be Semantic Versioning with a v prefix; got ${version:-<empty>}"
+  value="${version#v}"
+  if [[ "${value}" == *-* ]]; then core="${value%%-*}"; prerelease="${value#*-}"; else core="${value}"; prerelease=""; fi
+  [[ "${core}" != .* && "${core}" != *. && "${core}" != *..* ]] || die "invalid release version: ${version}"
+  IFS=. read -r -a core_parts <<< "${core}"
+  [[ "${#core_parts[@]}" -eq 3 ]] || die "invalid release version: ${version}"
+  for part in "${core_parts[@]}"; do
+    [[ "${part}" =~ ^(0|[1-9][0-9]*)$ ]] || die "invalid release version: ${version}"
+  done
+  if [[ "${value}" == *-* ]]; then
+    [[ -n "${prerelease}" && "${prerelease}" != .* && "${prerelease}" != *. && "${prerelease}" != *..* ]] || die "invalid release version: ${version}"
+    IFS=. read -r -a identifiers <<< "${prerelease}"
+    for identifier in "${identifiers[@]}"; do
+      [[ -n "${identifier}" && "${identifier}" =~ ^[0-9A-Za-z-]+$ ]] || die "invalid release version: ${version}"
+      [[ ! "${identifier}" =~ ^[0-9]+$ || "${identifier}" =~ ^(0|[1-9][0-9]*)$ ]] || die "invalid release version: ${version}"
+    done
+  fi
+  printf '%s\n' "${version}"
+}
 
 version="${1:-}"
 for command in uname tar install awk sed grep mktemp; do
@@ -37,7 +59,7 @@ done
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"; rm -f "${install_tmp:-}"' EXIT
 [[ -n "${version}" ]] || version="$(latest_version "${tmp_dir}/latest.json")"
-"$(dirname "${BASH_SOURCE[0]}")/validate-release-version.sh" "${version}" >/dev/null || die "invalid release version: ${version}"
+version="$(validate_version "${version}")"
 
 arch="$(normalize_arch "$(uname -m)")"
 asset="kenogram-${version}-linux-${arch}.tar.gz"
@@ -61,4 +83,8 @@ install -m 0755 "${tmp_dir}/kenogram" "${install_tmp}"
 mv -f "${install_tmp}" "${KENOGRAM_INSTALL_DIR}/kenogram"
 [[ -f "${KENOGRAM_INSTALL_DIR}/kenogram" && ! -L "${KENOGRAM_INSTALL_DIR}/kenogram" && -x "${KENOGRAM_INSTALL_DIR}/kenogram" ]] || die "installed binary is invalid"
 printf 'Installed %s to %s/kenogram\n' "${version}" "${KENOGRAM_INSTALL_DIR}"
-printf 'Host prerequisites remain explicit; verify with: %s/kenogram version\n' "${KENOGRAM_INSTALL_DIR}"
+printf 'Check host prerequisites with: %s/kenogram doctor\n' "${KENOGRAM_INSTALL_DIR}"
+case ":${PATH}:" in
+  *":${KENOGRAM_INSTALL_DIR}:"*) ;;
+  *) printf 'To run kenogram by name in this shell: export PATH="%s:$PATH"\n' "${KENOGRAM_INSTALL_DIR}" ;;
+esac

@@ -25,7 +25,7 @@ selecting the launcher, the operator must:
    `nsenter`, and rootless Podman, in that machine.
 3. Configure cgroups v2 and subordinate UID/GID ranges for the machine's mapped
    user. `podman info --format json` must report rootless operation, cgroups v2,
-   and mappings larger than one ID.
+   and mappings larger than one ID; `podman unshare true` must succeed.
 4. Put declarations and copied inputs somewhere visible inside the machine.
 
 Build macOS launchers with the security-patched Go version in `go.mod`'s
