@@ -92,6 +92,10 @@ func runNamespaceConnectionHelper(ctx context.Context, command *exec.Cmd, parent
 	case message = <-received:
 		select {
 		case waitErr = <-waited:
+			if cause := context.Cause(ctx); waitErr != nil && cause != nil {
+				closeReceivedDescriptors(message.control)
+				return nil, cause
+			}
 		case <-ctx.Done():
 			_ = command.Process.Kill()
 			waitErr = <-waited

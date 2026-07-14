@@ -175,6 +175,43 @@ func TestNamespaceHelperEarlyFailurePreservesDiagnosticAndFDs(t *testing.T) {
 	}
 }
 
+func TestNamespaceHelperCancellationAfterControlMessageReturnsCauseAndClosesRights(t *testing.T) {
+	baseline := openFDCount(t)
+	parent, child := controlPair(t)
+	source, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Sendmsg(int(child.Fd()), []byte{1}, syscall.UnixRights(int(source.Fd())), nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	command := exec.CommandContext(ctx, "sleep", "30")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	connection, helperErr := runNamespaceConnectionHelper(ctx, command, parent, child, &stderr)
+	if connection != nil {
+		connection.Close()
+		t.Fatal("cancelled helper returned a queued descriptor")
+	}
+	if !errors.Is(helperErr, context.Canceled) {
+		t.Fatalf("helper error = %v, want context cancellation", helperErr)
+	}
+	if command.ProcessState == nil {
+		t.Fatal("helper process was not reaped")
+	}
+	parent.Close()
+	child.Close()
+	source.Close()
+	if got := openFDCount(t); got != baseline {
+		t.Fatalf("prequeued cancellation left %d descriptors, want %d", got, baseline)
+	}
+}
+
 func TestSendConnectionTransfersBidirectionalTCPDescriptorWithoutLeaks(t *testing.T) {
 	baseline := openFDCount(t)
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -209,7 +246,12 @@ func TestSendConnectionTransfersBidirectionalTCPDescriptorWithoutLeaks(t *testin
 		t.Fatal(err)
 	}
 	sent := make(chan error, 1)
-	go func() { sent <- SendConnection(int(child.Fd()), listener.Addr().String()) }()
+	transferredFD, err := syscall.Dup(int(child.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	syscall.CloseOnExec(transferredFD)
+	go func() { sent <- SendConnection(transferredFD, listener.Addr().String()) }()
 	message := receiveControl(parent)
 	sendErr := <-sent
 	connection, err := connectionFromControl(message, sendErr, "")
@@ -256,7 +298,12 @@ func TestSendConnectionReturnsDialDiagnosticWithoutDescriptorLeaks(t *testing.T)
 		t.Fatal(err)
 	}
 	sent := make(chan error, 1)
-	go func() { sent <- SendConnection(int(child.Fd()), address) }()
+	transferredFD, err := syscall.Dup(int(child.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	syscall.CloseOnExec(transferredFD)
+	go func() { sent <- SendConnection(transferredFD, address) }()
 	message := receiveControl(parent)
 	sendErr := <-sent
 	connection, transferErr := connectionFromControl(message, sendErr, "")
