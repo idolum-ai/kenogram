@@ -7,10 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +29,8 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Minute)
 	defer cancel()
+	tmp := t.TempDir()
+	resources := prepareContainerE2E(t, ctx, e2eLaneHermes)
 	doorHost := hostDoorIPv4(t)
 	providerProof := hermesProof + "\n[engram:upstream] " + hermesEngramSignalID + " " + hermesEngramProof
 	provider := newObservedProvider(t, doorHost, providerProof)
@@ -40,15 +40,16 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 	providerPort := mustPort(t, provider.URL)
 	telegramPort := mustPort(t, telegram.URL)
 	root := repositoryRoot(t)
-	tmp := t.TempDir()
 	hermes := readHermesLock(t)
 	verifyHermesArtifact(t, ctx, tmp, hermes)
 	image := hermes.Image
+	resources.trackImage(t, ctx, image)
 	engramLock := readReleaseLock(t)
 	engram := materializeEngramRelease(t, ctx, tmp, engramLock)
 
-	world := "engram-hermes-e2e-" + strconv.Itoa(os.Getpid())
 	stateRoot := filepath.Join(tmp, "state")
+	world := e2eWorldName(t, "eh-e2e", stateRoot)
+	resources.trackContainer(t, ctx, world, 1)
 	hermesConfig := filepath.Join(tmp, "hermes-config.yaml")
 	engramEnv := filepath.Join(tmp, "engram.env")
 	declaration := filepath.Join(tmp, "kenogram.toml")
@@ -56,16 +57,10 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 	run(t, ctx, root, append(os.Environ(), "CGO_ENABLED=0"), "go", "build", "-buildvcs=false", "-o", kenogram, "./cmd/kenogram")
 	testEnv := append(os.Environ(), "KENOGRAM_STATE_DIR="+stateRoot)
 
-	t.Cleanup(func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cleanupCancel()
-		_ = exec.CommandContext(cleanupCtx, "podman", "rm", "--force", containerName(world, 1)).Run()
-	})
-
 	writeHermesConfig(t, hermesConfig, doorHost, providerPort, "")
 	writeEngramCompositionEnv(t, engramEnv, telegramFixtureToken, telegramAPIBase(telegram.URL, doorHost), telegramFixtureUser, telegramFixtureUser)
 	writeEngramHermesDeclaration(t, declaration, world, image, engram, hermesConfig, engramEnv, doorHost, providerPort, doorHost, telegramPort)
-	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
+	runImageAcquisition(t, ctx, resources, []string{image}, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	container := containerName(world, 1)
 	waitForTmuxTarget(t, ctx, tmp, testEnv, container, "main:hermes")
 	waitForHermesTUIReady(t, ctx, tmp, testEnv, container, "main:hermes")

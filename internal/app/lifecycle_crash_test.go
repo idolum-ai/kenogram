@@ -414,17 +414,49 @@ func TestCommitRecoveryRestartsStoppedSuccessorAndServices(t *testing.T) {
 	}
 }
 
+func TestCommitRecoveryReplacesUnresponsiveProxy(t *testing.T) {
+	base := t.TempDir()
+	crashAt(t, base, "commit-recorded")
+	layout := worldfs.For(base, "w")
+	prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
+	runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
+	proxyBefore, err := os.ReadFile(layout.ProxyPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{
+		Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: func(layout worldfs.Layout) bool {
+			identity, err := os.ReadFile(layout.ProxyPID)
+			return err == nil && !bytes.Equal(identity, proxyBefore) && crashProxyReady(layout)
+		},
+	}
+	defer func() { _ = a.stopProxy(layout) }()
+	if err := a.recoverTransition(context.Background(), layout); err != nil {
+		t.Fatal(err)
+	}
+	proxyAfter, err := os.ReadFile(layout.ProxyPID)
+	if err != nil || bytes.Equal(proxyBefore, proxyAfter) {
+		t.Fatalf("unresponsive proxy was not replaced: before=%q after=%q err=%v", proxyBefore, proxyAfter, err)
+	}
+}
+
 func TestDestroyRemovesEveryGenerationWithoutRecoveringMissingSuccessor(t *testing.T) {
 	for _, test := range []struct {
 		name            string
+		checkpoint      string
+		phase           string
 		removeSuccessor bool
 	}{
-		{name: "both-generations-present"},
-		{name: "successor-missing", removeSuccessor: true},
+		{name: "rollback/both-generations-present", checkpoint: "predecessor-stopped", phase: "rollback"},
+		{name: "rollback/successor-missing", checkpoint: "predecessor-stopped", phase: "rollback", removeSuccessor: true},
+		{name: "commit/both-generations-present", checkpoint: "commit-recorded", phase: "commit"},
+		{name: "commit/successor-missing", checkpoint: "commit-recorded", phase: "commit", removeSuccessor: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			base := t.TempDir()
-			crashAt(t, base, "commit-recorded")
+			crashAt(t, base, test.checkpoint)
 			layout := worldfs.For(base, "w")
 			prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
 			runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
@@ -453,7 +485,7 @@ func TestDestroyRemovesEveryGenerationWithoutRecoveringMissingSuccessor(t *testi
 				t.Fatalf("destroyed history records = %#v, %v", records, err)
 			}
 			last := records[len(records)-1]
-			if last.Action != "destroy" || last.Outcome != "destroyed" || !strings.Contains(last.Detail, "unresolved commit transition") {
+			if last.Action != "destroy" || last.Outcome != "destroyed" || !strings.Contains(last.Detail, "unresolved "+test.phase+" transition") {
 				t.Fatalf("destroy record = %#v", last)
 			}
 		})

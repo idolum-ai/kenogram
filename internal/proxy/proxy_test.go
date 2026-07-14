@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -28,6 +29,25 @@ func TestControlPingProvesRoundTrip(t *testing.T) {
 	if !response.OK || response.Error != "" {
 		t.Fatalf("ping response = %#v", response)
 	}
+}
+
+func TestSendControlContextStopsWaitingForUnresponsivePeer(t *testing.T) {
+	client, server := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer server.Close()
+		var request ControlRequest
+		_ = json.NewDecoder(server).Decode(&request)
+		_, _ = io.Copy(io.Discard, server)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := sendControlContext(ctx, client, ControlRequest{Operation: "ping"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("unresponsive peer error = %v", err)
+	}
+	<-done
 }
 
 type resolver struct {

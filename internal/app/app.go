@@ -60,11 +60,16 @@ func (a *App) checkpoint(name string) {
 	}
 }
 
-func (a *App) proxyIsReady(l worldfs.Layout) bool {
+func (a *App) proxyIsReady(ctx context.Context, l worldfs.Layout) bool {
 	if a.proxyReady != nil {
 		return a.proxyReady(l)
 	}
-	return a.proxyAlive(l) && proxy.SendControl(l.ProxySocket, proxy.ControlRequest{Operation: "ping"}) == nil
+	if !a.proxyAlive(l) {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	return proxy.SendControlContext(probeCtx, l.ProxySocket, proxy.ControlRequest{Operation: "ping"}) == nil
 }
 
 type Prepared struct {
@@ -382,7 +387,7 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 			for _, allowed := range prepared.Result.Plan.NetworkAllow {
 				destinations = append(destinations, proxy.Destination{Host: allowed.Host, Port: int(allowed.Port)})
 			}
-			err = proxy.SendControl(l.ProxySocket, proxy.ControlRequest{Operation: "reconcile", Destinations: destinations})
+			err = proxy.SendControlContext(ctx, l.ProxySocket, proxy.ControlRequest{Operation: "reconcile", Destinations: destinations})
 		}
 		if !a.proxyAlive(l) || err != nil {
 			proxyPID, err = a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
@@ -570,10 +575,10 @@ func (a *App) recoverTransition(ctx context.Context, l worldfs.Layout) error {
 	if verifyErr := a.verifyRuntimeEvidence(evidence, prepared.Result, transition.Successor.Generation, mounts); verifyErr != nil {
 		return fmt.Errorf("verify committed successor; preserving commit transition: %w", verifyErr)
 	}
-	if len(prepared.Result.Plan.NetworkAllow) > 0 && (restarted || !a.proxyAlive(l)) {
+	if len(prepared.Result.Plan.NetworkAllow) > 0 && (restarted || !a.proxyIsReady(ctx, l)) {
 		pid, err := a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
 		if err != nil {
-			return err
+			return fmt.Errorf("restore committed successor proxy; preserving commit transition: %w", err)
 		}
 		transition.Successor.ProxyPID = pid
 		if err := l.WriteTransition(transition); err != nil {
@@ -1037,7 +1042,7 @@ func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, allows 
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		if a.proxyIsReady(l) {
+		if a.proxyIsReady(ctx, l) {
 			return processPID, nil
 		}
 		if time.Now().After(deadline) {

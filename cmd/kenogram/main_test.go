@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -141,6 +143,50 @@ func TestSubcommandUsageErrorsExplainTheFailure(t *testing.T) {
 			code := run(test.args, &stdout, &stderr)
 			if code != 2 || !strings.Contains(stderr.String(), test.want) {
 				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestAppleMachineBridgeRestoresExactArguments(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the decoded Apple machine operation runs inside Linux")
+	}
+	args := []string{"status", "INVALID! $HOME 'quoted' $(false) && echo", ""}
+	encoded := backend.EncodeAppleMachineArguments(args)
+	var stdout, stderr bytes.Buffer
+	code := run(append([]string{backend.AppleMachineBridgeCommand}, encoded...), &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "usage: kenogram status") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestAppleMachineBridgeRejectsMalformedEnvelope(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the decoded Apple machine operation runs inside Linux")
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{backend.AppleMachineBridgeCommand, "$HOME"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "decode Apple machine arguments") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestLauncherExitStatusAndTransportFailureRemainDistinct(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		err        error
+		wantCode   int
+		wantStderr string
+	}{
+		{name: "inner usage", err: &backend.RemoteExitError{Code: 2}, wantCode: 2},
+		{name: "inner interrupt", err: &backend.RemoteExitError{Code: 130}, wantCode: 130},
+		{name: "transport", err: errors.New("machine unavailable"), wantCode: 1, wantStderr: "runtime: machine unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			if code := reportLauncherError(test.err, &stderr); code != test.wantCode || !strings.Contains(stderr.String(), test.wantStderr) {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
 			}
 		})
 	}

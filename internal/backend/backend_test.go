@@ -2,13 +2,111 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/idolum-ai/kenogram/internal/plan"
 )
+
+func TestExecRunnerSignalHelper(t *testing.T) {
+	mode := os.Getenv("KENOGRAM_SIGNAL_HELPER")
+	if mode == "" {
+		return
+	}
+	ready := os.Getenv("KENOGRAM_SIGNAL_READY")
+	observed := os.Getenv("KENOGRAM_SIGNAL_OBSERVED")
+	if mode == "forward" {
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGTERM)
+		if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {
+			os.Exit(111)
+		}
+		if received := <-signals; received != syscall.SIGTERM {
+			os.Exit(112)
+		}
+		if err := os.WriteFile(observed, []byte("SIGTERM"), 0o600); err != nil {
+			os.Exit(113)
+		}
+		os.Exit(143)
+	}
+	if mode == "ignore" {
+		signal.Ignore(syscall.SIGTERM)
+		if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {
+			os.Exit(114)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+	os.Exit(115)
+}
+
+func TestExecRunnerForwardsSignalBeforeEscalation(t *testing.T) {
+	root := t.TempDir()
+	ready := filepath.Join(root, "ready")
+	observed := filepath.Join(root, "observed")
+	t.Setenv("KENOGRAM_SIGNAL_HELPER", "forward")
+	t.Setenv("KENOGRAM_SIGNAL_READY", ready)
+	t.Setenv("KENOGRAM_SIGNAL_OBSERVED", observed)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (ExecRunner{InterruptGrace: time.Second}).Interactive(ctx, os.Args[0], "-test.run=^TestExecRunnerSignalHelper$")
+	}()
+	waitForTestFile(t, ready)
+	cancel(&SignalCause{Signal: syscall.SIGTERM})
+	err := <-done
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 143 {
+		t.Fatalf("err=%#v", err)
+	}
+	raw, readErr := os.ReadFile(observed)
+	if readErr != nil || string(raw) != "SIGTERM" {
+		t.Fatalf("observed=%q err=%v", raw, readErr)
+	}
+}
+
+func TestExecRunnerKillsAfterSignalGraceExpires(t *testing.T) {
+	root := t.TempDir()
+	ready := filepath.Join(root, "ready")
+	t.Setenv("KENOGRAM_SIGNAL_HELPER", "ignore")
+	t.Setenv("KENOGRAM_SIGNAL_READY", ready)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (ExecRunner{InterruptGrace: 50 * time.Millisecond}).Interactive(ctx, os.Args[0], "-test.run=^TestExecRunnerSignalHelper$")
+	}()
+	waitForTestFile(t, ready)
+	cancel(&SignalCause{Signal: syscall.SIGTERM})
+	err := <-done
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) {
+		t.Fatalf("err=%#v", err)
+	}
+	status, ok := exitError.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("wait status=%v", exitError.ProcessState.Sys())
+	}
+}
+
+func waitForTestFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
+}
 
 type call struct {
 	name string

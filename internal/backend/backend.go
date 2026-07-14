@@ -4,6 +4,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/idolum-ai/kenogram/internal/plan"
 )
@@ -20,7 +22,18 @@ type Runner interface {
 	Start(context.Context, string, ...string) error
 	Interactive(context.Context, string, ...string) error
 }
-type ExecRunner struct{}
+
+// SignalCause records the signal that canceled an operation context so an
+// interactive child can receive the same signal before bounded escalation.
+type SignalCause struct {
+	Signal os.Signal
+}
+
+func (e *SignalCause) Error() string { return fmt.Sprintf("received %s", e.Signal) }
+
+type ExecRunner struct {
+	InterruptGrace time.Duration
+}
 
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
@@ -36,10 +49,45 @@ func (ExecRunner) Start(ctx context.Context, name string, args ...string) error 
 	}
 	return command.Process.Release()
 }
-func (ExecRunner) Interactive(ctx context.Context, name string, args ...string) error {
-	command := exec.CommandContext(ctx, name, args...)
+func (r ExecRunner) Interactive(ctx context.Context, name string, args ...string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	command := exec.Command(name, args...)
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return command.Run()
+	if err := command.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+	}
+
+	signalToForward := os.Signal(syscall.SIGTERM)
+	var signalCause *SignalCause
+	if errors.As(context.Cause(ctx), &signalCause) && signalCause.Signal != nil {
+		signalToForward = signalCause.Signal
+	}
+	if err := command.Process.Signal(signalToForward); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		_ = command.Process.Kill()
+		return <-done
+	}
+	grace := r.InterruptGrace
+	if grace <= 0 {
+		grace = 5 * time.Second
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		_ = command.Process.Kill()
+		return <-done
+	}
 }
 
 type Podman struct {

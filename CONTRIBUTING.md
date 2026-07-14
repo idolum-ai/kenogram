@@ -18,6 +18,12 @@ Do not add third-party Go dependencies, generic runtime abstractions, or new
 integration fixtures unless they prove a boundary not already covered. Report
 security issues privately as described in [`.github/SECURITY.md`](.github/SECURITY.md).
 
+`make check` cross-compiles the explicit Apple container-machine launcher and
+proves its shell-inert argv envelope, terminal flags, exit statuses, and bounded
+signal escalation. Those are transport-contract proofs, not a substitute for
+the machine-only matrix in
+[`docs/apple-container-machine.md`](docs/apple-container-machine.md).
+
 Release preparation uses a short-lived `release/vX.Y.Z` branch and the process
 in [`docs/release-strategy.md`](docs/release-strategy.md). Maintainers review
 candidate binaries, checksums, embedded source identity, and release text before
@@ -34,6 +40,27 @@ rootless Podman with `uidmap`, `fuse-overlayfs`, `nsenter`, host tmux for Hermes
 outbound artifact/image access, and substantial temporary disk. Run the target
 relevant to your change; reserve `make e2e` for a complete 10–20 minute-per-lane
 replay.
+
+Every container-heavy proof uses a random world identity and refuses a
+pre-existing container name. Cleanup verifies Kenogram's world/generation
+labels, removes containers by immutable ID newest-first, and preserves label
+mismatches. The pre-test snapshot includes both references and the complete set
+of image IDs. Newly materialized IDs are removed only after re-verification; if
+the test merely added a tag to cached content, cleanup untags that exact ID/name
+association. Image removal is never forced, so content used by another workload
+survives as a visible cleanup failure. Observation, container-removal, and
+image-removal commands receive 10-, 30-, and 90-second limits respectively
+inside a two-minute overall cleanup budget.
+
+Before artifact downloads or image builds, the Hermes lanes require 96 GiB free
+on rootless Podman `vfs`. This evidence-backed floor adds transient headroom to
+an observed 68 GiB expanded footprint. Engram and OpenClaw do not yet have a
+reproducible `vfs` peak, so their `vfs` lanes fail closed instead of inventing a
+default: set `KENOGRAM_E2E_VFS_MIN_FREE_GIB` to a locally measured positive
+whole-GiB threshold. Record peak graph-root usage and headroom when proposing a
+new default. Rootless `overlay` is not subject to the amplification guard or its
+override. Use `df -h <graph-root>` for free capacity and `podman system df` for
+attribution. The setting does not delete or prune storage.
 
 | Command | Evidence |
 |---|---|
