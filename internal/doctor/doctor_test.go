@@ -24,10 +24,18 @@ func TestProbeReportsReadyHostAndEntrySurfaces(t *testing.T) {
 			return []byte("cpu memory pids\n"), nil
 		},
 		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
-			if name != "/usr/bin/podman" || strings.Join(args, " ") != "info --format json" {
+			if name != "/usr/bin/podman" {
 				t.Fatalf("unexpected command: %s %v", name, args)
 			}
-			return podmanInfo(state), nil
+			switch strings.Join(args, " ") {
+			case "unshare true":
+				return nil, nil
+			case "info --format json":
+				return podmanInfo(state), nil
+			default:
+				t.Fatalf("unexpected command: %s %v", name, args)
+				return nil, nil
+			}
 		},
 		Access: func(path string) error {
 			if path != state {
@@ -47,7 +55,7 @@ func TestProbeReportsReadyHostAndEntrySurfaces(t *testing.T) {
 	if !report.Ready {
 		t.Fatalf("report = %#v", report)
 	}
-	if got, want := len(report.Checks), 12; got != want {
+	if got, want := len(report.Checks), 13; got != want {
 		t.Fatalf("checks = %d, want %d: %#v", got, want, report.Checks)
 	}
 	if checkByName(t, report, "repair_entry_surface").Status != "info" || checkByName(t, report, "normal_entry_surface").Status != "info" {
@@ -78,10 +86,10 @@ func TestProbeRetainsStableCheckSetAcrossFailures(t *testing.T) {
 	if report.Ready {
 		t.Fatal("unready host reported ready")
 	}
-	if got, want := len(report.Checks), 12; got != want {
+	if got, want := len(report.Checks), 13; got != want {
 		t.Fatalf("checks = %d, want stable set of %d: %#v", got, want, report.Checks)
 	}
-	for _, want := range []string{"operating_system", "cgroups_v2", "podman_executable", "podman_info", "podman_rootless", "podman_cgroups_v2", "subordinate_ids", "nsenter_executable", "state_storage", "container_storage"} {
+	for _, want := range []string{"operating_system", "cgroups_v2", "podman_executable", "podman_user_namespace", "podman_info", "podman_rootless", "podman_cgroups_v2", "subordinate_ids", "nsenter_executable", "state_storage", "container_storage"} {
 		if checkByName(t, report, want).Status != "fail" {
 			t.Fatalf("%s did not fail: %#v", want, report.Checks)
 		}
@@ -108,6 +116,25 @@ func TestProbeMarksPodmanDependentChecksWhenInfoFails(t *testing.T) {
 		if check.Status != "fail" || !strings.Contains(check.Observed, "podman_info failed") {
 			t.Fatalf("%s = %#v", name, check)
 		}
+	}
+}
+
+func TestProbeRequiresPodmanUserNamespace(t *testing.T) {
+	p := readyProbe(t)
+	p.Run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		switch strings.Join(args, " ") {
+		case "unshare true":
+			return nil, errors.New("newuidmap unavailable")
+		case "info --format json":
+			return podmanInfo(p.StateDir), nil
+		default:
+			t.Fatalf("unexpected args: %v", args)
+			return nil, nil
+		}
+	}
+	check := checkByName(t, p.Inspect(context.Background()), "podman_user_namespace")
+	if check.Status != "fail" || !strings.Contains(check.Observed, "newuidmap unavailable") {
+		t.Fatalf("podman_user_namespace = %#v", check)
 	}
 }
 
@@ -144,6 +171,19 @@ func TestProbeRequiresEffectiveStateAccess(t *testing.T) {
 	}
 }
 
+func TestProbeRejectsRegularFileAsStorage(t *testing.T) {
+	p := readyProbe(t)
+	stateFile := filepath.Join(t.TempDir(), "state")
+	if err := os.WriteFile(stateFile, nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p.StateDir = stateFile
+	check := checkByName(t, p.Inspect(context.Background()), "state_storage")
+	if check.Status != "fail" || !strings.Contains(check.Observed, "not a directory") {
+		t.Fatalf("state_storage = %#v", check)
+	}
+}
+
 func readyProbe(t *testing.T) Probe {
 	t.Helper()
 	state := t.TempDir()
@@ -151,7 +191,17 @@ func readyProbe(t *testing.T) Probe {
 		GOOS:     "linux",
 		LookPath: func(name string) (string, error) { return "/usr/bin/" + name, nil },
 		ReadFile: func(string) ([]byte, error) { return []byte("cpu memory pids"), nil },
-		Run:      func(context.Context, string, ...string) ([]byte, error) { return podmanInfo(state), nil },
+		Run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+			switch strings.Join(args, " ") {
+			case "unshare true":
+				return nil, nil
+			case "info --format json":
+				return podmanInfo(state), nil
+			default:
+				t.Fatalf("unexpected args: %v", args)
+				return nil, nil
+			}
+		},
 		Access:   func(string) error { return nil },
 		DiskFree: func(string) (uint64, error) { return bytesPerGiB, nil },
 		StateDir: state,

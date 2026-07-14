@@ -27,9 +27,10 @@ successor before recording it applied. `down`, `destroy`, `enter --repair`,
 reports build provenance.
 
 `doctor` observes Linux, the required cgroups v2 CPU/memory/PID controllers,
-the rootless Podman executable and info surface, subordinate ID mappings,
-`nsenter`, effective state-directory access and free space, and the rootless
-container graph root. It reports every named check even when an earlier
+the rootless Podman executable, user namespace, and info surface, subordinate
+ID mappings, `nsenter`, effective state-directory access and free space, and the
+rootless container graph root. The user-namespace observation executes exactly
+`podman unshare true`. It reports every named check even when an earlier
 observation blocks it and exits 1 if
 any required observation fails. Informational checks distinguish the `/bin/sh`
 repair-entry surface from the tmux-backed normal-entry surface without claiming

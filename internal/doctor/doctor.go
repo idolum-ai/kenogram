@@ -124,6 +124,12 @@ func (p Probe) Inspect(ctx context.Context) Report {
 	} else {
 		add("podman_info", false, "podman executable unavailable", "install rootless Podman")
 	}
+	if podmanPathErr == nil {
+		_, unshareErr := p.Run(ctx, podmanPath, "unshare", "true")
+		add("podman_user_namespace", unshareErr == nil, observation(nil, unshareErr), "repair rootless Podman user namespaces and subordinate UID/GID mappings")
+	} else {
+		add("podman_user_namespace", false, "not observed: podman executable unavailable", "install rootless Podman, then rerun doctor")
+	}
 	if podmanInfoOK {
 		add("podman_rootless", info.Host.Security.Rootless, fmt.Sprintf("rootless=%t", info.Host.Security.Rootless), "configure Podman for the current unprivileged user; do not run Kenogram as root")
 		add("podman_cgroups_v2", info.Host.CgroupVersion == "v2", info.Host.CgroupVersion, "configure Podman to use cgroups v2")
@@ -203,20 +209,20 @@ func requiredControllers(value []byte, err error) (bool, string) {
 	return true, observed
 }
 
-func nearestExisting(path string, stat func(string) (os.FileInfo, error)) (string, error) {
+func nearestExisting(path string, stat func(string) (os.FileInfo, error)) (string, os.FileInfo, error) {
 	if path == "" {
 		path = "."
 	}
 	path = filepath.Clean(path)
 	for {
-		if _, err := stat(path); err == nil {
-			return path, nil
+		if info, err := stat(path); err == nil {
+			return path, info, nil
 		} else if !os.IsNotExist(err) {
-			return path, err
+			return path, nil, err
 		}
 		parent := filepath.Dir(path)
 		if parent == path {
-			return path, fmt.Errorf("no existing ancestor")
+			return path, nil, fmt.Errorf("no existing ancestor")
 		}
 		path = parent
 	}
@@ -226,9 +232,12 @@ func storageObservation(path string, stat func(string) (os.FileInfo, error), acc
 	if strings.TrimSpace(path) == "" {
 		return false, "path not reported"
 	}
-	existing, err := nearestExisting(path, stat)
+	existing, info, err := nearestExisting(path, stat)
 	if err != nil {
 		return false, fmt.Sprintf("%s: %v", existing, err)
+	}
+	if !info.IsDir() {
+		return false, fmt.Sprintf("%s: not a directory", existing)
 	}
 	if err := access(existing); err != nil {
 		return false, fmt.Sprintf("%s: effective write/traverse access: %v", existing, err)

@@ -47,8 +47,9 @@ world-observation/v1:<sha256(canonical observations)>
 ```
 
 Keep this value adjacent to—not in place of—the declaration and plan digests.
-Never use it to adopt runtime state until the observation model has a stronger
-equivalence proof than the exact plan digest it would replace.
+Never use it to adopt runtime state until the observation profile provides
+operational adoption evidence at least as conservative as the exact plan-digest
+equality it would replace.
 
 ## Required proofs before a public format
 
