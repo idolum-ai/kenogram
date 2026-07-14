@@ -1,0 +1,18 @@
+FROM docker.io/library/ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+
+ARG USER_ID
+ARG GROUP_ID
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates openssh-server tmux \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd \
+    && groupadd --non-unique --gid "${GROUP_ID}" agent \
+    && useradd --non-unique --uid "${USER_ID}" --gid "${GROUP_ID}" --create-home agent \
+    && install -d -m 0700 -o "${USER_ID}" -g "${GROUP_ID}" /home/agent/.ssh
+
+ENV HOME=/home/agent
+WORKDIR /workspace
+
+LABEL org.opencontainers.image.source="https://github.com/idolum-ai/kenogram" \
+      org.opencontainers.image.description="Optional SSH composition world for Kenogram"

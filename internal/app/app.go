@@ -23,6 +23,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/history"
 	"github.com/idolum-ai/kenogram/internal/lockfile"
 	"github.com/idolum-ai/kenogram/internal/naming"
+	"github.com/idolum-ai/kenogram/internal/netns"
 	"github.com/idolum-ai/kenogram/internal/plan"
 	"github.com/idolum-ai/kenogram/internal/proxy"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
@@ -34,6 +35,9 @@ type App struct {
 	Out        io.Writer
 	Now        func() time.Time
 	Executable string
+	// acquireConnection is replaceable only by package tests; production uses
+	// the namespace descriptor-transfer boundary.
+	acquireConnection func(context.Context, int, string) (net.Conn, error)
 	// lifecycleCheckpoint is nil in production. Tests use it to terminate a
 	// process at named durable boundaries without changing runtime behavior.
 	lifecycleCheckpoint func(string)
@@ -51,7 +55,7 @@ func New() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &App{Backend: backend.New(nil), BaseDir: base, Out: os.Stdout, Now: func() time.Time { return time.Now().UTC() }, Executable: executable}, nil
+	return &App{Backend: backend.New(nil), BaseDir: base, Out: os.Stdout, Now: func() time.Time { return time.Now().UTC() }, Executable: executable, acquireConnection: netns.AcquireConnection}, nil
 }
 
 func (a *App) checkpoint(name string) {
@@ -883,7 +887,7 @@ func (a *App) materialize(ctx context.Context, l worldfs.Layout, container strin
 	if err := os.WriteFile(filepath.Join(root, "KENOGRAM.md"), []byte(inside), 0o444); err != nil {
 		return err
 	}
-	projection := map[string]any{"name": p.Result.Plan.Name, "generation": generation, "plan_digest": p.Result.PlanDigest, "declaration_digest": p.Result.DeclarationDigest, "mounts": p.Result.Plan.Mounts, "allowed_destinations": p.Result.Plan.NetworkAllow, "resources": p.Result.Plan.Resources, "workspace_paths": p.Result.Plan.Workspace, "door": doorAddress(p.Result.Plan.NetworkAllow)}
+	projection := map[string]any{"name": p.Result.Plan.Name, "generation": generation, "plan_digest": p.Result.PlanDigest, "declaration_digest": p.Result.DeclarationDigest, "mounts": p.Result.Plan.Mounts, "allowed_destinations": p.Result.Plan.NetworkAllow, "interfaces": p.Result.Plan.Interfaces, "resources": p.Result.Plan.Resources, "workspace_paths": p.Result.Plan.Workspace, "door": doorAddress(p.Result.Plan.NetworkAllow)}
 	raw, err := json.MarshalIndent(projection, "", "  ")
 	if err != nil {
 		return err
@@ -1270,6 +1274,90 @@ func (a *App) Enter(ctx context.Context, name string, repair bool) error {
 		command = []string{"/bin/sh"}
 	}
 	return a.Backend.Attach(ctx, s.Container, command)
+}
+
+// Connect opens one declared operator-facing interface in the authoritative
+// generation. The world lock protects generation selection and descriptor
+// acquisition, but is released before callers relay any bytes.
+func (a *App) Connect(ctx context.Context, name, interfaceName string) (net.Conn, error) {
+	if err := naming.World(name); err != nil {
+		return nil, err
+	}
+	if err := naming.Interface(interfaceName); err != nil {
+		return nil, err
+	}
+	l := worldfs.For(a.BaseDir, name)
+	lock, err := lockfile.Acquire(l.Lock)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Release()
+	state, err := authoritativeState(l)
+	if err != nil {
+		return nil, err
+	}
+	prepared, err := a.authoritativePrepared(l, state)
+	if err != nil {
+		return nil, fmt.Errorf("load authoritative plan: %w", err)
+	}
+	address := ""
+	for _, endpoint := range prepared.Result.Plan.Interfaces {
+		if endpoint.Name == interfaceName {
+			address = endpoint.Address
+			break
+		}
+	}
+	if address == "" {
+		return nil, fmt.Errorf("interface %q is not declared for world %q", interfaceName, name)
+	}
+	evidence, err := a.Backend.Inspect(ctx, state.Container)
+	if err != nil {
+		return nil, fmt.Errorf("inspect authoritative generation: %w", err)
+	}
+	expected := make([]backend.Mount, 0, len(prepared.Result.Plan.Workspace)+len(prepared.Result.Plan.Mounts))
+	for _, target := range prepared.Result.Plan.Workspace {
+		expected = append(expected, backend.Mount{Source: l.WorkspacePath(target), Target: target, Mode: "rw"})
+	}
+	for _, mount := range prepared.Result.Plan.Mounts {
+		expected = append(expected, backend.Mount{Source: mount.Source, Target: mount.Target, Mode: mount.Mode})
+	}
+	if err := a.verifyRuntimeEvidence(evidence, prepared.Result, state.Generation, expected); err != nil {
+		return nil, fmt.Errorf("verify authoritative generation: %w", err)
+	}
+	acquire := a.acquireConnection
+	if acquire == nil {
+		acquire = netns.AcquireConnection
+	}
+	connection, err := acquire(ctx, evidence.PID, address)
+	if err != nil {
+		return nil, fmt.Errorf("connect interface %q: %w", interfaceName, err)
+	}
+	return connection, nil
+}
+
+func (a *App) authoritativePrepared(l worldfs.Layout, state worldfs.State) (Prepared, error) {
+	transition, err := l.ReadTransition()
+	if err == nil {
+		if transition.Phase == "commit" {
+			path := transition.Successor.DeclarationPath
+			if path == "" {
+				path = l.Applied
+			}
+			return preparedFromRecovery(transition.SuccessorDeclaration, transition.SuccessorPlan, path, state)
+		}
+		if transition.Prior == nil {
+			return Prepared{}, fmt.Errorf("rollback has no authoritative predecessor")
+		}
+		path := transition.Prior.DeclarationPath
+		if path == "" {
+			path = l.Applied
+		}
+		return preparedFromRecovery(transition.PriorDeclaration, transition.PriorPlan, path, state)
+	}
+	if !os.IsNotExist(err) {
+		return Prepared{}, err
+	}
+	return a.loadPredecessor(l, state)
 }
 func (a *App) Allow(name, destination, duration string) error {
 	if err := naming.World(name); err != nil {

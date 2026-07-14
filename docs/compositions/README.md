@@ -6,6 +6,7 @@ provider and not a promise that only the pinned versions work.
 
 | Composition | Version proven in CI | Automated boundary |
 |---|---:|---|
+| [SSH](ssh.md) | OpenSSH client + Ubuntu 24.04 server package | Declared loopback stream, key rejection, no host listener, lifecycle |
 | [Engram](engram.md) | v0.3.0 | Release integrity, offline lifecycle, replacement, restart, destruction |
 | [OpenClaw](openclaw.md) | 2026.6.11 | Native fake Telegram, TUI, isolation, replacement, absence |
 | [Hermes Agent](hermes-agent.md) | v2026.7.7.2 (agent 0.18.2) | Native fake Telegram, TUI, isolation, replacement, absence |
@@ -30,6 +31,8 @@ a GitHub environment, and currently covers OpenClaw through Engram.
   Grant only the exact host and port used by the selected configuration.
 - Engram is optional. It supplies a durable Telegram/terminal boundary; it is
   not part of Kenogram's ontology and direct agent Telegram remains valid.
+- SSH is an optional trusted operator path. It is deliberately not a prompt-
+  contamination boundary and is not present in the reference image.
 
 ## Capacity before acquisition
 

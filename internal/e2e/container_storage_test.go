@@ -41,6 +41,7 @@ const (
 	e2eLaneEngram   containerE2ELane = "engram"
 	e2eLaneOpenClaw containerE2ELane = "openclaw"
 	e2eLaneHermes   containerE2ELane = "hermes"
+	e2eLaneSSH      containerE2ELane = "ssh"
 )
 
 type podmanCommandResult struct {
@@ -123,7 +124,7 @@ func prepareContainerE2E(t *testing.T, ctx context.Context, lane containerE2ELan
 
 func laneVFSMinimumFreeGiB(lane containerE2ELane) (uint64, error) {
 	switch lane {
-	case e2eLaneEngram, e2eLaneOpenClaw:
+	case e2eLaneEngram, e2eLaneOpenClaw, e2eLaneSSH:
 		// No default is invented until a reproducible rootless-vfs peak is
 		// recorded for these lanes. Overlay remains unaffected; vfs operators
 		// must provide a locally measured override.

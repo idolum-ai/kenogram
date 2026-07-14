@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -112,7 +113,7 @@ func TestJSONDryRun(t *testing.T) {
 }
 
 func TestSubcommandHelpIsSuccessful(t *testing.T) {
-	for _, command := range []string{"up", "down", "destroy", "enter", "status", "allow", "revoke", "repair-history", "worlds", "doctor"} {
+	for _, command := range []string{"up", "down", "destroy", "enter", "connect", "status", "allow", "revoke", "repair-history", "worlds", "doctor"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run([]string{command, "--help"}, &stdout, &stderr)
@@ -124,6 +125,38 @@ func TestSubcommandHelpIsSuccessful(t *testing.T) {
 				t.Fatalf("down help advertises destroy-only confirmation: %q", output)
 			}
 		})
+	}
+}
+
+func TestRelayConnectionIsAByteTransparentFullDuplexStream(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	wantUpload := []byte{0, 's', 's', 'h', '\r', '\n', 255}
+	wantDownload := []byte{'o', 'k', 0, 254}
+	serverDone := make(chan error, 1)
+	go func() {
+		got := make([]byte, len(wantUpload))
+		if _, err := io.ReadFull(server, got); err != nil {
+			serverDone <- err
+			return
+		}
+		if !bytes.Equal(got, wantUpload) {
+			serverDone <- errors.New("uploaded bytes changed")
+			return
+		}
+		_, err := server.Write(wantDownload)
+		serverDone <- err
+		server.Close()
+	}()
+	var output bytes.Buffer
+	if err := relayConnection(context.Background(), bytes.NewReader(wantUpload), &output, client); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(output.Bytes(), wantDownload) {
+		t.Fatalf("downloaded bytes = %v, want %v", output.Bytes(), wantDownload)
 	}
 }
 

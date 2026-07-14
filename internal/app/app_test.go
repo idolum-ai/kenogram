@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +24,8 @@ type runtimeRunner struct {
 	network     string
 	mountSource string
 	containers  string
+	planDigest  string
+	declDigest  string
 }
 
 type destroyFailRunner struct{ runtimeRunner }
@@ -96,7 +99,14 @@ func (r *runtimeRunner) Run(_ context.Context, _ string, args ...string) ([]byte
 		if network == "" {
 			network = "none"
 		}
-		return []byte(fmt.Sprintf(`[{"Name":%q,"BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":%q,"io.kenogram.plan-digest":"pd","io.kenogram.declaration-digest":"dd"}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, container, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), strconv.Itoa(generation), network, r.mountSource)), nil
+		planDigest, declDigest := r.planDigest, r.declDigest
+		if planDigest == "" {
+			planDigest = "pd"
+		}
+		if declDigest == "" {
+			declDigest = "dd"
+		}
+		return []byte(fmt.Sprintf(`[{"Name":%q,"BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":%q,"io.kenogram.plan-digest":%q,"io.kenogram.declaration-digest":%q}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, container, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), strconv.Itoa(generation), planDigest, declDigest, network, r.mountSource)), nil
 	}
 	if len(args) > 0 && args[0] == "ps" {
 		if r.containers != "" {
@@ -426,6 +436,81 @@ func TestRecoveryPlanDoesNotRereadCopySource(t *testing.T) {
 	}
 	if prepared.Result.Plan.Copies[0].SourceDigest != "content-digest" {
 		t.Fatal("recovery intent changed")
+	}
+}
+
+func TestConnectUsesOnlyDeclaredInterfaceOnVerifiedAuthoritativeGeneration(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.EnsureWorkspace("/workspace"); err != nil {
+		t.Fatal(err)
+	}
+	prepared := preparedFixture()
+	prepared.Result.Plan.Interfaces = []plan.Interface{{Name: "ssh", Address: "127.0.0.1:2222"}}
+	canonical, err := plan.Canonical(prepared.Result.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Raw = []byte("retained declaration")
+	prepared.Result.PlanDigest = DeclarationDigest(canonical)
+	prepared.Result.DeclarationDigest = DeclarationDigest(prepared.Raw)
+	rawPlan, err := encodeRecoveryPlan(prepared.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteApplied(prepared.Raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteAppliedPlan(rawPlan); err != nil {
+		t.Fatal(err)
+	}
+	state := worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, Status: "running"}
+	if err := layout.WriteState(state); err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeRunner{mountSource: layout.WorkspacePath("/workspace"), planDigest: state.PlanDigest, declDigest: state.DeclarationDigest}
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close() })
+	called := false
+	a := &App{Backend: testBackend(runner), BaseDir: base, acquireConnection: func(_ context.Context, pid int, address string) (net.Conn, error) {
+		called = true
+		if pid != 123 || address != "127.0.0.1:2222" {
+			t.Fatalf("pid=%d address=%q", pid, address)
+		}
+		return client, nil
+	}}
+	connection, err := a.Connect(context.Background(), "w", "ssh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.Close()
+	if !called {
+		t.Fatal("namespace connection was not acquired")
+	}
+	successor := prepared.Result
+	successor.Plan.Interfaces[0].Address = "127.0.0.1:3333"
+	successorCanonical, err := plan.Canonical(successor.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor.PlanDigest = DeclarationDigest(successorCanonical)
+	successorRaw, err := encodeRecoveryPlan(successor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteTransition(worldfs.Transition{Version: 1, Phase: "rollback", Prior: &state, PriorDeclaration: prepared.Raw, PriorPlan: rawPlan, Successor: worldfs.State{Name: "w", Generation: 2, Container: "kenogram-w-g2", PlanDigest: successor.PlanDigest, DeclarationDigest: successor.DeclarationDigest}, SuccessorDeclaration: prepared.Raw, SuccessorPlan: successorRaw}); err != nil {
+		t.Fatal(err)
+	}
+	connection, err = a.Connect(context.Background(), "w", "ssh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.Close()
+	if _, err := a.Connect(context.Background(), "w", "undeclared"); err == nil || !strings.Contains(err.Error(), "not declared") {
+		t.Fatalf("undeclared interface: %v", err)
 	}
 }
 func TestUpRejectsBadRuntimeEvidence(t *testing.T) {

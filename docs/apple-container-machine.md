@@ -102,6 +102,10 @@ host cancellation Kenogram forwards the originating interrupt or termination
 signal to Apple's CLI, waits five seconds for its remote forwarding path, and
 only then escalates to `SIGKILL`.
 
+`connect` uses that non-TTY stdin path as a byte stream. The named interface is
+still resolved and dialed by the Linux Kenogram inside the machine; macOS does
+not receive a published container port.
+
 ## Security boundary and open proof
 
 The inner world retains Kenogram's rootless-Podman evidence contract: no runtime

@@ -104,9 +104,14 @@ Engram `v0.3.0` release. Separate proofs cover each agent's native Telegram
 path and fake-Telegram → Engram → tmux → agent path. Pull requests require
 both isolation and Engram composition proofs.
 
+For the smallest direct composition, a declared world-loopback service can be
+reached without a host port through `kenogram connect`. The [SSH
+guide](docs/compositions/ssh.md) proves that path with ordinary SSH keys while
+keeping SSH out of Kenogram's reference image and core ontology.
+
 The [composition guides](docs/compositions/README.md) turn those proofs into
 operator-facing version, trust, secret, network, and capacity guidance for
-Engram, OpenClaw, and Hermes Agent.
+SSH, Engram, OpenClaw, and Hermes Agent.
 
 The operator-assisted `make e2e-telegram-canary` is deliberately separate. It
 uses a protected canary bot to prove the real Telegram path and never runs on a
