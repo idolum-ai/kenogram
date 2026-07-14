@@ -35,7 +35,15 @@ All release inputs are URL- and checksum-locked under `internal/e2e/testdata`.
 Local archive variables avoid repeated downloads without weakening digest
 verification.
 
-Local runtime proofs need Go 1.22, `rg`, Linux/amd64 for Engram compositions,
+The module retains Go 1.22 as its source-language and compatibility floor. The
+`toolchain` directive in `go.mod` is the authoritative, security-patched build
+version used by CI and release automation; a Go command using the default
+`GOTOOLCHAIN=auto` behavior obtains it when necessary. Run `make vulncheck` for
+the Go vulnerability database's reachable-code analysis. CI runs that online
+check for every change and on its weekly schedule, and release candidates run
+it again before packaging.
+
+Local runtime proofs also need `rg`, Linux/amd64 for Engram compositions,
 rootless Podman with `uidmap`, `fuse-overlayfs`, `nsenter`, host tmux for Hermes,
 outbound artifact/image access, and substantial temporary disk. Run the target
 relevant to your change; reserve `make e2e` for a complete 10–20 minute-per-lane

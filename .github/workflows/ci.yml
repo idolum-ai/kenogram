@@ -24,6 +24,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Check
         run: make check
+      - name: Vulnerability reachability
+        run: make vulncheck
       - name: Test evidence
         run: make test-evidence
       - name: Retain test evidence
@@ -50,8 +52,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          # Go 1.24 added the Mach-O LC_UUID required by macOS 26's loader.
-          go-version: 1.26.4
+          go-version-file: go.mod
           cache: false
       - name: Native Apple launcher contract
         run: |
@@ -180,5 +181,3 @@ jobs:
           cache: false
       - name: Bounded parser fuzzing
         run: go test ./internal/decl -run '^$' -fuzz FuzzParse -fuzztime 60s
-      - name: Vulnerability reachability
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...

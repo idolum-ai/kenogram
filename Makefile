@@ -7,8 +7,9 @@ DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X github.com/idolum-ai/kenogram/internal/version.Version=$(VERSION) -X github.com/idolum-ai/kenogram/internal/version.Commit=$(COMMIT) -X github.com/idolum-ai/kenogram/internal/version.Date=$(DATE)
 GOCACHE ?= /tmp/kenogram-go-build
 GOMODCACHE ?= /tmp/kenogram-go-mod
+GOVULNCHECK_VERSION := v1.6.0
 
-.PHONY: build release-dist release-smoke install install-release uninstall test test-evidence test-race integration e2e e2e-release e2e-openclaw e2e-composition e2e-hermes e2e-hermes-composition e2e-telegram-canary vet check architecture stdlib-only docs-freshness secrets workflow-sanity smoke fmt cross-apple-machine
+.PHONY: build release-dist release-smoke install install-release uninstall test test-evidence test-race integration e2e e2e-release e2e-openclaw e2e-composition e2e-hermes e2e-hermes-composition e2e-telegram-canary vet vulncheck check architecture stdlib-only docs-freshness secrets workflow-sanity smoke fmt cross-apple-machine
 
 build:
 	mkdir -p bin
@@ -44,6 +45,9 @@ test-race:
 
 vet:
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go vet ./...
+
+vulncheck:
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 fmt:
 	test -z "$$(gofmt -l cmd internal)"
