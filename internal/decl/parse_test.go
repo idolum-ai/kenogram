@@ -34,6 +34,9 @@ port = 443
 [[network.allow]]
 host = "registry.example.com"
 port = 443
+[[interfaces]]
+name = "ssh"
+address = "127.0.0.1:2222"
 [[services]]
 name = "session"
 command = ["/usr/bin/tmux", "new-session", "-d"]
@@ -55,6 +58,9 @@ func TestParseCompleteDeclaration(t *testing.T) {
 	}
 	if len(d.Services) != 1 || len(d.Services[0].Command) != 3 {
 		t.Fatalf("unexpected services: %#v", d.Services)
+	}
+	if len(d.Interfaces) != 1 || d.Interfaces[0].Address != "127.0.0.1:2222" {
+		t.Fatalf("unexpected interfaces: %#v", d.Interfaces)
 	}
 }
 

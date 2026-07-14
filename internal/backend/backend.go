@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/idolum-ai/kenogram/internal/lockfile"
 	"github.com/idolum-ai/kenogram/internal/plan"
 )
 
@@ -91,10 +92,11 @@ func (r ExecRunner) Interactive(ctx context.Context, name string, args ...string
 }
 
 type Podman struct {
-	Runner         Runner
-	Binary         string
-	ReadProcStatus func(int) ([]byte, error)
-	MountIdentity  func(int, string, string) (bool, error)
+	Runner           Runner
+	Binary           string
+	ReadProcStatus   func(int) ([]byte, error)
+	ReadProcessStart func(int) string
+	MountIdentity    func(int, string, string) (bool, error)
 }
 
 func New(r Runner) *Podman {
@@ -107,7 +109,8 @@ func New(r Runner) *Podman {
 		ReadProcStatus: func(pid int) ([]byte, error) {
 			return os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
 		},
-		MountIdentity: mountIdentity,
+		ReadProcessStart: lockfile.ProcessStart,
+		MountIdentity:    mountIdentity,
 	}
 }
 func ContainerName(world string, generation int64) string {
@@ -238,6 +241,7 @@ type Evidence struct {
 	Name                   string
 	Running                bool
 	PID                    int
+	ProcessStart           string
 	NetworkMode            string
 	IPCMode                string
 	PIDMode                string
@@ -335,6 +339,10 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 		if e.PID <= 0 {
 			return Evidence{}, fmt.Errorf("runtime holder PID is absent")
 		}
+		e.ProcessStart = p.ReadProcessStart(e.PID)
+		if e.ProcessStart == "" {
+			return Evidence{}, fmt.Errorf("runtime holder process identity is absent")
+		}
 		if e.BoundingCaps == nil {
 			e.BoundingCaps, err = readProcBoundingCaps(e.PID)
 			if err != nil {
@@ -378,6 +386,9 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 		if err != nil {
 			return Evidence{}, fmt.Errorf("read runtime GID mapping evidence: %w", err)
 		}
+	}
+	if e.Running && p.ReadProcessStart(e.PID) != e.ProcessStart {
+		return Evidence{}, fmt.Errorf("runtime holder process identity changed during inspection")
 	}
 	return e, nil
 }

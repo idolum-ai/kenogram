@@ -21,10 +21,11 @@ func validForValidation(t *testing.T) (Declaration, string) {
 		Version: 1, Name: "engineering",
 		World:     World{Hostname: "engineering", Base: "ubuntu@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workdir: "/workspace", User: "agent"},
 		Resources: Resources{CPUs: 2, MemoryBytes: 1024, PIDs: 32}, Workspace: Workspace{Paths: []string{"/workspace"}},
-		Copies:   []Copy{{Source: "secret", Target: "/home/agent/token", Mode: "0600", Secret: true}},
-		Mounts:   []Mount{{Source: "repo", Target: "/workspace/repo", Mode: "rw"}},
-		Network:  Network{Allow: []NetworkAllow{{Host: "example.com", Port: 443}}},
-		Services: []Service{{Name: "session", Command: []string{"tmux"}, Autostart: true, Restart: "on-failure"}},
+		Copies:     []Copy{{Source: "secret", Target: "/home/agent/token", Mode: "0600", Secret: true}},
+		Mounts:     []Mount{{Source: "repo", Target: "/workspace/repo", Mode: "rw"}},
+		Network:    Network{Allow: []NetworkAllow{{Host: "example.com", Port: 443}}},
+		Interfaces: []Interface{{Name: "ssh", Address: "127.0.0.1:2222"}},
+		Services:   []Service{{Name: "session", Command: []string{"tmux"}, Autostart: true, Restart: "on-failure"}},
 	}
 	return d, dir
 }
@@ -123,6 +124,21 @@ func TestValidateRejectsDuplicateNetworkAndServices(t *testing.T) {
 	d.Services = append(d.Services, d.Services[0])
 	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "duplicate service") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestValidateInterfacesAreNamedCanonicalLoopbackEndpoints(t *testing.T) {
+	for _, address := range []string{"0.0.0.0:22", "localhost:22", "127.0.0.1:0", "127.0.0.1:022", "127.0.0.1:65536", "http://127.0.0.1:22", "127.0.0.1:22/path"} {
+		d, dir := validForValidation(t)
+		d.Interfaces[0].Address = address
+		if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "canonical 127.0.0.1:port") {
+			t.Fatalf("address %q: %v", address, err)
+		}
+	}
+	d, dir := validForValidation(t)
+	d.Interfaces = append(d.Interfaces, d.Interfaces[0])
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "duplicate interface") {
+		t.Fatalf("duplicate interface: %v", err)
 	}
 }
 

@@ -6,7 +6,8 @@ the strongest evidence and remaining invariant gaps are indexed in `INDEX.md`.
 The normative acceptance invariants are:
 
 1. A base world has loopback as its only interface.
-2. Exterior connects are genuinely unroutable.
+2. Exterior connects are genuinely unroutable except for an explicit
+   host-operator `connect` to a named declared loopback interface.
 3. No resolver answers and no UDP leaves.
 4. With destinations, the only non-world-authored socket is `127.0.0.1:3128`.
 5. CONNECT succeeds only for exact declared host-and-port pairs.
@@ -31,3 +32,9 @@ the world's user and network namespaces and transfer its descriptor over an
 `AF_UNIX` socketpair. The helper exits; the host proxy retains the listener. The
 proxy resolves per connection, bounds rate and concurrency, logs metadata only,
 and closes connections when their grant is removed or expires.
+
+Declared operator interfaces use the same namespace principle in the opposite
+direction: a short-lived helper dials the exact declared loopback address inside
+the authoritative generation and transfers the connected descriptor to
+`kenogram connect`. It creates no listener in the host namespace, publishes no
+container port, and supplies no general host-to-world address primitive.

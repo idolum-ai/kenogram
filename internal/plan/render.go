@@ -40,6 +40,11 @@ func RenderText(w io.Writer, result Result) error {
 			return err
 		}
 	}
+	for _, endpoint := range p.Interfaces {
+		if _, err := fmt.Fprintf(w, "interface: %s address=%s\n", endpoint.Name, endpoint.Address); err != nil {
+			return err
+		}
+	}
 	for _, s := range p.Services {
 		if _, err := fmt.Fprintf(w, "service: %s command=%s autostart=%t restart=%s\n", s.Name, quoteCommand(s.Command), s.Autostart, s.Restart); err != nil {
 			return err

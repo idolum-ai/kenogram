@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"runtime"
@@ -18,6 +19,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/app"
 	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/doctor"
+	"github.com/idolum-ai/kenogram/internal/naming"
 	"github.com/idolum-ai/kenogram/internal/netns"
 	"github.com/idolum-ai/kenogram/internal/plan"
 	"github.com/idolum-ai/kenogram/internal/proxy"
@@ -67,6 +69,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "_netns-listener":
 		return runNetnsListener(args[1:], stderr)
+	case "_netns-connect":
+		return runNetnsConnect(args[1:], stderr)
 	case "_proxy":
 		return runProxy(args[1:], stderr)
 	case "up":
@@ -77,6 +81,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runWorldAction(ctx, "destroy", args[1:], stdout, stderr)
 	case "enter":
 		return runEnter(ctx, args[1:], stdout, stderr)
+	case "connect":
+		return runConnect(ctx, args[1:], stdout, stderr)
 	case "status":
 		return runStatus(ctx, args[1:], stdout, stderr)
 	case "allow":
@@ -389,6 +395,86 @@ func runEnter(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	return 0
 }
+
+func runConnect(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram connect <world> <interface>"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
+	if len(args) != 2 {
+		fmt.Fprintln(stderr, usage)
+		return 2
+	}
+	if err := worldfs.ValidateName(args[0]); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if err := naming.Interface(args[1]); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	a, err := newApp(io.Discard)
+	if err != nil {
+		fmt.Fprintln(stderr, "connect:", err)
+		return 1
+	}
+	connection, err := a.Connect(ctx, args[0], args[1])
+	if err == nil {
+		err = relayConnection(ctx, os.Stdin, stdout, connection)
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "connect:", err)
+		return 1
+	}
+	return 0
+}
+
+func relayConnection(ctx context.Context, input io.Reader, output io.Writer, connection net.Conn) error {
+	defer connection.Close()
+	type directionResult struct {
+		direction string
+		err       error
+	}
+	results := make(chan directionResult, 2)
+	go func() {
+		_, err := io.Copy(connection, input)
+		if tcp, ok := connection.(*net.TCPConn); ok {
+			_ = tcp.CloseWrite()
+		}
+		results <- directionResult{direction: "upload", err: err}
+	}()
+	go func() {
+		_, err := io.Copy(output, connection)
+		results <- directionResult{direction: "download", err: err}
+	}()
+	abort := func() {
+		_ = connection.Close()
+		if closer, ok := input.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	}
+	for completed := 0; completed < 2; completed++ {
+		select {
+		case <-ctx.Done():
+			abort()
+			return context.Cause(ctx)
+		case result := <-results:
+			if result.err != nil {
+				abort()
+				return result.err
+			}
+			// A server may finish its output while it continues accepting input.
+			// Preserve that legal TCP half-close until the upload also completes.
+			if result.direction == "download" {
+				if tcp, ok := connection.(*net.TCPConn); ok {
+					_ = tcp.CloseRead()
+				}
+			}
+		}
+	}
+	return nil
+}
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	const usage = "usage: kenogram status [--json] <world>"
 	if helpRequested(args) {
@@ -661,12 +747,24 @@ func runNetnsListener(args []string, stderr io.Writer) int {
 	}
 	return 0
 }
+func runNetnsConnect(args []string, stderr io.Writer) int {
+	fd, address, err := netns.ParseHelperArgs(args)
+	if err == nil {
+		err = netns.SendConnection(fd, address)
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return 0
+}
 func printHelp(w io.Writer) {
 	fmt.Fprint(w, `Usage:
   kenogram up [--dry-run] [--json] [--yes] <file>
   kenogram down <world>
   kenogram destroy --yes <world>
   kenogram enter [--repair] <world>
+  kenogram connect <world> <interface>
   kenogram status [--json] <world>
   kenogram allow <world> <host>:<port> --for <duration>
   kenogram revoke <world> <host>:<port>

@@ -6,11 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/idolum-ai/kenogram/internal/app"
 	"github.com/idolum-ai/kenogram/internal/backend"
@@ -112,7 +116,7 @@ func TestJSONDryRun(t *testing.T) {
 }
 
 func TestSubcommandHelpIsSuccessful(t *testing.T) {
-	for _, command := range []string{"up", "down", "destroy", "enter", "status", "allow", "revoke", "repair-history", "worlds", "doctor"} {
+	for _, command := range []string{"up", "down", "destroy", "enter", "connect", "status", "allow", "revoke", "repair-history", "worlds", "doctor"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run([]string{command, "--help"}, &stdout, &stderr)
@@ -125,6 +129,123 @@ func TestSubcommandHelpIsSuccessful(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRelayConnectionIsAByteTransparentFullDuplexStream(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	wantUpload := []byte{0, 's', 's', 'h', '\r', '\n', 255}
+	wantDownload := []byte{'o', 'k', 0, 254}
+	serverDone := make(chan error, 1)
+	go func() {
+		got := make([]byte, len(wantUpload))
+		if _, err := io.ReadFull(server, got); err != nil {
+			serverDone <- err
+			return
+		}
+		if !bytes.Equal(got, wantUpload) {
+			serverDone <- errors.New("uploaded bytes changed")
+			return
+		}
+		_, err := server.Write(wantDownload)
+		serverDone <- err
+		server.Close()
+	}()
+	var output bytes.Buffer
+	if err := relayConnection(context.Background(), bytes.NewReader(wantUpload), &output, client); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(output.Bytes(), wantDownload) {
+		t.Fatalf("downloaded bytes = %v, want %v", output.Bytes(), wantDownload)
+	}
+}
+
+func TestRelayConnectionPreservesUploadAfterServerHalfClosesOutput(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skip("sandbox does not permit loopback sockets")
+		}
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	client, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverDone := make(chan error, 1)
+	wantUpload := []byte("staged-after-response")
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer connection.Close()
+		tcp := connection.(*net.TCPConn)
+		if _, writeErr := tcp.Write([]byte("ready")); writeErr != nil {
+			serverDone <- writeErr
+			return
+		}
+		if closeErr := tcp.CloseWrite(); closeErr != nil {
+			serverDone <- closeErr
+			return
+		}
+		got, readErr := io.ReadAll(tcp)
+		if readErr != nil {
+			serverDone <- readErr
+			return
+		}
+		if !bytes.Equal(got, wantUpload) {
+			serverDone <- errors.New("upload stopped after server half-close")
+			return
+		}
+		serverDone <- nil
+	}()
+
+	inputReader, inputWriter := io.Pipe()
+	var output bytes.Buffer
+	outputReady := make(chan struct{})
+	notifyingOutput := &notifyingWriter{writer: &output, ready: outputReady}
+	relayDone := make(chan error, 1)
+	go func() { relayDone <- relayConnection(context.Background(), inputReader, notifyingOutput, client) }()
+	select {
+	case <-outputReady:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for server output")
+	}
+	if output.String() != "ready" {
+		t.Fatalf("server output = %q", output.String())
+	}
+	if _, err := inputWriter.Write(wantUpload); err != nil {
+		t.Fatal(err)
+	}
+	if err := inputWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-relayDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+type notifyingWriter struct {
+	writer io.Writer
+	ready  chan struct{}
+	once   sync.Once
+}
+
+func (w *notifyingWriter) Write(payload []byte) (int, error) {
+	n, err := w.writer.Write(payload)
+	if n > 0 {
+		w.once.Do(func() { close(w.ready) })
+	}
+	return n, err
 }
 
 func TestDoctorReportsEveryObservationInTextAndJSON(t *testing.T) {
