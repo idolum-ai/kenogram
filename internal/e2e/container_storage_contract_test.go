@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -343,6 +344,21 @@ func TestContainerCleanupRegistrationPrecedesEarlierCleanup(t *testing.T) {
 	want := []string{"container exists kenogram-world-g1", "tempdir"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("cleanup events = %#v, want %#v", events, want)
+	}
+}
+
+func TestE2EProxySocketPathBoundary(t *testing.T) {
+	world := "w"
+	overhead := len(filepath.Join("", world, "proxy.sock"))
+	exactRoot := strings.Repeat("r", linuxUnixSocketPathMax-overhead-1)
+	if got := len(filepath.Join(exactRoot, world, "proxy.sock")); got != linuxUnixSocketPathMax {
+		t.Fatalf("test path length = %d, want %d", got, linuxUnixSocketPathMax)
+	}
+	if err := validateE2EProxySocketPath(exactRoot, world); err != nil {
+		t.Fatalf("exact-limit socket rejected: %v", err)
+	}
+	if err := validateE2EProxySocketPath("x"+exactRoot, world); err == nil || !strings.Contains(err.Error(), "maximum is 107") {
+		t.Fatalf("over-limit socket error = %v", err)
 	}
 }
 

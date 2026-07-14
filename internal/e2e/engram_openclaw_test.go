@@ -62,9 +62,9 @@ USER node
 	}
 	pinnedImage := image + "@" + imageDigest
 
-	world := e2eWorldName(t, "engram-openclaw-e2e")
-	resources.trackContainer(t, ctx, world, 1)
 	stateRoot := filepath.Join(tmp, "state")
+	world := e2eWorldName(t, "eoc-e2e", stateRoot)
+	resources.trackContainer(t, ctx, world, 1)
 	openClawConfig := filepath.Join(tmp, "openclaw.json")
 	engramEnv := filepath.Join(tmp, "engram.env")
 	declaration := filepath.Join(tmp, "kenogram.toml")

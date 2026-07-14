@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -25,6 +26,7 @@ const (
 	vfsMinimumFreeEnv       = "KENOGRAM_E2E_VFS_MIN_FREE_GIB"
 	imageClaimTimeout       = 30 * time.Second
 	cleanupOverallTimeout   = 2 * time.Minute
+	linuxUnixSocketPathMax  = 107
 )
 
 var defaultCleanupTimeouts = cleanupTimeouts{
@@ -153,13 +155,25 @@ func registerContainerCleanup(t *testing.T, resources *e2eContainerResources) {
 	})
 }
 
-func e2eWorldName(t *testing.T, prefix string) string {
+func e2eWorldName(t *testing.T, prefix, stateRoot string) string {
 	t.Helper()
-	var nonce [12]byte
+	var nonce [8]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		t.Fatalf("generate E2E world nonce: %v", err)
 	}
-	return fmt.Sprintf("%s-%x", prefix, nonce)
+	world := fmt.Sprintf("%s-%x", prefix, nonce)
+	if err := validateE2EProxySocketPath(stateRoot, world); err != nil {
+		t.Fatal(err)
+	}
+	return world
+}
+
+func validateE2EProxySocketPath(stateRoot, world string) error {
+	proxySocket := filepath.Join(stateRoot, world, "proxy.sock")
+	if len(proxySocket) > linuxUnixSocketPathMax {
+		return fmt.Errorf("E2E proxy socket path is %d bytes, maximum is %d: shorten state root or world prefix", len(proxySocket), linuxUnixSocketPathMax)
+	}
+	return nil
 }
 
 func (r *e2eContainerResources) trackContainer(t *testing.T, ctx context.Context, world string, generation int) {

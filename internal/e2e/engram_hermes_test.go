@@ -47,9 +47,9 @@ func TestEngramControlsHermesInsideKenogram(t *testing.T) {
 	engramLock := readReleaseLock(t)
 	engram := materializeEngramRelease(t, ctx, tmp, engramLock)
 
-	world := e2eWorldName(t, "engram-hermes-e2e")
-	resources.trackContainer(t, ctx, world, 1)
 	stateRoot := filepath.Join(tmp, "state")
+	world := e2eWorldName(t, "eh-e2e", stateRoot)
+	resources.trackContainer(t, ctx, world, 1)
 	hermesConfig := filepath.Join(tmp, "hermes-config.yaml")
 	engramEnv := filepath.Join(tmp, "engram.env")
 	declaration := filepath.Join(tmp, "kenogram.toml")

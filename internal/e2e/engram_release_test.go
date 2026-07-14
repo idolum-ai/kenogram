@@ -107,11 +107,11 @@ func TestEngramReleaseInsideKenogram(t *testing.T) {
 	}
 	pinnedImage := image + "@" + imageDigest
 
-	world := e2eWorldName(t, "engram-e2e")
+	stateRoot := filepath.Join(tmp, "state")
+	world := e2eWorldName(t, "engram-e2e", stateRoot)
 	for generation := 1; generation <= 3; generation++ {
 		resources.trackContainer(t, ctx, world, generation)
 	}
-	stateRoot := filepath.Join(tmp, "state")
 	declaration := filepath.Join(tmp, "kenogram.toml")
 	envSource := filepath.Join(tmp, "engram.env")
 	revisionSource := filepath.Join(tmp, "revision")

@@ -72,9 +72,9 @@ USER node
 		t.Fatalf("invalid live-canary image digest: %q", imageDigest)
 	}
 
-	world := e2eWorldName(t, "telegram-canary")
-	resources.trackContainer(t, ctx, world, 1)
 	stateRoot := filepath.Join(tmp, "state")
+	world := e2eWorldName(t, "telegram-canary", stateRoot)
+	resources.trackContainer(t, ctx, world, 1)
 	openClawConfig := filepath.Join(tmp, "openclaw.json")
 	engramEnv := filepath.Join(tmp, "engram.env")
 	declaration := filepath.Join(tmp, "kenogram.toml")
