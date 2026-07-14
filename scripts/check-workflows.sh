@@ -53,12 +53,18 @@ for phrase in 'persist-credentials: false' './scripts/prepare-release-notes.sh' 
   }
 done
 for phrase in 'environment: release' 'contents: write' 'persist-credentials: false' 'make vulncheck' \
+  'name: Check out candidate-reviewed head' 'ref: ${{ github.event.pull_request.head.sha }}' \
+  'path: .reviewed-release-head' "git -C .reviewed-release-head rev-parse 'HEAD^{tree}'" \
   'merged release tree differs from the candidate-reviewed head' 'git push origin "${SOURCE_SHA}:refs/tags/${TAG}"' \
   '--verify-tag --draft' 'gh release upload' '--draft=false'; do
   grep -F -- "${phrase}" .github/workflows/release.yml >/dev/null || {
     echo "release workflow is missing: ${phrase}" >&2; exit 1;
   }
 done
+if grep -F -- 'git fetch --no-tags origin "refs/pull/' .github/workflows/release.yml >/dev/null; then
+  echo "release verification must not depend on a credentialless pull-ref fetch" >&2
+  exit 1
+fi
 if grep -R -E 'uses:[[:space:]]+actions/(checkout|setup-go|upload-artifact|download-artifact)@v[0-9]+' .github/workflows >/dev/null; then
   echo "official actions must be pinned by full commit SHA" >&2
   exit 1
