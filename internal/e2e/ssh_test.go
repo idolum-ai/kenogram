@@ -95,7 +95,7 @@ func TestSSHComposition(t *testing.T) {
 	if out, err := runSSH(ctx, tmp, testEnv, kenogram, world, clientKey, knownHosts); err == nil || !strings.Contains(out, "no such file or directory") {
 		t.Fatalf("destroyed world remained connectable err=%v output=%q", err, out)
 	}
-	assertDestroyedHistory(t, stateRoot, world)
+	assertDestroyedOutcomes(t, stateRoot, world, "applied", "stopped", "restarted", "destroyed")
 }
 
 func buildSSHImage(t *testing.T, ctx context.Context, root, tmp string, resources *e2eContainerResources) string {
