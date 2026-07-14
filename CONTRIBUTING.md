@@ -49,9 +49,25 @@ The module retains Go 1.22 as its source-language and compatibility floor. The
 `toolchain` directive in `go.mod` is the authoritative, security-patched build
 version used by CI and release automation; a Go command using the default
 `GOTOOLCHAIN=auto` behavior obtains it when necessary. Run `make vulncheck` for
-the Go vulnerability database's reachable-code analysis. CI runs that online
-check for every change and on its weekly schedule, and release candidates run
-it again before packaging.
+the Go vulnerability database's reachable-code analysis. Pull-request CI runs
+that online check for every implementation change, as well as on its weekly
+schedule; release candidates run it again before packaging.
+
+Pull requests that change only established documentation, governance files,
+issue forms, or the documentation mark run architecture, documentation-
+freshness, secret, and workflow checks. Every unknown path fails closed to the
+full Go, race, native macOS, rootless-Podman, and composition suite. Pushes to
+`main`, manual runs, scheduled runs, and release workflows always run their full
+evidence sets.
+
+This distinction is an enforcement boundary only when the organization ruleset
+requires `.github/workflows/ci.yml` from a protected source revision. The
+enforced workflow checks out its policy helpers at `github.workflow_sha`, apart
+from the proposed tree it inspects and executes. Ordinary required job names do
+not make a pull-request-authored workflow trusted. Until the ruleset workflow is
+active and the repository variable `PATH_AWARE_CI_ENABLED` is exactly `true`,
+the selector runs the full suite and maintainers retain the existing per-job
+requirements.
 
 Local runtime proofs also need `rg`, an OpenSSH client for the SSH composition,
 Linux/amd64 for Engram compositions,

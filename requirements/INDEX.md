@@ -42,7 +42,12 @@ evaluation but outside the supported Linux runtime promise.
 
 - `make test` runs unit, contract, and parser fuzz-seed tests.
 - `make test-evidence` retains structured test events and a coverage profile.
-- `make integration` runs the rootless Podman boundary contract and is mandatory in CI.
+- `make integration` runs the rootless Podman boundary contract and is mandatory
+  in CI for implementation changes, pushes to `main`, and releases. Editorial-
+  only pull requests retain the architecture, documentation-freshness, secret,
+  and workflow gates without replaying unchanged runtime evidence. That
+  classification is authoritative only in the organization-ruleset workflow,
+  whose policy comes from its protected workflow revision.
 - `make e2e-ssh` proves a key-authenticated SSH stream to a declared world-
   loopback interface without a published host port.
 - `make e2e-release` proves the checksum-pinned Engram `v0.3.0` lifecycle.

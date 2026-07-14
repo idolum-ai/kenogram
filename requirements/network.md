@@ -1,7 +1,10 @@
 # Network contract
 
-Status: binding contract. Unit and rootless Podman evidence is mandatory in CI;
-the strongest evidence and remaining invariant gaps are indexed in `INDEX.md`.
+Status: binding contract. Unit and rootless Podman evidence is mandatory in CI
+for implementation changes and protected publication paths; editorial-only
+pull requests classified by the protected organization-ruleset workflow do not
+replay unchanged runtime evidence. The strongest evidence and remaining
+invariant gaps are indexed in `INDEX.md`.
 
 The normative acceptance invariants are:
 

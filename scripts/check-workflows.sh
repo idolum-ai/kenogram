@@ -19,7 +19,7 @@ if [[ ! "${toolchain}" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 setup_go_count="$(rg -o 'actions/setup-go@' .github/workflows | wc -l)"
-version_file_count="$(rg -o 'go-version-file:[[:space:]]+go.mod' .github/workflows | wc -l)"
+version_file_count="$(rg -o 'go-version-file:[[:space:]]+(source/)?go.mod' .github/workflows | wc -l)"
 if [[ "${setup_go_count}" -ne "${version_file_count}" ]]; then
   echo "every setup-go step must consume go.mod's toolchain directive" >&2
   exit 1
@@ -32,6 +32,20 @@ grep -F -- 'run: make vulncheck' .github/workflows/ci.yml >/dev/null || {
   echo "CI must gate changes and scheduled runs on vulnerability reachability" >&2
   exit 1
 }
+
+bash scripts/test-ci-policy.sh
+for phrase in 'merge_group:' 'fetch-depth: 0' 'github.workflow_sha' \
+  'PATH_AWARE_CI_ENABLED' \
+  '../.ci-policy/scripts/classify-ci-paths.sh' \
+  '.ci-policy/scripts/verify-ci-results.sh' \
+  'path: .ci-policy' 'path: source' 'persist-credentials: false' \
+  "if: steps.scope.outputs.mode == 'editorial'" \
+  "if: needs.check.outputs.mode == 'full'" 'if: always()' \
+  'needs: [check, race, apple-host, runtime, runtime-hermes]'; do
+  grep -F -- "${phrase}" .github/workflows/ci.yml >/dev/null || {
+    echo "path-aware CI is missing: ${phrase}" >&2; exit 1;
+  }
+done
 
 for phrase in 'persist-credentials: false' './scripts/prepare-release-notes.sh' 'make vulncheck' 'make test-race' 'make integration' 'make release-dist' 'candidate-version.txt'; do
   grep -F -- "${phrase}" .github/workflows/release-candidate.yml >/dev/null || {
