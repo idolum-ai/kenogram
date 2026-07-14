@@ -4,6 +4,8 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+## [v0.1.0] - 2026-07-14
+
 - Add declared loopback interfaces, byte-transparent `connect`, and an optional
   SSH composition proven without a published host port.
 - Pin CI and release builds to a supported Go security patch while retaining
