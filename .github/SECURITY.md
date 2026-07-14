@@ -7,4 +7,4 @@ Report vulnerabilities through GitHub's private
 flow. Include the affected commit, host and
 Podman versions, a minimal declaration or reproducer, observed impact, and any
 suggested mitigation. Do not open a public issue containing exploit details or
-credentials.
+private data. Never submit live credentials.

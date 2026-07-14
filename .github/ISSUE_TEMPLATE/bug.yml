@@ -1,0 +1,42 @@
+name: Bug report
+description: Report reproducible behavior that violates a documented contract
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never include live credentials or private data. Report vulnerability and exploit details through the [private security form](https://github.com/idolum-ai/kenogram/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: Kenogram version
+      description: Paste `kenogram version`, or provide the commit SHA.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the OS, architecture, selected runtime, runtime version, and relevant host tools.
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: Provide the smallest declaration and commands that reproduce the behavior. Remove secrets and private data.
+    validations:
+      required: true
+  - type: textarea
+    id: observations
+    attributes:
+      label: Expected and observed behavior
+      description: State the documented observation you expected, what happened, and any exact error output.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Additional evidence
+      description: Add sanitized logs, status output, or links that help bound the failure.

@@ -1,0 +1,29 @@
+name: Contract proposal
+description: Propose a small, observable change to Kenogram's behavior
+title: "proposal: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Kenogram favors narrow contracts backed by executable evidence. Describe the boundary before suggesting an implementation. Never include live credentials or private data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and boundary
+      description: Who is affected, and which observable boundary is missing or misleading?
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Proposed contract
+      description: What should an operator be able to observe before and after the change?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Proof and alternatives
+      description: What smallest test would prove the value? Note alternatives or rejected scope.
+    validations:
+      required: true
