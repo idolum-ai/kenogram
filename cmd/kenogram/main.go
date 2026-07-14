@@ -432,35 +432,48 @@ func runConnect(ctx context.Context, args []string, stdout, stderr io.Writer) in
 
 func relayConnection(ctx context.Context, input io.Reader, output io.Writer, connection net.Conn) error {
 	defer connection.Close()
-	upload := make(chan error, 1)
-	download := make(chan error, 1)
+	type directionResult struct {
+		direction string
+		err       error
+	}
+	results := make(chan directionResult, 2)
 	go func() {
 		_, err := io.Copy(connection, input)
 		if tcp, ok := connection.(*net.TCPConn); ok {
 			_ = tcp.CloseWrite()
 		}
-		upload <- err
+		results <- directionResult{direction: "upload", err: err}
 	}()
 	go func() {
 		_, err := io.Copy(output, connection)
-		download <- err
+		results <- directionResult{direction: "download", err: err}
 	}()
-	select {
-	case <-ctx.Done():
-		return context.Cause(ctx)
-	case err := <-download:
-		return err
-	case err := <-upload:
-		if err != nil {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return context.Cause(ctx)
-		case err := <-download:
-			return err
+	abort := func() {
+		_ = connection.Close()
+		if closer, ok := input.(io.Closer); ok {
+			_ = closer.Close()
 		}
 	}
+	for completed := 0; completed < 2; completed++ {
+		select {
+		case <-ctx.Done():
+			abort()
+			return context.Cause(ctx)
+		case result := <-results:
+			if result.err != nil {
+				abort()
+				return result.err
+			}
+			// A server may finish its output while it continues accepting input.
+			// Preserve that legal TCP half-close until the upload also completes.
+			if result.direction == "download" {
+				if tcp, ok := connection.(*net.TCPConn); ok {
+					_ = tcp.CloseRead()
+				}
+			}
+		}
+	}
+	return nil
 }
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	const usage = "usage: kenogram status [--json] <world>"

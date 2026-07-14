@@ -1,12 +1,13 @@
 # Proven compositions
 
-These guides transfer Kenogram's release-pinned E2E evidence into operator
-recipes. They are compatibility records, not endorsements of an agent or model
-provider and not a promise that only the pinned versions work.
+These guides transfer Kenogram's E2E evidence into operator recipes. Agent
+proofs pin upstream releases; the SSH proof resolves Ubuntu's current 24.04
+OpenSSH package when CI builds it. These are compatibility records, not
+endorsements or promises that only the tested versions work.
 
 | Composition | Version proven in CI | Automated boundary |
 |---|---:|---|
-| [SSH](ssh.md) | OpenSSH client + Ubuntu 24.04 server package | Declared loopback stream, key rejection, no host listener, lifecycle |
+| [SSH](ssh.md) | OpenSSH client + Ubuntu 24.04 package resolved at CI time | Declared loopback stream and PTY, key rejection, no host listener, lifecycle |
 | [Engram](engram.md) | v0.3.0 | Release integrity, offline lifecycle, replacement, restart, destruction |
 | [OpenClaw](openclaw.md) | 2026.6.11 | Native fake Telegram, TUI, isolation, replacement, absence |
 | [Hermes Agent](hermes-agent.md) | v2026.7.7.2 (agent 0.18.2) | Native fake Telegram, TUI, isolation, replacement, absence |

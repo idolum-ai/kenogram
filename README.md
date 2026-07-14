@@ -97,7 +97,8 @@ retains the Podman checks rather than treating Apple's container CLI as an
 equivalent isolation backend. The launcher is unit-tested and cross-compiled,
 but still needs real Apple-silicon proof before release support.
 
-`make e2e` runs the release-pinned composition proofs. Kenogram isolates
+`make e2e` runs release-pinned agent proofs and a distro-current SSH
+compatibility proof. Kenogram isolates
 OpenClaw `2026.6.11` with deterministic fake Telegram and model services,
 Hermes Agent `v2026.7.7.2` with the same hermetic boundaries, and accepts the
 Engram `v0.3.0` release. Separate proofs cover each agent's native Telegram

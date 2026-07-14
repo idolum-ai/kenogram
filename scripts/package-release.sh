@@ -59,7 +59,8 @@ first_world="prepare-first-world.sh"
 cp "scripts/${first_world}" "${output_dir}/${first_world}"
 chmod 0755 "${output_dir}/${first_world}"
 cp "images/reference-world/Containerfile" "${output_dir}/reference-world.Containerfile"
-assets+=("${first_world}" "reference-world.Containerfile")
+cp "images/ssh-world/Containerfile" "${output_dir}/ssh-world.Containerfile"
+assets+=("${first_world}" "reference-world.Containerfile" "ssh-world.Containerfile")
 
 (
   cd "${output_dir}"

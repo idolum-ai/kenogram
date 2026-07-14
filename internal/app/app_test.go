@@ -125,6 +125,7 @@ func (r *runtimeRunner) Interactive(_ context.Context, _ string, args ...string)
 func testBackend(r backend.Runner) *backend.Podman {
 	podman := backend.New(r)
 	podman.ReadProcStatus = func(int) ([]byte, error) { return []byte("Seccomp:\t2\n"), nil }
+	podman.ReadProcessStart = func(int) string { return "test-process-start" }
 	podman.MountIdentity = func(int, string, string) (bool, error) { return true, nil }
 	return podman
 }
@@ -439,6 +440,31 @@ func TestRecoveryPlanDoesNotRereadCopySource(t *testing.T) {
 	}
 }
 
+func TestRecoveryAcceptsLegacyAppliedPlanWithoutInterfacesField(t *testing.T) {
+	result := preparedFixture().Result
+	canonical, err := plan.Canonical(result.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(canonical, []byte(`"interfaces"`)) {
+		t.Fatalf("empty interfaces changed legacy canonical plan: %s", canonical)
+	}
+	result.PlanDigest = DeclarationDigest(canonical)
+	declaration := []byte("legacy declaration")
+	result.DeclarationDigest = DeclarationDigest(declaration)
+	rawPlan, err := encodeRecoveryPlan(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(rawPlan, []byte(`"interfaces"`)) {
+		t.Fatalf("legacy recovery fixture unexpectedly contains interfaces: %s", rawPlan)
+	}
+	state := worldfs.State{PlanDigest: result.PlanDigest, DeclarationDigest: result.DeclarationDigest}
+	if _, err := preparedFromRecovery(declaration, rawPlan, "applied.toml", state); err != nil {
+		t.Fatalf("legacy applied plan rejected after upgrade: %v", err)
+	}
+}
+
 func TestConnectUsesOnlyDeclaredInterfaceOnVerifiedAuthoritativeGeneration(t *testing.T) {
 	base := t.TempDir()
 	layout := worldfs.For(base, "w")
@@ -475,10 +501,14 @@ func TestConnectUsesOnlyDeclaredInterfaceOnVerifiedAuthoritativeGeneration(t *te
 	server, client := net.Pipe()
 	t.Cleanup(func() { _ = server.Close() })
 	called := false
-	a := &App{Backend: testBackend(runner), BaseDir: base, acquireConnection: func(_ context.Context, pid int, address string) (net.Conn, error) {
+	podman := testBackend(runner)
+	a := &App{Backend: podman, BaseDir: base, acquireConnection: func(_ context.Context, pid int, processStart, address string, revalidate func() error) (net.Conn, error) {
 		called = true
-		if pid != 123 || address != "127.0.0.1:2222" {
-			t.Fatalf("pid=%d address=%q", pid, address)
+		if pid != 123 || processStart != "test-process-start" || address != "127.0.0.1:2222" {
+			t.Fatalf("pid=%d processStart=%q address=%q", pid, processStart, address)
+		}
+		if err := revalidate(); err != nil {
+			return nil, err
 		}
 		return client, nil
 	}}
@@ -511,6 +541,24 @@ func TestConnectUsesOnlyDeclaredInterfaceOnVerifiedAuthoritativeGeneration(t *te
 	connection.Close()
 	if _, err := a.Connect(context.Background(), "w", "undeclared"); err == nil || !strings.Contains(err.Error(), "not declared") {
 		t.Fatalf("undeclared interface: %v", err)
+	}
+	identityReads := 0
+	podman.ReadProcessStart = func(int) string {
+		identityReads++
+		if identityReads <= 2 {
+			return "test-process-start"
+		}
+		return "replacement-process-start"
+	}
+	if _, err := a.Connect(context.Background(), "w", "ssh"); err == nil || !strings.Contains(err.Error(), "identity changed after namespace pin") {
+		t.Fatalf("changed runtime identity: %v", err)
+	}
+}
+
+func TestConnectMissingWorldHasAnOperatorFacingError(t *testing.T) {
+	a := &App{BaseDir: t.TempDir()}
+	if _, err := a.Connect(context.Background(), "absent", "ssh"); err == nil || err.Error() != `world "absent" does not exist` {
+		t.Fatalf("missing world: %v", err)
 	}
 }
 func TestUpRejectsBadRuntimeEvidence(t *testing.T) {

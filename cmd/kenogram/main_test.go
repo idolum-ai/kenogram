@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/idolum-ai/kenogram/internal/app"
 	"github.com/idolum-ai/kenogram/internal/backend"
@@ -157,6 +159,74 @@ func TestRelayConnectionIsAByteTransparentFullDuplexStream(t *testing.T) {
 	}
 	if !bytes.Equal(output.Bytes(), wantDownload) {
 		t.Fatalf("downloaded bytes = %v, want %v", output.Bytes(), wantDownload)
+	}
+}
+
+func TestRelayConnectionPreservesUploadAfterServerHalfClosesOutput(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skip("sandbox does not permit loopback sockets")
+		}
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	client, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverDone := make(chan error, 1)
+	wantUpload := []byte("staged-after-response")
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer connection.Close()
+		tcp := connection.(*net.TCPConn)
+		if _, writeErr := tcp.Write([]byte("ready")); writeErr != nil {
+			serverDone <- writeErr
+			return
+		}
+		if closeErr := tcp.CloseWrite(); closeErr != nil {
+			serverDone <- closeErr
+			return
+		}
+		got, readErr := io.ReadAll(tcp)
+		if readErr != nil {
+			serverDone <- readErr
+			return
+		}
+		if !bytes.Equal(got, wantUpload) {
+			serverDone <- errors.New("upload stopped after server half-close")
+			return
+		}
+		serverDone <- nil
+	}()
+
+	inputReader, inputWriter := io.Pipe()
+	var output bytes.Buffer
+	relayDone := make(chan error, 1)
+	go func() { relayDone <- relayConnection(context.Background(), inputReader, &output, client) }()
+	waitForOutput := time.Now().Add(time.Second)
+	for output.String() != "ready" && time.Now().Before(waitForOutput) {
+		time.Sleep(time.Millisecond)
+	}
+	if output.String() != "ready" {
+		t.Fatalf("server output = %q", output.String())
+	}
+	if _, err := inputWriter.Write(wantUpload); err != nil {
+		t.Fatal(err)
+	}
+	if err := inputWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-relayDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
 	}
 }
 

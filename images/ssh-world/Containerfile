@@ -6,6 +6,7 @@ ARG GROUP_ID
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates openssh-server tmux \
     && rm -rf /var/lib/apt/lists/* \
+    && rm -f /etc/ssh/ssh_host_* \
     && mkdir -p /run/sshd \
     && groupadd --non-unique --gid "${GROUP_ID}" agent \
     && useradd --non-unique --uid "${USER_ID}" --gid "${GROUP_ID}" --create-home agent \

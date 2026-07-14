@@ -37,7 +37,7 @@ type App struct {
 	Executable string
 	// acquireConnection is replaceable only by package tests; production uses
 	// the namespace descriptor-transfer boundary.
-	acquireConnection func(context.Context, int, string) (net.Conn, error)
+	acquireConnection func(context.Context, int, string, string, func() error) (net.Conn, error)
 	// lifecycleCheckpoint is nil in production. Tests use it to terminate a
 	// process at named durable boundaries without changing runtime behavior.
 	lifecycleCheckpoint func(string)
@@ -1287,6 +1287,12 @@ func (a *App) Connect(ctx context.Context, name, interfaceName string) (net.Conn
 		return nil, err
 	}
 	l := worldfs.For(a.BaseDir, name)
+	if _, err := os.Stat(l.Root); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("world %q does not exist", name)
+		}
+		return nil, fmt.Errorf("inspect world %q: %w", name, err)
+	}
 	lock, err := lockfile.Acquire(l.Lock)
 	if err != nil {
 		return nil, err
@@ -1328,7 +1334,16 @@ func (a *App) Connect(ctx context.Context, name, interfaceName string) (net.Conn
 	if acquire == nil {
 		acquire = netns.AcquireConnection
 	}
-	connection, err := acquire(ctx, evidence.PID, address)
+	connection, err := acquire(ctx, evidence.PID, evidence.ProcessStart, address, func() error {
+		current, inspectErr := a.Backend.Inspect(ctx, state.Container)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if current.PID != evidence.PID || current.ProcessStart != evidence.ProcessStart {
+			return fmt.Errorf("runtime process identity changed after namespace pin")
+		}
+		return a.verifyRuntimeEvidence(current, prepared.Result, state.Generation, expected)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("connect interface %q: %w", interfaceName, err)
 	}

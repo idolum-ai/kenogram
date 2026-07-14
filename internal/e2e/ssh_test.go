@@ -56,6 +56,16 @@ func TestSSHComposition(t *testing.T) {
 		t.Fatalf("invalid generated host public key: %q", hostPublic)
 	}
 	mustWrite(t, knownHosts, []byte(world+" "+fields[0]+" "+fields[1]+"\n"), 0o600)
+	wrongKnownHosts := filepath.Join(tmp, "wrong_known_hosts")
+	wrongHostPublic, err := os.ReadFile(wrongKey + ".pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongFields := strings.Fields(string(wrongHostPublic))
+	if len(wrongFields) < 2 {
+		t.Fatalf("invalid wrong host public key: %q", wrongHostPublic)
+	}
+	mustWrite(t, wrongKnownHosts, []byte(world+" "+wrongFields[0]+" "+wrongFields[1]+"\n"), 0o600)
 	config := filepath.Join(tmp, "sshd_config")
 	writeSSHConfig(t, config, port)
 	revision := filepath.Join(tmp, "revision")
@@ -67,10 +77,18 @@ func TestSSHComposition(t *testing.T) {
 	testEnv := append(os.Environ(), "KENOGRAM_STATE_DIR="+stateRoot)
 
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
+	if version, versionErr := runResult(ctx, tmp, testEnv, "ssh", "-V"); versionErr == nil {
+		t.Logf("SSH client: %s", strings.TrimSpace(version))
+	}
+	assertSSHEffectiveConfig(t, ctx, tmp, testEnv, world, 1)
 	assertNoHostListener(t, port)
 	assertSSHProof(t, ctx, tmp, testEnv, kenogram, world, clientKey, knownHosts, "one")
+	assertSSHPTYProof(t, ctx, tmp, testEnv, kenogram, world, clientKey, knownHosts)
 	if out, err := runSSH(ctx, tmp, testEnv, kenogram, world, wrongKey, knownHosts); err == nil {
 		t.Fatalf("wrong SSH key was accepted:\n%s", out)
+	}
+	if out, err := runSSH(ctx, tmp, testEnv, kenogram, world, clientKey, wrongKnownHosts); err == nil {
+		t.Fatalf("wrong SSH host key was accepted:\n%s", out)
 	}
 	if out, err := runResult(ctx, tmp, testEnv, kenogram, "connect", world, "undeclared"); err == nil || !strings.Contains(out, "not declared") {
 		t.Fatalf("undeclared interface result err=%v output=%q", err, out)
@@ -81,6 +99,7 @@ func TestSSHComposition(t *testing.T) {
 	assertGeneration(t, filepath.Join(stateRoot, world, "state.json"), 2, "running")
 	assertNoHostListener(t, port)
 	assertSSHProof(t, ctx, tmp, testEnv, kenogram, world, clientKey, knownHosts, "two")
+	assertSSHPTYProof(t, ctx, tmp, testEnv, kenogram, world, clientKey, knownHosts)
 	if _, err := runResult(ctx, tmp, testEnv, "podman", "inspect", containerName(world, 1)); err == nil {
 		t.Fatal("SSH predecessor survived replacement")
 	}
@@ -92,7 +111,7 @@ func TestSSHComposition(t *testing.T) {
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	assertSSHProof(t, ctx, tmp, testEnv, kenogram, world, clientKey, knownHosts, "two")
 	run(t, ctx, tmp, testEnv, kenogram, "destroy", "--yes", world)
-	if out, err := runSSH(ctx, tmp, testEnv, kenogram, world, clientKey, knownHosts); err == nil || !strings.Contains(out, "no such file or directory") {
+	if out, err := runSSH(ctx, tmp, testEnv, kenogram, world, clientKey, knownHosts); err == nil || !strings.Contains(out, `world "`+world+`" does not exist`) {
 		t.Fatalf("destroyed world remained connectable err=%v output=%q", err, out)
 	}
 	assertDestroyedOutcomes(t, stateRoot, world, "applied", "stopped", "restarted", "destroyed")
@@ -118,13 +137,17 @@ func writeSSHConfig(t *testing.T, path string, port int) {
 ListenAddress 127.0.0.1
 HostKey /home/agent/.ssh/host-key
 AuthorizedKeysFile /home/agent/.ssh/authorized_keys
-PidFile /workspace/sshd.pid
+PidFile /tmp/kenogram-sshd.pid
+PubkeyAuthentication yes
+AuthenticationMethods publickey
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
 UsePAM no
 PermitEmptyPasswords no
 AllowUsers agent
+PermitRootLogin no
+DisableForwarding yes
 StrictModes yes
 PrintMotd no
 LogLevel VERBOSE
@@ -187,6 +210,28 @@ func assertSSHProof(t *testing.T, ctx context.Context, dir string, env []string,
 		out, err := runSSH(ctx, dir, env, kenogram, world, key, knownHosts)
 		return err == nil && strings.Contains(out, sshProof+":"+revision), out
 	})
+}
+
+func assertSSHPTYProof(t *testing.T, ctx context.Context, dir string, env []string, kenogram, world, key, knownHosts string) {
+	t.Helper()
+	proxy := kenogram + " connect " + world + " ssh"
+	out, err := runResult(ctx, dir, env, "ssh", "-tt", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile="+knownHosts, "-o", "HostKeyAlias="+world, "-o", "ProxyCommand="+proxy, "-i", key, "agent@"+world, "test -t 0 && test -t 1 && printf 'KENOGRAM_SSH_TTY_PROOF\\n'")
+	if err != nil || !strings.Contains(out, "KENOGRAM_SSH_TTY_PROOF") {
+		t.Fatalf("SSH PTY proof err=%v output=%q", err, out)
+	}
+}
+
+func assertSSHEffectiveConfig(t *testing.T, ctx context.Context, dir string, env []string, world string, generation int) {
+	t.Helper()
+	out := strings.ToLower(run(t, ctx, dir, env, "podman", "exec", containerName(world, generation), "/usr/sbin/sshd", "-T", "-f", "/home/agent/.ssh/sshd_config"))
+	for _, want := range []string{"pubkeyauthentication yes", "authenticationmethods publickey", "passwordauthentication no", "permitrootlogin no", "disableforwarding yes"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("effective sshd configuration lacks %q:\n%s", want, out)
+		}
+	}
+	if version, err := runResult(ctx, dir, env, "podman", "exec", containerName(world, generation), "/usr/sbin/sshd", "-V"); err == nil {
+		t.Logf("SSH server: %s", strings.TrimSpace(version))
+	}
 }
 
 func runSSH(ctx context.Context, dir string, env []string, kenogram, world, key, knownHosts string) (string, error) {

@@ -13,15 +13,18 @@ interpretation context.
 
 ## Prepare the composition
 
-Build the optional image as described in
-[`../../images/ssh-world/README.md`](../../images/ssh-world/README.md), then
-record its exact local image ID and generate a host key:
+Build the optional image from a checkout matching your release as described in
+[`../../images/ssh-world/README.md`](../../images/ssh-world/README.md). A
+published release also includes checksum-covered `ssh-world.Containerfile`.
+Record the exact local image ID and generate composition-specific client and
+host keys:
 
 ```sh
 image_id="$(podman image inspect --format '{{.Id}}' localhost/kenogram-ssh:local)"
 ssh-keygen -t ed25519 -N '' -f host-key
-cp "$HOME/.ssh/id_ed25519.pub" authorized_keys
-chmod 0600 host-key authorized_keys
+ssh-keygen -t ed25519 -N '' -f client-key
+cp client-key.pub authorized_keys
+chmod 0600 host-key client-key authorized_keys
 ```
 
 Write `sshd_config` with a high loopback-only port:
@@ -31,11 +34,15 @@ Port 2222
 ListenAddress 127.0.0.1
 HostKey /home/agent/.ssh/host-key
 AuthorizedKeysFile /home/agent/.ssh/authorized_keys
-PidFile /workspace/sshd.pid
+PidFile /tmp/kenogram-sshd.pid
+PubkeyAuthentication yes
+AuthenticationMethods publickey
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 UsePAM no
 AllowUsers agent
+PermitRootLogin no
+DisableForwarding yes
 StrictModes yes
 ```
 
@@ -84,6 +91,9 @@ printf 'first %s\n' "$(cut -d' ' -f1,2 host-key.pub)" > known_hosts
 kenogram up --dry-run ./world.toml
 kenogram up --yes ./world.toml
 ssh -o 'ProxyCommand=kenogram connect first ssh' \
+  -F /dev/null -i ./client-key \
+  -o BatchMode=yes -o IdentitiesOnly=yes \
+  -o StrictHostKeyChecking=yes \
   -o HostKeyAlias=first -o UserKnownHostsFile=./known_hosts agent@first
 ```
 
@@ -92,6 +102,20 @@ network namespace, not the host. `connect` rejects addresses supplied by the
 caller, undeclared interface names, stopped worlds, and runtime evidence that
 does not match the authoritative generation.
 
+If the first connection races daemon startup, retry it after a moment. Keep the
+host private key readable only by its operator and dedicate it to one world.
+Anyone who obtains that key can impersonate the world; rotate the key and the
+matching `known_hosts` entry after suspected disclosure or world destruction.
+
 `make e2e-ssh` generates fresh client and host keys and proves the real OpenSSH
-client path, wrong-key rejection, host-port absence, undeclared-interface
-rejection, replacement, restart, and destruction.
+client path, a forced terminal on both remote standard streams, wrong client-
+and host-key rejection, effective forwarding and authentication policy,
+host-port absence, undeclared-interface rejection, replacement, restart, and
+destruction. The Ubuntu base is pinned by digest, while its OpenSSH package is
+resolved at image-build time; the proof logs the observed client and server
+versions.
+
+On macOS, the declaration, copied keys, image, and Kenogram state live inside
+the selected Linux container machine. The launcher preserves the byte-stream
+path, but a real Apple-machine SSH terminal round trip remains part of the
+machine-boundary evidence backlog.

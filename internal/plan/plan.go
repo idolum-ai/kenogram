@@ -26,7 +26,7 @@ type Plan struct {
 	Copies        []Copy         `json:"copies"`
 	Mounts        []Mount        `json:"mounts"`
 	NetworkAllow  []NetworkAllow `json:"network_allow"`
-	Interfaces    []Interface    `json:"interfaces"`
+	Interfaces    []Interface    `json:"interfaces,omitempty"`
 	Services      []Service      `json:"services"`
 }
 

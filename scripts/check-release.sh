@@ -23,14 +23,16 @@ RELEASE_TARGETS=linux/amd64 RELEASE_COMMIT="${commit}" RELEASE_DATE=1970-01-01T0
   ./scripts/package-release.sh "${version}" "${tmp_dir}/second" >/dev/null
 cmp "${tmp_dir}/first/${asset}" "${tmp_dir}/second/${asset}"
 cmp "${tmp_dir}/first/checksums.txt" "${tmp_dir}/second/checksums.txt"
-[[ "$(wc -l < "${tmp_dir}/first/checksums.txt")" -eq 4 ]] || { echo "checksums must name the archive, installers, and reference-world source" >&2; exit 1; }
+[[ "$(wc -l < "${tmp_dir}/first/checksums.txt")" -eq 5 ]] || { echo "checksums must name the archive, installers, and both world sources" >&2; exit 1; }
 grep -F "  ${asset}" "${tmp_dir}/first/checksums.txt" >/dev/null
 grep -F "  install-release.sh" "${tmp_dir}/first/checksums.txt" >/dev/null
 grep -F "  prepare-first-world.sh" "${tmp_dir}/first/checksums.txt" >/dev/null
 grep -F "  reference-world.Containerfile" "${tmp_dir}/first/checksums.txt" >/dev/null
+grep -F "  ssh-world.Containerfile" "${tmp_dir}/first/checksums.txt" >/dev/null
 cmp ./scripts/install-release.sh "${tmp_dir}/first/install-release.sh"
 cmp ./scripts/prepare-first-world.sh "${tmp_dir}/first/prepare-first-world.sh"
 cmp ./images/reference-world/Containerfile "${tmp_dir}/first/reference-world.Containerfile"
+cmp ./images/ssh-world/Containerfile "${tmp_dir}/first/ssh-world.Containerfile"
 [[ "$(tar -tzf "${tmp_dir}/first/${asset}" | LC_ALL=C sort)" = "$(printf '%s\n' LICENSE README.md kenogram)" ]] || {
   echo "archive contents are incorrect" >&2; exit 1;
 }

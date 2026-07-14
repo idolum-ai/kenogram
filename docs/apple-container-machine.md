@@ -104,7 +104,10 @@ only then escalates to `SIGKILL`.
 
 `connect` uses that non-TTY stdin path as a byte stream. The named interface is
 still resolved and dialed by the Linux Kenogram inside the machine; macOS does
-not receive a published container port.
+not receive a published container port. Composition declarations, copied
+credentials, images, and state are machine-local Linux artifacts. Automated
+tests do not yet prove an SSH byte stream or PTY across a real Apple container
+machine.
 
 ## Security boundary and open proof
 
