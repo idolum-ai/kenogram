@@ -33,8 +33,8 @@ rg -Fq 'vfsMinimumFreeHermesGiB = uint64(96)' internal/e2e/container_storage_tes
 rg -Fq 'Hermes lanes require 96 GiB free' CONTRIBUTING.md
 rg -Fq 'Engram and OpenClaw do not yet have a' CONTRIBUTING.md
 rg -Fq 'never force image removal' requirements/INDEX.md
-rg -Fq 'cleanupOverallTimeout = 2 * time.Minute' internal/e2e/container_storage_test.go
-rg -Fq 'imageRemove:     90 * time.Second' internal/e2e/container_storage_test.go
+rg -q 'cleanupOverallTimeout[[:space:]]*=[[:space:]]*2 \* time.Minute' internal/e2e/container_storage_test.go
+rg -q 'imageRemove:[[:space:]]*90 \* time.Second' internal/e2e/container_storage_test.go
 rg -Fq 'inside a two-minute overall cleanup budget' CONTRIBUTING.md
 container_e2e_inventory=(
   'engram_release_test.go:e2eLaneEngram'

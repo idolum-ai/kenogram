@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -365,10 +366,14 @@ func snapshotImageIDs(ctx context.Context, runner podmanRunner) (map[string]stru
 	}
 	identities := make(map[string]struct{})
 	for _, line := range strings.Split(result.output, "\n") {
-		identity := strings.TrimSpace(line)
-		if identity != "" {
-			identities[identity] = struct{}{}
+		if strings.TrimSpace(line) == "" {
+			continue
 		}
+		identity, err := normalizeImageID(line)
+		if err != nil {
+			return nil, err
+		}
+		identities[identity] = struct{}{}
 	}
 	return identities, nil
 }
@@ -425,7 +430,19 @@ func podmanImageIdentity(ctx context.Context, runner podmanRunner, reference str
 	if len(payload) != 1 || strings.TrimSpace(payload[0].ID) == "" {
 		return "", fmt.Errorf("Podman image inspect returned %d objects without one identity", len(payload))
 	}
-	return strings.TrimSpace(payload[0].ID), nil
+	return normalizeImageID(payload[0].ID)
+}
+
+func normalizeImageID(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	value = strings.TrimPrefix(value, "sha256:")
+	if len(value) != 64 {
+		return "", fmt.Errorf("invalid full sha256 image identity %q", raw)
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return "", fmt.Errorf("invalid full sha256 image identity %q: %w", raw, err)
+	}
+	return "sha256:" + value, nil
 }
 
 func podmanContainerIdentity(ctx context.Context, runner podmanRunner, reference string) (string, map[string]string, error) {

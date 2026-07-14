@@ -12,6 +12,21 @@ import (
 	"time"
 )
 
+const (
+	testImageHexOwned   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testImageHexBase    = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testImageHexDerived = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	testImageHexOther   = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	testImageHexClaimed = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	testImageHexCached  = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	testImageIDOwned    = "sha256:" + testImageHexOwned
+	testImageIDBase     = "sha256:" + testImageHexBase
+	testImageIDDerived  = "sha256:" + testImageHexDerived
+	testImageIDOther    = "sha256:" + testImageHexOther
+	testImageIDClaimed  = "sha256:" + testImageHexClaimed
+	testImageIDCached   = "sha256:" + testImageHexCached
+)
+
 type scriptedPodman struct {
 	responses map[string][]podmanCommandResult
 	calls     []string
@@ -59,10 +74,10 @@ func TestContainerCleanupRemovesOnlyClaimedImageWithoutForce(t *testing.T) {
 			{exitCode: 0},
 		},
 		"image\x00inspect\x00base": {
-			imageInspect("sha256:owned"),
-			imageInspect("sha256:owned"),
+			imageInspect(testImageIDOwned),
+			imageInspect(testImageIDOwned),
 		},
-		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:owned": {{exitCode: 0}},
+		"image\x00rm\x00--ignore\x00--no-prune\x00" + testImageIDOwned: {{exitCode: 0}},
 	}}
 	resources := &e2eContainerResources{runner: fake.run}
 	resources.trackImage(t, context.Background(), "base")
@@ -75,7 +90,7 @@ func TestContainerCleanupRemovesOnlyClaimedImageWithoutForce(t *testing.T) {
 		"image\x00inspect\x00base",
 		"image\x00exists\x00base",
 		"image\x00inspect\x00base",
-		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:owned",
+		"image\x00rm\x00--ignore\x00--no-prune\x00" + testImageIDOwned,
 	}
 	if !reflect.DeepEqual(fake.calls, want) {
 		t.Fatalf("Podman calls = %#v, want %#v", fake.calls, want)
@@ -95,7 +110,7 @@ func TestContainerCleanupPreservesUnclaimedOrChangedImage(t *testing.T) {
 		want      string
 	}{
 		{name: "unclaimed", want: "unclaimed image"},
-		{name: "changed", claimedID: "sha256:claimed", inspect: []podmanCommandResult{imageInspect("sha256:other")}, want: "identity changed"},
+		{name: "changed", claimedID: testImageIDClaimed, inspect: []podmanCommandResult{imageInspect(testImageIDOther)}, want: "identity changed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			responses := map[string][]podmanCommandResult{
@@ -121,11 +136,11 @@ func TestContainerCleanupPreservesUnclaimedOrChangedImage(t *testing.T) {
 
 func TestContainerCleanupReportsInUseImageWithoutContainerSideEffects(t *testing.T) {
 	fake := &scriptedPodman{responses: map[string][]podmanCommandResult{
-		"image\x00exists\x00base":                               {{exitCode: 0}},
-		"image\x00inspect\x00base":                              {imageInspect("sha256:owned")},
-		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:owned": {{exitCode: 2, stderr: "image is in use", err: errors.New("exit 2")}},
+		"image\x00exists\x00base":                                      {{exitCode: 0}},
+		"image\x00inspect\x00base":                                     {imageInspect(testImageIDOwned)},
+		"image\x00rm\x00--ignore\x00--no-prune\x00" + testImageIDOwned: {{exitCode: 2, stderr: "image is in use", err: errors.New("exit 2")}},
 	}}
-	resources := &e2eContainerResources{runner: fake.run, images: []imageLease{{reference: "base", claimedID: "sha256:owned"}}}
+	resources := &e2eContainerResources{runner: fake.run, images: []imageLease{{reference: "base", claimedID: testImageIDOwned}}}
 	err := resources.cleanup(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "image is in use") {
 		t.Fatalf("cleanup error = %v", err)
@@ -156,22 +171,22 @@ func TestContainerCleanupToleratesImageNeverPulled(t *testing.T) {
 
 func TestContainerCleanupContinuesAfterDerivedImageFailure(t *testing.T) {
 	fake := &scriptedPodman{responses: map[string][]podmanCommandResult{
-		"image\x00exists\x00derived":                              {{exitCode: 0}},
-		"image\x00inspect\x00derived":                             {imageInspect("sha256:derived")},
-		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:derived": {{exitCode: 2, stderr: "derived in use", err: errors.New("exit 2")}},
-		"image\x00exists\x00base":                                 {{exitCode: 0}},
-		"image\x00inspect\x00base":                                {imageInspect("sha256:base")},
-		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:base":    {{exitCode: 0}},
+		"image\x00exists\x00derived":                                     {{exitCode: 0}},
+		"image\x00inspect\x00derived":                                    {imageInspect(testImageIDDerived)},
+		"image\x00rm\x00--ignore\x00--no-prune\x00" + testImageIDDerived: {{exitCode: 2, stderr: "derived in use", err: errors.New("exit 2")}},
+		"image\x00exists\x00base":                                        {{exitCode: 0}},
+		"image\x00inspect\x00base":                                       {imageInspect(testImageIDBase)},
+		"image\x00rm\x00--ignore\x00--no-prune\x00" + testImageIDBase:    {{exitCode: 0}},
 	}}
 	resources := &e2eContainerResources{runner: fake.run, images: []imageLease{
-		{reference: "base", claimedID: "sha256:base"},
-		{reference: "derived", claimedID: "sha256:derived"},
+		{reference: "base", claimedID: testImageIDBase},
+		{reference: "derived", claimedID: testImageIDDerived},
 	}}
 	err := resources.cleanup(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "derived in use") {
 		t.Fatalf("cleanup error = %v", err)
 	}
-	wantLast := "image\x00rm\x00--ignore\x00--no-prune\x00sha256:base"
+	wantLast := "image\x00rm\x00--ignore\x00--no-prune\x00" + testImageIDBase
 	if got := fake.calls[len(fake.calls)-1]; got != wantLast {
 		t.Fatalf("cleanup stopped before base removal; last call = %q, want %q", got, wantLast)
 	}
@@ -184,14 +199,14 @@ func TestFailedAcquisitionClaimsAppearedBaseForCleanup(t *testing.T) {
 			{exitCode: 0},
 		},
 		"image\x00inspect\x00base": {
-			imageInspect("sha256:base"),
-			imageInspect("sha256:base"),
+			imageInspect(testImageIDBase),
+			imageInspect(testImageIDBase),
 		},
 		"image\x00exists\x00derived": {
 			{exitCode: 1, err: errors.New("failed build did not create derived image")},
 			{exitCode: 1, err: errors.New("derived image remains absent")},
 		},
-		"image\x00rm\x00--ignore\x00--no-prune\x00sha256:base": {{exitCode: 0}},
+		"image\x00rm\x00--ignore\x00--no-prune\x00" + testImageIDBase: {{exitCode: 0}},
 	}}
 	resources := &e2eContainerResources{runner: fake.run, images: []imageLease{
 		{reference: "base"},
@@ -200,33 +215,38 @@ func TestFailedAcquisitionClaimsAppearedBaseForCleanup(t *testing.T) {
 	if err := resources.claimAppearedImages(context.Background(), "base", "derived"); err != nil {
 		t.Fatal(err)
 	}
-	if resources.images[0].claimedID != "sha256:base" || resources.images[1].claimedID != "" {
+	if resources.images[0].claimedID != testImageIDBase || resources.images[1].claimedID != "" {
 		t.Fatalf("post-failure claims = %#v", resources.images)
 	}
 	if err := resources.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := fake.calls[len(fake.calls)-1]; got != "image\x00rm\x00--ignore\x00--no-prune\x00sha256:base" {
+	if got := fake.calls[len(fake.calls)-1]; got != "image\x00rm\x00--ignore\x00--no-prune\x00"+testImageIDBase {
 		t.Fatalf("failed acquisition cleanup last call = %q", got)
 	}
 }
 
 func TestContainerCleanupUntagsReferenceWhenImageIDPredatesTest(t *testing.T) {
 	fake := &scriptedPodman{responses: map[string][]podmanCommandResult{
+		"image\x00ls\x00--all\x00--no-trunc\x00--quiet": {{output: testImageIDCached}},
 		"image\x00exists\x00new-tag": {
 			{exitCode: 1, err: errors.New("reference absent before build")},
 			{exitCode: 0},
 			{exitCode: 0},
 		},
 		"image\x00inspect\x00new-tag": {
-			imageInspect("sha256:cached"),
-			imageInspect("sha256:cached"),
+			imageInspect(testImageHexCached),
+			imageInspect(testImageHexCached),
 		},
-		"image\x00untag\x00sha256:cached\x00new-tag": {{exitCode: 0}},
+		"image\x00untag\x00" + testImageIDCached + "\x00new-tag": {{exitCode: 0}},
 	}}
+	preexistingImageIDs, err := snapshotImageIDs(context.Background(), fake.run)
+	if err != nil {
+		t.Fatal(err)
+	}
 	resources := &e2eContainerResources{
 		runner:              fake.run,
-		preexistingImageIDs: map[string]struct{}{"sha256:cached": {}},
+		preexistingImageIDs: preexistingImageIDs,
 	}
 	resources.trackImage(t, context.Background(), "new-tag")
 	if err := resources.claimAppearedImages(context.Background(), "new-tag"); err != nil {
@@ -238,7 +258,7 @@ func TestContainerCleanupUntagsReferenceWhenImageIDPredatesTest(t *testing.T) {
 	if err := resources.cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	wantLast := "image\x00untag\x00sha256:cached\x00new-tag"
+	wantLast := "image\x00untag\x00" + testImageIDCached + "\x00new-tag"
 	if got := fake.calls[len(fake.calls)-1]; got != wantLast {
 		t.Fatalf("cached image cleanup = %q, want %q", got, wantLast)
 	}
@@ -251,13 +271,13 @@ func TestContainerCleanupUntagsReferenceWhenImageIDPredatesTest(t *testing.T) {
 
 func TestSnapshotImageIDsDeduplicatesFullIdentities(t *testing.T) {
 	fake := &scriptedPodman{responses: map[string][]podmanCommandResult{
-		"image\x00ls\x00--all\x00--no-trunc\x00--quiet": {{output: "sha256:one\nsha256:two\nsha256:one\n"}},
+		"image\x00ls\x00--all\x00--no-trunc\x00--quiet": {{output: testImageIDOwned + "\n" + testImageHexBase + "\n" + testImageIDOwned + "\n"}},
 	}}
 	identities, err := snapshotImageIDs(context.Background(), fake.run)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]struct{}{"sha256:one": {}, "sha256:two": {}}
+	want := map[string]struct{}{testImageIDOwned: {}, testImageIDBase: {}}
 	if !reflect.DeepEqual(identities, want) {
 		t.Fatalf("image identity snapshot = %#v, want %#v", identities, want)
 	}
@@ -380,7 +400,7 @@ func TestContainerCleanupUsesOperationSpecificTimeouts(t *testing.T) {
 		case "container\x00inspect\x00kenogram-world-g1":
 			return containerInspect("container-id", "world", 1)
 		case "image\x00inspect\x00base":
-			return imageInspect("sha256:base")
+			return imageInspect(testImageIDBase)
 		default:
 			return podmanCommandResult{exitCode: 125, err: errors.New("unexpected command")}
 		}
@@ -388,7 +408,7 @@ func TestContainerCleanupUsesOperationSpecificTimeouts(t *testing.T) {
 	resources := &e2eContainerResources{
 		runner:     runner,
 		containers: []containerLease{{name: "kenogram-world-g1", world: "world", generation: 1}},
-		images:     []imageLease{{reference: "base", claimedID: "sha256:base"}},
+		images:     []imageLease{{reference: "base", claimedID: testImageIDBase}},
 	}
 	err := resources.cleanupWithTimeouts(context.Background(), cleanupTimeouts{
 		observation:     50 * time.Millisecond,
