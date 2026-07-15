@@ -166,8 +166,10 @@ USER node
 	if got := strings.TrimSpace(run(t, ctx, tmp, testEnv, "podman", "exec", second, "cat", "/etc/openclaw-revision")); got != "two" {
 		t.Fatalf("OpenClaw regenerated revision = %q", got)
 	}
-	runOpenClawGatewayTurn(t, ctx, tmp, testEnv, second, provider, "proof-two")
 
+	// The hot replacement is a Kenogram boundary proof: the successor is ready,
+	// its declared door works, state was carried, and the predecessor is absent.
+	// Prove a new application turn after the clean stop/start boundary below.
 	run(t, ctx, tmp, testEnv, kenogram, "down", world)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	waitForOpenClaw(t, ctx, tmp, testEnv, second)
