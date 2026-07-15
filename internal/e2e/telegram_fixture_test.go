@@ -36,14 +36,15 @@ type telegramOutbound struct {
 type telegramFixture struct {
 	*httptest.Server
 
-	mu             sync.Mutex
-	updates        []map[string]any
-	outbound       []telegramOutbound
-	nextUpdateID   int
-	nextMessageID  int
-	fileRequests   int
-	methodRequests map[string]int
-	changed        chan struct{}
+	mu              sync.Mutex
+	updates         []map[string]any
+	outbound        []telegramOutbound
+	nextUpdateID    int
+	confirmedOffset int
+	nextMessageID   int
+	fileRequests    int
+	methodRequests  map[string]int
+	changed         chan struct{}
 }
 
 func newTelegramFixture(t *testing.T, host string) *telegramFixture {
@@ -272,6 +273,15 @@ func (f *telegramFixture) serveUpdates(response http.ResponseWriter, request *ht
 func (f *telegramFixture) updatesAtOrAfter(offset int) []map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// Telegram confirms every update below a positive getUpdates offset on the
+	// server. A restarted client therefore cannot replay an update that an
+	// earlier client already acknowledged.
+	if offset > f.confirmedOffset {
+		f.confirmedOffset = offset
+	}
+	if offset < f.confirmedOffset {
+		offset = f.confirmedOffset
+	}
 	updates := make([]map[string]any, 0, len(f.updates))
 	for _, update := range f.updates {
 		id, _ := update["update_id"].(int)
@@ -280,6 +290,33 @@ func (f *telegramFixture) updatesAtOrAfter(offset int) []map[string]any {
 		}
 	}
 	return updates
+}
+
+func TestTelegramFixtureDoesNotReplayConfirmedUpdatesAfterRestart(t *testing.T) {
+	fixture := &telegramFixture{nextUpdateID: 1}
+	fixture.enqueueText("one")
+	fixture.enqueueText("two")
+
+	if got := len(fixture.updatesAtOrAfter(0)); got != 2 {
+		t.Fatalf("initial updates = %d, want 2", got)
+	}
+	if got := fixture.updatesAtOrAfter(2); len(got) != 1 || got[0]["update_id"] != 2 {
+		t.Fatalf("updates at confirmation offset 2 = %#v", got)
+	}
+	if got := fixture.updatesAtOrAfter(0); len(got) != 1 || got[0]["update_id"] != 2 {
+		t.Fatalf("restarted client replayed confirmed update: %#v", got)
+	}
+	if got := fixture.updatesAtOrAfter(3); len(got) != 0 {
+		t.Fatalf("fully confirmed updates = %#v, want none", got)
+	}
+	if got := fixture.updatesAtOrAfter(0); len(got) != 0 {
+		t.Fatalf("restarted client replayed fully confirmed updates: %#v", got)
+	}
+
+	fixture.enqueueText("three")
+	if got := fixture.updatesAtOrAfter(0); len(got) != 1 || got[0]["update_id"] != 3 {
+		t.Fatalf("new update after restart = %#v", got)
+	}
 }
 
 func (f *telegramFixture) serveOutbound(response http.ResponseWriter, request *http.Request, method string) {
