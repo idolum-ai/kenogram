@@ -128,6 +128,7 @@ USER node
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	first := containerName(world, 1)
 	waitForOpenClaw(t, ctx, tmp, testEnv, first)
+	waitForOpenClawProviderDoor(t, ctx, tmp, testEnv, first, doorHost, providerPort)
 	assertOpenClawVersion(t, ctx, tmp, testEnv, first, lock.Version)
 	assertOpenClawIsolation(t, ctx, tmp, testEnv, first, doorHost, providerPort)
 	// Prove each OpenClaw interface from an idle gateway. Cross-channel run
@@ -155,6 +156,10 @@ USER node
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	second := containerName(world, 2)
 	waitForOpenClaw(t, ctx, tmp, testEnv, second)
+	if _, err := runResult(ctx, tmp, testEnv, "podman", "inspect", first); err == nil {
+		t.Fatal("OpenClaw predecessor survived replacement")
+	}
+	waitForOpenClawProviderDoor(t, ctx, tmp, testEnv, second, doorHost, providerPort)
 	if got := strings.TrimSpace(run(t, ctx, tmp, testEnv, "podman", "exec", second, "cat", "/workspace/openclaw-carry")); got != "carried" {
 		t.Fatalf("OpenClaw carried state = %q", got)
 	}
@@ -162,13 +167,11 @@ USER node
 		t.Fatalf("OpenClaw regenerated revision = %q", got)
 	}
 	runOpenClawTUI(t, ctx, tmp, testEnv, second, provider, "proof-two")
-	if _, err := runResult(ctx, tmp, testEnv, "podman", "inspect", first); err == nil {
-		t.Fatal("OpenClaw predecessor survived replacement")
-	}
 
 	run(t, ctx, tmp, testEnv, kenogram, "down", world)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	waitForOpenClaw(t, ctx, tmp, testEnv, second)
+	waitForOpenClawProviderDoor(t, ctx, tmp, testEnv, second, doorHost, providerPort)
 	runOpenClawTUI(t, ctx, tmp, testEnv, second, provider, "proof-restart")
 	run(t, ctx, tmp, testEnv, kenogram, "destroy", "--yes", world)
 	assertDestroyedHistory(t, stateRoot, world)
@@ -433,6 +436,15 @@ func waitForOpenClaw(t *testing.T, ctx context.Context, dir string, env []string
 	t.Helper()
 	waitFor(t, 30*time.Second, func() (bool, string) {
 		out, err := runResult(ctx, dir, env, "podman", "exec", container, "curl", "--fail", "--silent", "http://127.0.0.1:18789/readyz")
+		return err == nil, out
+	})
+}
+
+func waitForOpenClawProviderDoor(t *testing.T, ctx context.Context, dir string, env []string, container, providerHost string, providerPort int) {
+	t.Helper()
+	target := fmt.Sprintf("http://%s:%d/healthz", providerHost, providerPort)
+	waitFor(t, 30*time.Second, func() (bool, string) {
+		out, err := runResult(ctx, dir, env, "podman", "exec", container, "curl", "--fail", "--silent", "--show-error", "--max-time", "2", "--noproxy", "", "--proxy", "http://127.0.0.1:3128", target)
 		return err == nil, out
 	})
 }
