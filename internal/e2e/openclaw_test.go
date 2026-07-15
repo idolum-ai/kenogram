@@ -130,13 +130,15 @@ USER node
 	waitForOpenClaw(t, ctx, tmp, testEnv, first)
 	assertOpenClawVersion(t, ctx, tmp, testEnv, first, lock.Version)
 	assertOpenClawIsolation(t, ctx, tmp, testEnv, first, doorHost, providerPort)
+	// Prove each OpenClaw interface from an idle gateway. Cross-channel run
+	// scheduling belongs to OpenClaw rather than Kenogram's isolation boundary.
+	runOpenClawTUI(t, ctx, tmp, testEnv, first, provider, "proof-one")
 	waitForOpenClawTelegramPolling(t, telegram, 30*time.Second)
 	telegram.enqueueTextFrom(telegramFixtureUser+1, openClawDeniedTelegramPrompt)
 	telegram.enqueueText("Reply with the proof marker and preserve this request marker: " + openClawNativeTelegramPrompt)
 	provider.waitObservedContaining(t, 30*time.Second, openClawNativeTelegramPrompt)
 	provider.assertNotObservedContaining(t, openClawDeniedTelegramPrompt)
 	telegram.waitOutbound(t, 30*time.Second, openClawProof)
-	runOpenClawTUI(t, ctx, tmp, testEnv, first, provider, "proof-one")
 	provider.assertObserved(t)
 	run(t, ctx, tmp, testEnv, "podman", "exec", first, "/bin/sh", "-c", "printf carried > /workspace/openclaw-carry")
 	assertSecretAbsentOutsideWorkspace(t, filepath.Join(stateRoot, world), openClawSecretCanary)
