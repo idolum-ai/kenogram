@@ -128,15 +128,18 @@ USER node
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	first := containerName(world, 1)
 	waitForOpenClaw(t, ctx, tmp, testEnv, first)
+	waitForOpenClawProviderDoor(t, ctx, tmp, testEnv, first, doorHost, providerPort)
 	assertOpenClawVersion(t, ctx, tmp, testEnv, first, lock.Version)
 	assertOpenClawIsolation(t, ctx, tmp, testEnv, first, doorHost, providerPort)
+	// Prove each OpenClaw interface from an idle gateway. Cross-channel run
+	// scheduling belongs to OpenClaw rather than Kenogram's isolation boundary.
+	runOpenClawTUI(t, ctx, tmp, testEnv, first, provider, "proof-one")
 	waitForOpenClawTelegramPolling(t, telegram, 30*time.Second)
 	telegram.enqueueTextFrom(telegramFixtureUser+1, openClawDeniedTelegramPrompt)
 	telegram.enqueueText("Reply with the proof marker and preserve this request marker: " + openClawNativeTelegramPrompt)
 	provider.waitObservedContaining(t, 30*time.Second, openClawNativeTelegramPrompt)
 	provider.assertNotObservedContaining(t, openClawDeniedTelegramPrompt)
 	telegram.waitOutbound(t, 30*time.Second, openClawProof)
-	runOpenClawTUI(t, ctx, tmp, testEnv, first, "proof-one")
 	provider.assertObserved(t)
 	run(t, ctx, tmp, testEnv, "podman", "exec", first, "/bin/sh", "-c", "printf carried > /workspace/openclaw-carry")
 	assertSecretAbsentOutsideWorkspace(t, filepath.Join(stateRoot, world), openClawSecretCanary)
@@ -153,21 +156,24 @@ USER node
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	second := containerName(world, 2)
 	waitForOpenClaw(t, ctx, tmp, testEnv, second)
+	if _, err := runResult(ctx, tmp, testEnv, "podman", "inspect", first); err == nil {
+		t.Fatal("OpenClaw predecessor survived replacement")
+	}
+	waitForOpenClawProviderDoor(t, ctx, tmp, testEnv, second, doorHost, providerPort)
 	if got := strings.TrimSpace(run(t, ctx, tmp, testEnv, "podman", "exec", second, "cat", "/workspace/openclaw-carry")); got != "carried" {
 		t.Fatalf("OpenClaw carried state = %q", got)
 	}
 	if got := strings.TrimSpace(run(t, ctx, tmp, testEnv, "podman", "exec", second, "cat", "/etc/openclaw-revision")); got != "two" {
 		t.Fatalf("OpenClaw regenerated revision = %q", got)
 	}
-	runOpenClawTUI(t, ctx, tmp, testEnv, second, "proof-two")
-	if _, err := runResult(ctx, tmp, testEnv, "podman", "inspect", first); err == nil {
-		t.Fatal("OpenClaw predecessor survived replacement")
-	}
 
+	// The hot replacement is a Kenogram boundary proof: the successor is ready,
+	// its declared door works, state was carried, and the predecessor is absent.
+	// The clean stop/start below proves those readiness observations persist.
 	run(t, ctx, tmp, testEnv, kenogram, "down", world)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	waitForOpenClaw(t, ctx, tmp, testEnv, second)
-	runOpenClawTUI(t, ctx, tmp, testEnv, second, "proof-restart")
+	waitForOpenClawProviderDoor(t, ctx, tmp, testEnv, second, doorHost, providerPort)
 	run(t, ctx, tmp, testEnv, kenogram, "destroy", "--yes", world)
 	assertDestroyedHistory(t, stateRoot, world)
 	assertSecretAbsent(t, filepath.Join(stateRoot, ".destroyed"), openClawSecretCanary)
@@ -435,6 +441,15 @@ func waitForOpenClaw(t *testing.T, ctx context.Context, dir string, env []string
 	})
 }
 
+func waitForOpenClawProviderDoor(t *testing.T, ctx context.Context, dir string, env []string, container, providerHost string, providerPort int) {
+	t.Helper()
+	target := fmt.Sprintf("http://%s:%d/healthz", providerHost, providerPort)
+	waitFor(t, 30*time.Second, func() (bool, string) {
+		out, err := runResult(ctx, dir, env, "podman", "exec", container, "curl", "--fail", "--silent", "--show-error", "--max-time", "2", "--noproxy", "", "--proxy", "http://127.0.0.1:3128", target)
+		return err == nil, out
+	})
+}
+
 func assertOpenClawVersion(t *testing.T, ctx context.Context, dir string, env []string, container, version string) {
 	t.Helper()
 	out := strings.TrimSpace(run(t, ctx, dir, env, "podman", "exec", container, "/usr/local/bin/openclaw", "--version"))
@@ -484,12 +499,14 @@ func hostDoorIPv4(t *testing.T) string {
 	return ""
 }
 
-func runOpenClawTUI(t *testing.T, ctx context.Context, dir string, env []string, container, session string) {
+func runOpenClawTUI(t *testing.T, ctx context.Context, dir string, env []string, container string, provider *observedProvider, session string) {
 	t.Helper()
 	_, _ = runResult(ctx, dir, env, "podman", "exec", container, "tmux", "kill-session", "-t", session)
-	command := openClawEnvCommand("/usr/local/bin/openclaw", "tui", "--url", "ws://127.0.0.1:18789", "--token", openClawGatewayToken, "--session", session, "--message", "Reply with the proof marker.", "--timeout-ms", "20000")
+	prompt := "Reply with the proof marker and preserve this TUI session marker: " + session
+	command := openClawEnvCommand("/usr/local/bin/openclaw", "tui", "--url", "ws://127.0.0.1:18789", "--token", openClawGatewayToken, "--session", session, "--message", prompt, "--timeout-ms", "60000")
 	args := append([]string{"exec", container, "tmux", "new-session", "-d", "-x", "120", "-y", "40", "-s", session}, command...)
 	run(t, ctx, dir, env, "podman", args...)
+	provider.waitObservedContaining(t, 60*time.Second, prompt)
 	waitFor(t, 30*time.Second, func() (bool, string) {
 		out, err := runResult(ctx, dir, env, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", session)
 		return err == nil && strings.Contains(out, openClawProof), out

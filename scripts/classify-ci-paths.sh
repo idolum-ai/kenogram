@@ -9,7 +9,7 @@ while IFS= read -r -d '' path; do
   seen=true
   case "${path}" in
     README.md | CONTRIBUTING.md | CHANGELOG.md | LICENSE | \
-      docs/*.md | docs/assets/*.svg | requirements/*.md | \
+      docs/*.md | requirements/*.md | \
       images/*/README.md | .github/*.md | \
       .github/ISSUE_TEMPLATE/*.yml | .github/ISSUE_TEMPLATE/*.yaml)
       ;;
