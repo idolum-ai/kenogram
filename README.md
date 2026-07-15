@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/kenogram-mark.svg" alt="Kenogram: two different fields of marks preserve one relational pattern across a warm white field" width="760">
+  <img src="docs/assets/kenogram-mark.svg" alt="Kenogram: a dense field of light emerges from a dark circle and stops at a black triangular occlusion" width="760">
 </p>
 
 # Kenogram

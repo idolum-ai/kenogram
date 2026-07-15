@@ -1,82 +1,187 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 680" role="img" aria-labelledby="title desc">
-  <title id="title">Kenogram</title>
-  <desc id="desc">Two different fields of identityless marks share one relational decomposition across five groups; surface inscriptions differ while the pattern remains.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" preserveAspectRatio="xMidYMid slice"
+     style="background:#050504;overflow:hidden" role="img" aria-labelledby="kg-title kg-desc">
+  <title id="kg-title">Kenogram</title>
+  <desc id="kg-desc">A dense field of attention emerges from a dark circular world and breaks against a black triangular occlusion, making the inaccessible region visible only by the light that cannot enter it.</desc>
   <defs>
-    <radialGradient id="paper" cx="50%" cy="44%" r="78%">
-      <stop offset="0" stop-color="#fffefa"/>
-      <stop offset="0.62" stop-color="#faf9f4"/>
-      <stop offset="1" stop-color="#efeee8"/>
+    <radialGradient id="kg-field" cx="47%" cy="43%" r="78%">
+      <stop offset="0" stop-color="#242420"/>
+      <stop offset="0.48" stop-color="#11110f"/>
+      <stop offset="1" stop-color="#050504"/>
     </radialGradient>
-    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#171715" stop-opacity="0"/>
-      <stop offset="0.18" stop-color="#171715" stop-opacity="0.42"/>
-      <stop offset="0.5" stop-color="#171715" stop-opacity="0.72"/>
-      <stop offset="0.82" stop-color="#171715" stop-opacity="0.42"/>
-      <stop offset="1" stop-color="#171715" stop-opacity="0"/>
+    <linearGradient id="kg-attention" gradientUnits="userSpaceOnUse" x1="260" y1="0" x2="1200" y2="0">
+      <stop offset="0" stop-color="#7e7c74" stop-opacity="0.08"/>
+      <stop offset="0.18" stop-color="#d5d1c6" stop-opacity="0.46"/>
+      <stop offset="0.36" stop-color="#fffdf5" stop-opacity="0.96"/>
+      <stop offset="0.61" stop-color="#f4f0e5" stop-opacity="0.88"/>
+      <stop offset="0.84" stop-color="#c7c3b8" stop-opacity="0.48"/>
+      <stop offset="1" stop-color="#706e68" stop-opacity="0.08"/>
     </linearGradient>
-    <filter id="grain" x="-8%" y="-8%" width="116%" height="116%">
-      <feTurbulence type="fractalNoise" baseFrequency="0.76" numOctaves="3" seed="47"/>
+    <linearGradient id="kg-edge-light" gradientUnits="userSpaceOnUse" x1="700" y1="340" x2="1060" y2="70">
+      <stop offset="0" stop-color="#fffdf5" stop-opacity="0.94"/>
+      <stop offset="0.34" stop-color="#e7e3d8" stop-opacity="0.46"/>
+      <stop offset="1" stop-color="#8b8982" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="kg-epoch-light" gradientUnits="userSpaceOnUse" x1="410" y1="0" x2="708" y2="0">
+      <stop offset="0" stop-color="#fffdf5" stop-opacity="0.08"/>
+      <stop offset="0.45" stop-color="#fffdf5" stop-opacity="0.44"/>
+      <stop offset="0.82" stop-color="#fffdf5" stop-opacity="0.78"/>
+      <stop offset="1" stop-color="#fffdf5" stop-opacity="0.18"/>
+    </linearGradient>
+    <radialGradient id="kg-world" cx="64%" cy="48%" r="82%">
+      <stop offset="0" stop-color="#080807"/>
+      <stop offset="0.72" stop-color="#030303"/>
+      <stop offset="1" stop-color="#010101"/>
+    </radialGradient>
+    <linearGradient id="kg-umbra" gradientUnits="userSpaceOnUse" x1="700" y1="340" x2="1200" y2="340">
+      <stop offset="0" stop-color="#010101"/>
+      <stop offset="0.42" stop-color="#020202"/>
+      <stop offset="1" stop-color="#040404"/>
+    </linearGradient>
+    <radialGradient id="kg-fade" cx="50%" cy="48%" r="70%">
+      <stop offset="0" stop-color="#fff"/>
+      <stop offset="0.74" stop-color="#fff"/>
+      <stop offset="1" stop-color="#000"/>
+    </radialGradient>
+    <filter id="kg-grain" filterUnits="userSpaceOnUse" x="-2" y="-2" width="1204" height="679">
+      <feTurbulence type="fractalNoise" baseFrequency="0.74" numOctaves="3" seed="73"/>
       <feColorMatrix type="saturate" values="0"/>
-      <feComponentTransfer><feFuncA type="table" tableValues="0 0.05"/></feComponentTransfer>
+      <feComponentTransfer><feFuncA type="table" tableValues="0 0.11"/></feComponentTransfer>
     </filter>
-    <filter id="fray" x="-12%" y="-12%" width="124%" height="124%">
-      <feTurbulence type="fractalNoise" baseFrequency="0.025 0.12" numOctaves="2" seed="19" result="noise"/>
-      <feDisplacementMap in="SourceGraphic" in2="noise" scale="1.3" xChannelSelector="R" yChannelSelector="G"/>
+    <filter id="kg-fray" filterUnits="userSpaceOnUse" x="-2" y="-2" width="1204" height="679">
+      <feTurbulence type="fractalNoise" baseFrequency="0.008 0.052" numOctaves="2" seed="29" result="kg-noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="kg-noise" scale="3.2" xChannelSelector="R" yChannelSelector="G"/>
     </filter>
+    <filter id="kg-fray-late" filterUnits="userSpaceOnUse" x="350" y="170" width="390" height="340">
+      <feTurbulence type="fractalNoise" baseFrequency="0.013 0.08" numOctaves="2" seed="43" result="kg-late-noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="kg-late-noise" scale="4.6" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <filter id="kg-bloom" filterUnits="userSpaceOnUse" x="380" y="230" width="390" height="220" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+    <mask id="kg-field-fade">
+      <rect width="1200" height="675" fill="url(#kg-fade)"/>
+    </mask>
 
-    <!-- The upper and lower alphabets deliberately share no glyph identity. -->
-    <g id="upper-a"><circle r="7.5" fill="#0a0a09"/></g>
-    <g id="upper-b"><rect x="-7" y="-7" width="14" height="14" rx="1.5" fill="none" stroke="#0a0a09" stroke-width="2"/></g>
-    <g id="upper-c"><path d="M-7 6L6-7M-2 7L7-2" fill="none" stroke="#0a0a09" stroke-width="2.2" stroke-linecap="round"/></g>
-    <g id="lower-a"><rect x="-7" y="-7" width="14" height="14" rx="1" fill="#0a0a09"/></g>
-    <g id="lower-b"><rect x="-4.5" y="-9" width="9" height="18" rx="4.5" fill="#0a0a09"/></g>
-    <g id="lower-c"><circle r="7" fill="none" stroke="#0a0a09" stroke-width="2.2"/></g>
-
-    <g id="upper-pattern">
-      <use href="#upper-a" x="0"/><use href="#upper-a" x="28"/><use href="#upper-a" x="56"/><use href="#upper-a" x="84"/>
-      <use href="#upper-b" x="144"/><use href="#upper-b" x="172"/><use href="#upper-b" x="200"/>
-      <use href="#upper-c" x="260"/><use href="#upper-c" x="288"/><use href="#upper-c" x="316"/>
-      <use href="#upper-a" x="376"/><use href="#upper-a" x="404"/><use href="#upper-a" x="432"/><use href="#upper-a" x="460"/>
-      <use href="#upper-b" x="520"/><use href="#upper-b" x="548"/><use href="#upper-b" x="576"/><use href="#upper-b" x="604"/>
-    </g>
-    <g id="lower-pattern">
-      <use href="#lower-a" x="0"/><use href="#lower-a" x="28"/><use href="#lower-a" x="56"/><use href="#lower-a" x="84"/>
-      <use href="#lower-b" x="144"/><use href="#lower-b" x="172"/><use href="#lower-b" x="200"/>
-      <use href="#lower-c" x="260"/><use href="#lower-c" x="288"/><use href="#lower-c" x="316"/>
-      <use href="#lower-a" x="376"/><use href="#lower-a" x="404"/><use href="#lower-a" x="432"/><use href="#lower-a" x="460"/>
-      <use href="#lower-b" x="520"/><use href="#lower-b" x="548"/><use href="#lower-b" x="576"/><use href="#lower-b" x="604"/>
-    </g>
+    <!-- One normalized attention trace. Vertical scaling creates a dense, coherent torrent. -->
+    <path id="kg-ray" pathLength="1" vector-effect="non-scaling-stroke"
+          d="M260-.035C380-.028 488-.09 590-.2C640-.255 675-.305 704-.35C844-.57 1010-.84 1225-1"/>
   </defs>
 
-  <rect width="1200" height="680" fill="url(#paper)"/>
-  <rect width="1200" height="680" filter="url(#grain)" opacity="0.72"/>
+  <!-- Overscan prevents antialiased or aspect-ratio seams at every export edge. -->
+  <rect x="-2" y="-2" width="1204" height="679" fill="url(#kg-field)"/>
+  <rect x="-2" y="-2" width="1204" height="679" filter="url(#kg-grain)" opacity="0.78"/>
 
-  <!-- Five localities: grouping persists even when every surface mark changes. -->
-  <g fill="none" stroke="#292925" stroke-width="1">
-    <path d="M264 184V472M404 184V472M520 184V472M636 184V472M780 184V472M920 184V472" opacity="0.1"/>
-    <path d="M264 205C264 188 278 174 295 174H373C390 174 404 188 404 205M404 205C404 188 418 174 435 174H489C506 174 520 188 520 205M520 205C520 188 534 174 551 174H605C622 174 636 188 636 205M636 205C636 188 650 174 667 174H749C766 174 780 188 780 205M780 205C780 188 794 174 811 174H889C906 174 920 188 920 205" opacity="0.28"/>
-    <path d="M264 451C264 468 278 482 295 482H373C390 482 404 468 404 451M404 451C404 468 418 482 435 482H489C506 482 520 468 520 451M520 451C520 468 534 482 551 482H605C622 482 636 468 636 451M636 451C636 468 650 482 667 482H749C766 482 780 468 780 451M780 451C780 468 794 482 811 482H889C906 482 920 468 920 451" opacity="0.28"/>
+  <!-- A low continuous luminance makes the torrent feel embodied, never like three bands. -->
+  <path d="M404 340C500 340 594 338 698 340" fill="none" stroke="#fff9e8" stroke-width="44"
+        stroke-linecap="round" opacity="0.1" filter="url(#kg-bloom)"/>
+
+  <!-- Attention is a field: fifty-two related traces, not a decorative beam. -->
+  <g mask="url(#kg-field-fade)" fill="none" stroke="url(#kg-attention)" stroke-linecap="round"
+     vector-effect="non-scaling-stroke" filter="url(#kg-fray)">
+    <use href="#kg-ray" transform="matrix(1 0 0 18 0 340)" stroke-width="0.85" opacity="0.3"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 29 0 340)" stroke-width="0.88" opacity="0.34"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 40 0 340)" stroke-width="0.9" opacity="0.38"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 51 0 340)" stroke-width="0.92" opacity="0.42"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 62 0 340)" stroke-width="0.95" opacity="0.46"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 73 0 340)" stroke-width="0.98" opacity="0.5"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 84 0 340)" stroke-width="1" opacity="0.54"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 95 0 340)" stroke-width="1.02" opacity="0.58"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 106 0 340)" stroke-width="1.05" opacity="0.62"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 117 0 340)" stroke-width="1.08" opacity="0.66"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 128 0 340)" stroke-width="1.1" opacity="0.7"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 139 0 340)" stroke-width="1.12" opacity="0.74"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 150 0 340)" stroke-width="1.15" opacity="0.78"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 161 0 340)" stroke-width="1.18" opacity="0.82"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 172 0 340)" stroke-width="1.2" opacity="0.86"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 183 0 340)" stroke-width="1.22" opacity="0.89"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 194 0 340)" stroke-width="1.25" opacity="0.92"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 205 0 340)" stroke-width="1.28" opacity="0.94"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 216 0 340)" stroke-width="1.3" opacity="0.96"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 227 0 340)" stroke-width="1.33" opacity="0.97"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 238 0 340)" stroke-width="1.36" opacity="0.98"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 249 0 340)" stroke-width="1.4" opacity="0.99"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 260 0 340)" stroke-width="1.44"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 271 0 340)" stroke-width="1.48"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 282 0 340)" stroke-width="1.52"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 293 0 340)" stroke-width="1.56"/>
+
+    <use href="#kg-ray" transform="matrix(1 0 0 -18 0 340)" stroke-width="0.85" opacity="0.3"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -29 0 340)" stroke-width="0.88" opacity="0.34"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -40 0 340)" stroke-width="0.9" opacity="0.38"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -51 0 340)" stroke-width="0.92" opacity="0.42"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -62 0 340)" stroke-width="0.95" opacity="0.46"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -73 0 340)" stroke-width="0.98" opacity="0.5"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -84 0 340)" stroke-width="1" opacity="0.54"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -95 0 340)" stroke-width="1.02" opacity="0.58"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -106 0 340)" stroke-width="1.05" opacity="0.62"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -117 0 340)" stroke-width="1.08" opacity="0.66"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -128 0 340)" stroke-width="1.1" opacity="0.7"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -139 0 340)" stroke-width="1.12" opacity="0.74"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -150 0 340)" stroke-width="1.15" opacity="0.78"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -161 0 340)" stroke-width="1.18" opacity="0.82"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -172 0 340)" stroke-width="1.2" opacity="0.86"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -183 0 340)" stroke-width="1.22" opacity="0.89"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -194 0 340)" stroke-width="1.25" opacity="0.92"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -205 0 340)" stroke-width="1.28" opacity="0.94"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -216 0 340)" stroke-width="1.3" opacity="0.96"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -227 0 340)" stroke-width="1.33" opacity="0.97"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -238 0 340)" stroke-width="1.36" opacity="0.98"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -249 0 340)" stroke-width="1.4" opacity="0.99"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -260 0 340)" stroke-width="1.44"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -271 0 340)" stroke-width="1.48"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -282 0 340)" stroke-width="1.52"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -293 0 340)" stroke-width="1.56"/>
   </g>
 
-  <!-- Relations, not glyphs, carry through the open field. -->
-  <g fill="none" stroke="#191917" stroke-width="1.1" opacity="0.22">
-    <path d="M334 260C318 303 318 353 334 396"/>
-    <path d="M462 260C478 303 478 353 462 396"/>
-    <path d="M578 260C562 303 562 353 578 396"/>
-    <path d="M708 260C724 303 724 353 708 396"/>
-    <path d="M850 260C834 303 834 353 850 396"/>
+  <!-- Later epochs: brighter filaments arrive through the older diffuse field. -->
+  <g fill="none" stroke="url(#kg-attention)" stroke-linecap="round" vector-effect="non-scaling-stroke"
+     filter="url(#kg-fray-late)">
+    <use href="#kg-ray" transform="matrix(1 0 0 47 0 340)" stroke-width="1.9" opacity="0.66"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 91 0 340)" stroke-width="2.05" opacity="0.72"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 135 0 340)" stroke-width="2.15" opacity="0.76"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 179 0 340)" stroke-width="2.25" opacity="0.8"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 223 0 340)" stroke-width="2.35" opacity="0.84"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 267 0 340)" stroke-width="2.45" opacity="0.88"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -47 0 340)" stroke-width="1.9" opacity="0.66"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -91 0 340)" stroke-width="2.05" opacity="0.72"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -135 0 340)" stroke-width="2.15" opacity="0.76"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -179 0 340)" stroke-width="2.25" opacity="0.8"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -223 0 340)" stroke-width="2.35" opacity="0.84"/>
+    <use href="#kg-ray" transform="matrix(1 0 0 -267 0 340)" stroke-width="2.45" opacity="0.88"/>
   </g>
-  <g fill="#171715" opacity="0.36">
-    <circle cx="334" cy="328" r="2.2"/><circle cx="462" cy="328" r="2.2"/><circle cx="578" cy="328" r="2.2"/><circle cx="708" cy="328" r="2.2"/><circle cx="850" cy="328" r="2.2"/>
+
+  <!-- Six successive wavefronts disclose time inside the torrent: six epochs, one limit. -->
+  <g fill="none" stroke="url(#kg-epoch-light)" stroke-linecap="round" vector-effect="non-scaling-stroke"
+     filter="url(#kg-fray-late)">
+    <path d="M430 324C442 331 442 349 430 356" stroke-width="1" opacity="0.3"/>
+    <path d="M466 308C487 322 487 358 466 372" stroke-width="1.05" opacity="0.38"/>
+    <path d="M507 289C538 310 538 370 507 391" stroke-width="1.1" opacity="0.46"/>
+    <path d="M553 266C596 298 596 382 553 414" stroke-width="1.2" opacity="0.54"/>
+    <path d="M604 241C659 282 659 398 604 439" stroke-width="1.3" opacity="0.64"/>
+    <path d="M659 214C729 269 729 411 659 466" stroke-width="1.45" opacity="0.76"/>
   </g>
 
-  <g transform="translate(288 244)" filter="url(#fray)"><use href="#upper-pattern"/></g>
-  <g transform="translate(288 412)" filter="url(#fray)"><use href="#lower-pattern"/></g>
+  <!-- The world is disclosed only by what emerges from its finite aperture. -->
+  <circle cx="296" cy="340" r="128" fill="url(#kg-world)"/>
+  <path d="M413 288A128 128 0 0 1 414 393" fill="none" stroke="#fffdf5" stroke-width="2" opacity="0.92"/>
 
-  <!-- A quiet double trace says sameness without installing an equals sign. -->
-  <path d="M226 328C374 321 468 335 600 328S826 321 974 328" fill="none" stroke="url(#fade)" stroke-width="1.3"/>
-  <path d="M250 339C382 334 482 344 600 339S818 334 950 339" fill="none" stroke="url(#fade)" stroke-width="0.7" opacity="0.44"/>
+  <!-- Absolute absence: a smooth, grainless umbra laid over the entire attention field. -->
+  <path d="M696 340L1120 13L1202 13V677H1120Z" fill="url(#kg-umbra)"/>
 
-  <text x="600" y="591" text-anchor="middle" fill="#242421" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" letter-spacing="15">KENOGRAM</text>
-  <rect x="312" y="615" width="576" height="1" fill="url(#fade)" opacity="0.46"/>
+  <!-- Only the near edge is disclosed. Nothing is drawn inside or beyond the umbra. -->
+  <path d="M699 336C776 276 848 220 930 158" fill="none" stroke="url(#kg-edge-light)" stroke-width="1.7" opacity="0.78"/>
+  <path d="M699 344C776 404 848 460 930 522" fill="none" stroke="url(#kg-edge-light)" stroke-width="1.25" opacity="0.52"/>
+  <path d="M700 340L719 326M700 340L718 354" fill="none" stroke="#fffdf5" stroke-width="2" stroke-linecap="round" opacity="0.9"/>
+
+  <!-- Sparse impact fragments make collision local while preserving the silent black cone. -->
+  <g fill="#fffdf5">
+    <circle cx="690" cy="326" r="1.15" opacity="0.7"/><circle cx="681" cy="315" r="0.65" opacity="0.42"/>
+    <circle cx="673" cy="300" r="0.8" opacity="0.34"/><circle cx="707" cy="315" r="0.7" opacity="0.58"/>
+    <circle cx="688" cy="354" r="1" opacity="0.62"/><circle cx="678" cy="366" r="0.6" opacity="0.38"/>
+    <circle cx="667" cy="382" r="0.75" opacity="0.3"/><circle cx="708" cy="365" r="0.65" opacity="0.5"/>
+  </g>
+
+  <text x="600" y="648" text-anchor="middle" fill="#85827b"
+        font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="19" letter-spacing="15">KENOGRAM</text>
 </svg>
