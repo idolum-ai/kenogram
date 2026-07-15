@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -57,6 +59,10 @@ func TestKenogramMarkIsStandaloneAccessibleSVG(t *testing.T) {
 	defer file.Close()
 	decoder := xml.NewDecoder(file)
 	seenSVG, seenTitle, seenDescription := false, false, false
+	labelReferences := map[string]bool{}
+	labelElements := map[string]bool{}
+	labelText := map[string]string{}
+	titleID, descriptionID, currentLabelID := "", "", ""
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
@@ -65,35 +71,83 @@ func TestKenogramMarkIsStandaloneAccessibleSVG(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse SVG: %v", err)
 		}
-		start, ok := token.(xml.StartElement)
-		if !ok {
-			continue
-		}
-		switch start.Name.Local {
-		case "svg":
-			seenSVG = true
+		switch token := token.(type) {
+		case xml.StartElement:
 			attributes := map[string]string{}
-			for _, attribute := range start.Attr {
+			for _, attribute := range token.Attr {
 				attributes[attribute.Name.Local] = attribute.Value
 			}
-			if attributes["viewBox"] != "0 0 1200 680" || attributes["role"] != "img" || attributes["aria-labelledby"] != "title desc" {
-				t.Fatalf("incomplete accessible SVG attributes: %#v", attributes)
-			}
-		case "title":
-			seenTitle = true
-		case "desc":
-			seenDescription = true
-		case "image", "script":
-			t.Fatalf("standalone mark must not contain <%s>", start.Name.Local)
-		case "text":
-			for _, attribute := range start.Attr {
-				if attribute.Name.Local == "font-family" && strings.Contains(attribute.Value, "http") {
+			switch token.Name.Local {
+			case "svg":
+				seenSVG = true
+				viewBox := strings.Fields(attributes["viewBox"])
+				if len(viewBox) != 4 {
+					t.Fatalf("invalid SVG viewBox %q", attributes["viewBox"])
+				}
+				viewBoxNumbers := make([]float64, len(viewBox))
+				for index, value := range viewBox {
+					viewBoxNumbers[index], err = strconv.ParseFloat(value, 64)
+					if err != nil {
+						t.Fatalf("invalid SVG viewBox %q: %v", attributes["viewBox"], err)
+					}
+				}
+				if math.IsNaN(viewBoxNumbers[2]) || math.IsNaN(viewBoxNumbers[3]) ||
+					math.IsInf(viewBoxNumbers[2], 0) || math.IsInf(viewBoxNumbers[3], 0) ||
+					viewBoxNumbers[2] <= 0 || viewBoxNumbers[3] <= 0 {
+					t.Fatalf("SVG viewBox must have positive dimensions: %q", attributes["viewBox"])
+				}
+				if attributes["role"] != "img" {
+					t.Fatalf("SVG role must be img: %#v", attributes)
+				}
+				for _, identifier := range strings.Fields(attributes["aria-labelledby"]) {
+					labelReferences[identifier] = true
+				}
+				if len(labelReferences) == 0 {
+					t.Fatal("SVG must reference accessible labels with aria-labelledby")
+				}
+			case "title", "desc":
+				identifier := attributes["id"]
+				if identifier == "" {
+					t.Fatalf("SVG <%s> must have an id", token.Name.Local)
+				}
+				labelElements[identifier] = true
+				currentLabelID = identifier
+				if token.Name.Local == "title" {
+					seenTitle = true
+					titleID = identifier
+				} else {
+					seenDescription = true
+					descriptionID = identifier
+				}
+			case "image", "script":
+				t.Fatalf("standalone mark must not contain <%s>", token.Name.Local)
+			case "text":
+				if strings.Contains(attributes["font-family"], "http") {
 					t.Fatal("external font reference")
 				}
+			}
+		case xml.CharData:
+			if currentLabelID != "" {
+				labelText[currentLabelID] += string(token)
+			}
+		case xml.EndElement:
+			if token.Name.Local == "title" || token.Name.Local == "desc" {
+				if strings.TrimSpace(labelText[currentLabelID]) == "" {
+					t.Fatalf("SVG <%s> must not be empty", token.Name.Local)
+				}
+				currentLabelID = ""
 			}
 		}
 	}
 	if !seenSVG || !seenTitle || !seenDescription {
 		t.Fatalf("svg=%t title=%t desc=%t", seenSVG, seenTitle, seenDescription)
+	}
+	if !labelReferences[titleID] || !labelReferences[descriptionID] {
+		t.Fatalf("aria-labelledby does not reference title %q and description %q", titleID, descriptionID)
+	}
+	for identifier := range labelReferences {
+		if !labelElements[identifier] {
+			t.Fatalf("aria-labelledby references missing element %q", identifier)
+		}
 	}
 }

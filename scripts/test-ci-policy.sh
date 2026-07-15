@@ -9,8 +9,9 @@ verifier="${repo_root}/scripts/verify-ci-results.sh"
 classify_paths() {
   printf '%s\0' "$@" | bash "${classifier}"
 }
-[[ "$(classify_paths README.md requirements/security.md docs/assets/kenogram-mark.svg)" = editorial ]]
+[[ "$(classify_paths README.md requirements/security.md)" = editorial ]]
 [[ "$(classify_paths .github/ISSUE_TEMPLATE/bug.yml)" = editorial ]]
+[[ "$(classify_paths docs/assets/kenogram-mark.svg)" = full ]]
 [[ "$(classify_paths README.md internal/app/app.go)" = full ]]
 [[ "$(classify_paths internal/e2e/testdata/prompt.md)" = full ]]
 [[ "$(classify_paths docs/example.sh)" = full ]]
