@@ -166,13 +166,13 @@ USER node
 	if got := strings.TrimSpace(run(t, ctx, tmp, testEnv, "podman", "exec", second, "cat", "/etc/openclaw-revision")); got != "two" {
 		t.Fatalf("OpenClaw regenerated revision = %q", got)
 	}
-	runOpenClawTUI(t, ctx, tmp, testEnv, second, provider, "proof-two")
+	runOpenClawGatewayTurn(t, ctx, tmp, testEnv, second, provider, "proof-two")
 
 	run(t, ctx, tmp, testEnv, kenogram, "down", world)
 	run(t, ctx, tmp, testEnv, kenogram, "up", "--yes", declaration)
 	waitForOpenClaw(t, ctx, tmp, testEnv, second)
 	waitForOpenClawProviderDoor(t, ctx, tmp, testEnv, second, doorHost, providerPort)
-	runOpenClawTUI(t, ctx, tmp, testEnv, second, provider, "proof-restart")
+	runOpenClawGatewayTurn(t, ctx, tmp, testEnv, second, provider, "proof-restart")
 	run(t, ctx, tmp, testEnv, kenogram, "destroy", "--yes", world)
 	assertDestroyedHistory(t, stateRoot, world)
 	assertSecretAbsent(t, filepath.Join(stateRoot, ".destroyed"), openClawSecretCanary)
@@ -510,4 +510,26 @@ func runOpenClawTUI(t *testing.T, ctx context.Context, dir string, env []string,
 		out, err := runResult(ctx, dir, env, "podman", "exec", container, "tmux", "capture-pane", "-p", "-e", "-t", session)
 		return err == nil && strings.Contains(out, openClawProof), out
 	})
+}
+
+func runOpenClawGatewayTurn(t *testing.T, ctx context.Context, dir string, env []string, container string, provider *observedProvider, session string) {
+	t.Helper()
+	prompt := "Reply with the proof marker and preserve this gateway session marker: " + session
+	command := openClawEnvCommand("/usr/local/bin/openclaw", "agent", "--session-key", session, "--message", prompt, "--timeout", "60", "--json")
+	out := run(t, ctx, dir, env, "podman", append([]string{"exec", container}, command...)...)
+	provider.waitObservedContaining(t, 5*time.Second, prompt)
+
+	var response map[string]any
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		t.Fatalf("OpenClaw gateway response is not JSON: %v\n%s", err, out)
+	}
+	if response["status"] != "ok" {
+		t.Fatalf("OpenClaw gateway status = %#v, want ok\n%s", response["status"], out)
+	}
+	if strings.Contains(out, `"fallbackFrom"`) || strings.Contains(out, `"transport":"embedded"`) {
+		t.Fatalf("OpenClaw agent fell back outside the gateway\n%s", out)
+	}
+	if !strings.Contains(out, openClawProof) {
+		t.Fatalf("OpenClaw gateway response omitted proof marker\n%s", out)
+	}
 }
