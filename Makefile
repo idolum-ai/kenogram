@@ -37,7 +37,7 @@ test:
 
 test-evidence:
 	mkdir -p artifacts
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test -json ./... > artifacts/test.json
+	@GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test -json ./... > artifacts/test.json || { status=$$?; cat artifacts/test.json; exit $$status; }
 	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test -coverprofile=artifacts/coverage.out ./...
 
 test-race:
