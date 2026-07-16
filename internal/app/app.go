@@ -1021,7 +1021,13 @@ func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, allows 
 	for _, allow := range allows {
 		args = append(args, "--allow", netJoin(allow.Host, int(allow.Port)))
 	}
-	command := exec.CommandContext(ctx, a.Executable, args...)
+	// The proxy outlives the command that applies the world. Its lifecycle is
+	// owned explicitly through ProxyPID and stopProxy, so tying it to the
+	// caller's context would kill it as soon as `kenogram up` returns. A new
+	// session also keeps a terminal or job runner from treating it as a leaked
+	// descendant when the applying command exits.
+	command := exec.Command(a.Executable, args...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	logFile, logErr := os.OpenFile(filepath.Join(l.Root, "proxy.log"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if logErr != nil {
 		return 0, logErr
