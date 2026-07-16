@@ -104,6 +104,32 @@ func TestProxySurvivesApplyingSessionTeardown(t *testing.T) {
 	}
 }
 
+func TestReadyProxyOutlivesStartupContext(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{BaseDir: base, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	ctx, cancel := context.WithCancel(context.Background())
+	if _, err := a.startProxy(ctx, layout, 123, nil); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+
+	// This is an ownership invariant, not the causal session regression proof
+	// above: once readiness transfers ownership to ProxyPID and stopProxy, the
+	// startup context no longer governs the proxy.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !a.proxyAlive(layout) {
+			t.Fatal("ready proxy died with the startup context")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func waitForProxySessionFile(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

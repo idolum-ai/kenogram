@@ -4,11 +4,13 @@ package integration
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -179,33 +181,80 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 
 func cleanupIntegrationWorld(t *testing.T, dir string, env []string, bin, state string) {
 	t.Helper()
-	statePath := filepath.Join(state, "integration", "state.json")
-	raw, err := os.ReadFile(statePath)
-	if os.IsNotExist(err) {
-		return
+	worldRoot := filepath.Join(state, "integration")
+	proxyPID, proxyStart, identityErr := readIntegrationProxyIdentity(filepath.Join(worldRoot, "proxy.pid"))
+	statePath := filepath.Join(worldRoot, "state.json")
+	_, stateErr := os.Stat(statePath)
+	if stateErr == nil {
+		command := exec.Command(bin, "destroy", "--yes", "integration")
+		command.Dir = dir
+		command.Env = env
+		if out, err := command.CombinedOutput(); err != nil {
+			t.Errorf("destroy integration world: %v\n%s", err, out)
+		}
+	} else if !os.IsNotExist(stateErr) {
+		t.Errorf("inspect integration cleanup state: %v", stateErr)
+	} else if identityErr == nil {
+		t.Errorf("integration proxy exists without durable world state")
 	}
+	if identityErr != nil && !os.IsNotExist(identityErr) {
+		t.Errorf("read integration proxy identity: %v", identityErr)
+	}
+	if proxyStart != "" && lockfile.ProcessStart(proxyPID) == proxyStart {
+		t.Errorf("integration proxy PID %d survived normal cleanup", proxyPID)
+		if err := stopIntegrationProxy(proxyPID, proxyStart, filepath.Join(worldRoot, "proxy.sock")); err != nil {
+			t.Errorf("fallback integration proxy cleanup: %v", err)
+		}
+	}
+}
+
+func readIntegrationProxyIdentity(path string) (int, string, error) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Errorf("read integration cleanup state: %v", err)
-		return
+		return 0, "", err
 	}
-	var recorded struct {
-		ProxyPID int `json:"proxy_pid"`
+	fields := strings.Fields(string(raw))
+	if len(fields) != 2 {
+		return 0, "", fmt.Errorf("invalid identity in %s", path)
 	}
-	if err := json.Unmarshal(raw, &recorded); err != nil {
-		t.Errorf("decode integration cleanup state: %v", err)
-		return
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil || pid <= 1 || fields[1] == "" {
+		return 0, "", fmt.Errorf("invalid identity in %s", path)
 	}
-	proxyStart := lockfile.ProcessStart(recorded.ProxyPID)
-	command := exec.Command(bin, "destroy", "--yes", "integration")
-	command.Dir = dir
-	command.Env = env
-	if out, err := command.CombinedOutput(); err != nil {
-		t.Errorf("destroy integration world: %v\n%s", err, out)
-		return
+	return pid, fields[1], nil
+}
+
+func stopIntegrationProxy(pid int, start, socket string) error {
+	if lockfile.ProcessStart(pid) != start {
+		return nil
 	}
-	if proxyStart != "" && lockfile.ProcessStart(recorded.ProxyPID) == proxyStart {
-		t.Errorf("integration proxy PID %d survived world destruction", recorded.ProxyPID)
+	cmdline, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return err
 	}
+	if !strings.Contains(string(cmdline), "_proxy") || !strings.Contains(string(cmdline), socket) {
+		return fmt.Errorf("proxy PID %d ownership is uncertain", pid)
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for lockfile.ProcessStart(pid) == start && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if lockfile.ProcessStart(pid) == start {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for lockfile.ProcessStart(pid) == start && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if lockfile.ProcessStart(pid) == start {
+		return fmt.Errorf("proxy PID %d survived fallback cleanup", pid)
+	}
+	return nil
 }
 
 func writeDeclaration(t *testing.T, path, image, network string) {

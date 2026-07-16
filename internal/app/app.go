@@ -1045,7 +1045,7 @@ func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, allows 
 		return 0, errors.Join(err, abortProxyStart(command, l))
 	}
 	if err := command.Process.Release(); err != nil {
-		return 0, err
+		return 0, errors.Join(err, abortProxyStart(command, l))
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
