@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/idolum-ai/kenogram/internal/lockfile"
 )
 
 func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
@@ -32,14 +34,15 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 	}
 	image := "localhost/kenogram-integration:" + fmt.Sprint(time.Now().UnixNano())
 	run(t, tmp, nil, "podman", "build", "-t", image, "-f", containerfile, ".")
-	t.Cleanup(func() {
-		exec.Command("podman", "rm", "--force", "kenogram-integration-g1", "kenogram-integration-g2").Run()
-		exec.Command("podman", "rmi", "--force", image).Run()
-	})
 	bin := filepath.Join(tmp, "kenogram")
 	run(t, root, nil, "go", "build", "-buildvcs=false", "-o", bin, "./cmd/kenogram")
 	state := filepath.Join(tmp, "state")
 	env := append(os.Environ(), "KENOGRAM_STATE_DIR="+state)
+	t.Cleanup(func() {
+		cleanupIntegrationWorld(t, tmp, env, bin, state)
+		exec.Command("podman", "rm", "--force", "kenogram-integration-g1", "kenogram-integration-g2").Run()
+		exec.Command("podman", "rmi", "--force", image).Run()
+	})
 	declaration := filepath.Join(tmp, "kenogram.toml")
 	writeDeclaration(t, declaration, image, fmt.Sprintf("[[mounts]]\nsource = %q\ntarget = \"/host\"\nmode = \"ro\"\n", tmp))
 	if out, err := runFailure(tmp, env, bin, "up", "--yes", declaration); err == nil || !strings.Contains(out, "protected host path") {
@@ -129,12 +132,12 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 		}
 	}()
 	secondPort := second.Addr().(*net.TCPAddr).Port
-	run(t, tmp, env, bin, "allow", "integration", fmt.Sprintf("localhost:%d", secondPort), "--for", "250ms")
+	run(t, tmp, env, bin, "allow", "integration", fmt.Sprintf("localhost:%d", secondPort), "--for", "2s")
 	granted := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", secondPort))
 	if !strings.Contains(granted, "200") {
 		t.Fatalf("grant=%q", granted)
 	}
-	time.Sleep(350 * time.Millisecond)
+	time.Sleep(2100 * time.Millisecond)
 	expired := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", secondPort))
 	if !strings.Contains(expired, "403") {
 		t.Fatalf("expired=%q", expired)
@@ -171,6 +174,37 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 	}
 	if recorded.Generation != 2 {
 		t.Fatalf("matching up replaced generation: %d", recorded.Generation)
+	}
+}
+
+func cleanupIntegrationWorld(t *testing.T, dir string, env []string, bin, state string) {
+	t.Helper()
+	statePath := filepath.Join(state, "integration", "state.json")
+	raw, err := os.ReadFile(statePath)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Errorf("read integration cleanup state: %v", err)
+		return
+	}
+	var recorded struct {
+		ProxyPID int `json:"proxy_pid"`
+	}
+	if err := json.Unmarshal(raw, &recorded); err != nil {
+		t.Errorf("decode integration cleanup state: %v", err)
+		return
+	}
+	proxyStart := lockfile.ProcessStart(recorded.ProxyPID)
+	command := exec.Command(bin, "destroy", "--yes", "integration")
+	command.Dir = dir
+	command.Env = env
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Errorf("destroy integration world: %v\n%s", err, out)
+		return
+	}
+	if proxyStart != "" && lockfile.ProcessStart(recorded.ProxyPID) == proxyStart {
+		t.Errorf("integration proxy PID %d survived world destruction", recorded.ProxyPID)
 	}
 }
 

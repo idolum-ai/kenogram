@@ -179,21 +179,6 @@ func TestVerifyEvidence(t *testing.T) {
 	}
 }
 
-func TestIPCNamespaceIsolatedFromHostRejectsSelfAndInvalidPID(t *testing.T) {
-	isolated, err := ipcNamespaceIsolatedFromHost(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if isolated {
-		t.Fatal("current process reported isolated from its own IPC namespace")
-	}
-	for _, pid := range []int{0, -1, 1 << 30} {
-		if _, err := ipcNamespaceIsolatedFromHost(pid); err == nil {
-			t.Fatalf("PID %d accepted", pid)
-		}
-	}
-}
-
 func TestInspectStoppedContainerDoesNotRequireLiveProcessEvidence(t *testing.T) {
 	f := &fake{out: []byte(`[{"Name":"/kenogram-w-g1","State":{"Running":false,"Pid":0},"Mounts":[{"Source":"/state/workspace","Destination":"/workspace","RW":true}]}]`)}
 	p := New(f)

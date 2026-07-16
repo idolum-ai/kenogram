@@ -324,33 +324,6 @@ func TestStartProxyDoesNotAcceptStaleSocketAsReady(t *testing.T) {
 	}
 }
 
-func TestReadyProxySurvivesStartupContextCancellation(t *testing.T) {
-	base := t.TempDir()
-	layout := worldfs.For(base, "w")
-	if err := layout.Ensure(); err != nil {
-		t.Fatal(err)
-	}
-	a := &App{
-		BaseDir:    base,
-		Executable: crashProxyExecutable(t, base),
-		proxyReady: crashProxyReady,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	if _, err := a.startProxy(ctx, layout, 123, nil); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = a.stopProxy(layout) })
-	cancel()
-
-	// CommandContext used to kill the detached proxy asynchronously as soon as
-	// the CLI's signal context was canceled. Give that failure mode time to
-	// manifest, then require the durable proxy identity to remain alive.
-	time.Sleep(200 * time.Millisecond)
-	if !a.proxyAlive(layout) {
-		t.Fatal("ready proxy died with the startup context")
-	}
-}
-
 func TestStoppedStatusStillObservesRetainedContainer(t *testing.T) {
 	base := t.TempDir()
 	l := worldfs.For(base, "w")

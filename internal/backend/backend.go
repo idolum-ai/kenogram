@@ -407,15 +407,15 @@ func ipcNamespaceIsolatedFromHost(pid int) (bool, error) {
 	if pid <= 0 {
 		return false, fmt.Errorf("invalid IPC namespace request")
 	}
-	host, err := os.Readlink("/proc/self/ns/ipc")
+	host, err := os.Stat("/proc/self/ns/ipc")
 	if err != nil {
 		return false, err
 	}
-	child, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "ns", "ipc"))
+	child, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid), "ns", "ipc"))
 	if err != nil {
 		return false, err
 	}
-	return host != child, nil
+	return !os.SameFile(host, child), nil
 }
 
 func mountIdentity(pid int, source, target string) (bool, error) {

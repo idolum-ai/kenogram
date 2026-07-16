@@ -41,7 +41,8 @@ evaluation but outside the supported Linux runtime promise.
 ## Executable checks
 
 - `make test` runs unit, contract, and parser fuzz-seed tests.
-- `make test-evidence` retains structured test events and a coverage profile.
+- `make test-evidence` retains structured test events and a coverage profile;
+  CI uploads the available evidence even when the evidence command fails.
 - `make integration` runs the rootless Podman boundary contract and is mandatory
   in CI for implementation changes, pushes to `main`, and releases. Editorial-
   only pull requests retain the architecture, documentation-freshness, secret,
