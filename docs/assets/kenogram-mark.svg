@@ -166,7 +166,7 @@
   <path d="M413 288A128 128 0 0 1 414 393" fill="none" stroke="#fffdf5" stroke-width="2" opacity="0.92"/>
 
   <!-- Absolute absence: a smooth, grainless umbra laid over the entire attention field. -->
-  <path d="M696 340L1120 13L1202 13V677H1120Z" fill="url(#kg-umbra)"/>
+  <path d="M696 340L1120 -2L1202 -2V677H1120Z" fill="url(#kg-umbra)"/>
 
   <!-- Only the near edge is disclosed. Nothing is drawn inside or beyond the umbra. -->
   <path d="M699 336C776 276 848 220 930 158" fill="none" stroke="url(#kg-edge-light)" stroke-width="1.7" opacity="0.78"/>
