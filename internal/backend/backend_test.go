@@ -144,10 +144,24 @@ func TestCreateExactArgv(t *testing.T) {
 }
 func TestVerifyEvidence(t *testing.T) {
 	r := plan.Result{PlanDigest: "p", DeclarationDigest: "d", Plan: plan.Plan{Name: "w", World: plan.World{User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
-	e := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", IPCMode: "private", PIDMode: "private", UTSMode: "private", UserNSMode: "", UIDMap: []IDMap{{ContainerID: int64(os.Getuid()), HostID: int64(os.Getuid()), Size: 1}}, GIDMap: []IDMap{{ContainerID: int64(os.Getgid()), HostID: int64(os.Getgid()), Size: 1}}, User: "agent", Hostname: "", WorkingDir: "", CapDrop: []string{"CAP_ALL"}, BoundingCaps: []string{}, SecurityOpt: []string{"no-new-privileges"}, SeccompMode: 2, Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}}
+	e := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", IPCMode: "private", IPCIsolated: true, PIDMode: "private", UTSMode: "private", UserNSMode: "", UIDMap: []IDMap{{ContainerID: int64(os.Getuid()), HostID: int64(os.Getuid()), Size: 1}}, GIDMap: []IDMap{{ContainerID: int64(os.Getgid()), HostID: int64(os.Getgid()), Size: 1}}, User: "agent", Hostname: "", WorkingDir: "", CapDrop: []string{"CAP_ALL"}, BoundingCaps: []string{}, SecurityOpt: []string{"no-new-privileges"}, SeccompMode: 2, Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}}
 	if err := Verify(e, r, 1, nil); err != nil {
 		t.Fatal(err)
 	}
+	e.IPCMode = "shareable"
+	if err := Verify(e, r, 1, nil); err != nil {
+		t.Fatalf("Podman private IPC inspection label rejected: %v", err)
+	}
+	e.IPCIsolated = false
+	if err := Verify(e, r, 1, nil); err == nil {
+		t.Fatal("host IPC namespace accepted")
+	}
+	e.IPCIsolated = true
+	e.IPCMode = "host"
+	if err := Verify(e, r, 1, nil); err == nil {
+		t.Fatal("host IPC mode accepted")
+	}
+	e.IPCMode = "private"
 	e.NetworkMode = "bridge"
 	if err := Verify(e, r, 1, nil); err == nil {
 		t.Fatal("bridge accepted")
@@ -190,7 +204,7 @@ func TestInspectStoppedContainerDoesNotRequireLiveProcessEvidence(t *testing.T) 
 func TestVerifyExactMountEvidence(t *testing.T) {
 	r := plan.Result{PlanDigest: "p", DeclarationDigest: "d", Plan: plan.Plan{Name: "w", World: plan.World{User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
 	expected := []Mount{{Source: "/state/workspace", Target: "/workspace", Mode: "rw", NoExec: true}}
-	base := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", IPCMode: "private", PIDMode: "private", UTSMode: "private", UIDMap: []IDMap{{ContainerID: int64(os.Getuid()), HostID: int64(os.Getuid()), Size: 1}}, GIDMap: []IDMap{{ContainerID: int64(os.Getgid()), HostID: int64(os.Getgid()), Size: 1}}, User: "agent", BoundingCaps: []string{}, SecurityOpt: []string{"no-new-privileges"}, SeccompMode: 2, Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}, Mounts: []EvidenceMount{{Source: "/state/workspace", Destination: "/workspace", RW: true, Mode: "rw,nodev,nosuid,noexec", IdentityVerified: true}}}
+	base := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", IPCMode: "private", IPCIsolated: true, PIDMode: "private", UTSMode: "private", UIDMap: []IDMap{{ContainerID: int64(os.Getuid()), HostID: int64(os.Getuid()), Size: 1}}, GIDMap: []IDMap{{ContainerID: int64(os.Getgid()), HostID: int64(os.Getgid()), Size: 1}}, User: "agent", BoundingCaps: []string{}, SecurityOpt: []string{"no-new-privileges"}, SeccompMode: 2, Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}, Mounts: []EvidenceMount{{Source: "/state/workspace", Destination: "/workspace", RW: true, Mode: "rw,nodev,nosuid,noexec", IdentityVerified: true}}}
 	if err := Verify(base, r, 1, expected); err != nil {
 		t.Fatal(err)
 	}

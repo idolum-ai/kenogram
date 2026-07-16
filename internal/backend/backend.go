@@ -97,6 +97,7 @@ type Podman struct {
 	ReadProcStatus   func(int) ([]byte, error)
 	ReadProcessStart func(int) string
 	MountIdentity    func(int, string, string) (bool, error)
+	IPCIsolated      func(int) (bool, error)
 }
 
 func New(r Runner) *Podman {
@@ -111,6 +112,7 @@ func New(r Runner) *Podman {
 		},
 		ReadProcessStart: lockfile.ProcessStart,
 		MountIdentity:    mountIdentity,
+		IPCIsolated:      ipcNamespaceIsolated,
 	}
 }
 func ContainerName(world string, generation int64) string {
@@ -244,6 +246,7 @@ type Evidence struct {
 	ProcessStart           string
 	NetworkMode            string
 	IPCMode                string
+	IPCIsolated            bool
 	PIDMode                string
 	UTSMode                string
 	UserNSMode             string
@@ -343,6 +346,10 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 		if e.ProcessStart == "" {
 			return Evidence{}, fmt.Errorf("runtime holder process identity is absent")
 		}
+		e.IPCIsolated, err = p.IPCIsolated(e.PID)
+		if err != nil {
+			return Evidence{}, fmt.Errorf("read runtime IPC namespace evidence: %w", err)
+		}
 		if e.BoundingCaps == nil {
 			e.BoundingCaps, err = readProcBoundingCaps(e.PID)
 			if err != nil {
@@ -391,6 +398,21 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 		return Evidence{}, fmt.Errorf("runtime holder process identity changed during inspection")
 	}
 	return e, nil
+}
+
+func ipcNamespaceIsolated(pid int) (bool, error) {
+	if pid <= 0 {
+		return false, fmt.Errorf("invalid IPC namespace request")
+	}
+	host, err := os.Readlink("/proc/self/ns/ipc")
+	if err != nil {
+		return false, err
+	}
+	child, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "ns", "ipc"))
+	if err != nil {
+		return false, err
+	}
+	return host != child, nil
 }
 
 func mountIdentity(pid int, source, target string) (bool, error) {
@@ -513,7 +535,7 @@ func Verify(e Evidence, result plan.Result, generation int64, expectedMounts []M
 	if e.NetworkMode != "none" {
 		return fmt.Errorf("network mode is %q, want none", e.NetworkMode)
 	}
-	if e.IPCMode != "private" || e.PIDMode != "private" || e.UTSMode != "private" {
+	if (e.IPCMode != "private" && e.IPCMode != "shareable") || !e.IPCIsolated || e.PIDMode != "private" || e.UTSMode != "private" {
 		return fmt.Errorf("namespace evidence mismatch: ipc=%q pid=%q uts=%q", e.IPCMode, e.PIDMode, e.UTSMode)
 	}
 	if e.UserNSMode == "host" || !mapsIdentity(e.UIDMap, int64(os.Getuid())) || !mapsIdentity(e.GIDMap, int64(os.Getgid())) {
