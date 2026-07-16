@@ -92,12 +92,12 @@ func (r ExecRunner) Interactive(ctx context.Context, name string, args ...string
 }
 
 type Podman struct {
-	Runner           Runner
-	Binary           string
-	ReadProcStatus   func(int) ([]byte, error)
-	ReadProcessStart func(int) string
-	MountIdentity    func(int, string, string) (bool, error)
-	IPCIsolated      func(int) (bool, error)
+	Runner              Runner
+	Binary              string
+	ReadProcStatus      func(int) ([]byte, error)
+	ReadProcessStart    func(int) string
+	MountIdentity       func(int, string, string) (bool, error)
+	IPCIsolatedFromHost func(int) (bool, error)
 }
 
 func New(r Runner) *Podman {
@@ -110,9 +110,9 @@ func New(r Runner) *Podman {
 		ReadProcStatus: func(pid int) ([]byte, error) {
 			return os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
 		},
-		ReadProcessStart: lockfile.ProcessStart,
-		MountIdentity:    mountIdentity,
-		IPCIsolated:      ipcNamespaceIsolated,
+		ReadProcessStart:    lockfile.ProcessStart,
+		MountIdentity:       mountIdentity,
+		IPCIsolatedFromHost: ipcNamespaceIsolatedFromHost,
 	}
 }
 func ContainerName(world string, generation int64) string {
@@ -246,7 +246,7 @@ type Evidence struct {
 	ProcessStart           string
 	NetworkMode            string
 	IPCMode                string
-	IPCIsolated            bool
+	IPCIsolatedFromHost    bool
 	PIDMode                string
 	UTSMode                string
 	UserNSMode             string
@@ -346,7 +346,7 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 		if e.ProcessStart == "" {
 			return Evidence{}, fmt.Errorf("runtime holder process identity is absent")
 		}
-		e.IPCIsolated, err = p.IPCIsolated(e.PID)
+		e.IPCIsolatedFromHost, err = p.IPCIsolatedFromHost(e.PID)
 		if err != nil {
 			return Evidence{}, fmt.Errorf("read runtime IPC namespace evidence: %w", err)
 		}
@@ -400,7 +400,10 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 	return e, nil
 }
 
-func ipcNamespaceIsolated(pid int) (bool, error) {
+// ipcNamespaceIsolatedFromHost observes separation from Kenogram's ambient
+// IPC namespace. It does not claim that a trusted host process cannot join the
+// child's namespace.
+func ipcNamespaceIsolatedFromHost(pid int) (bool, error) {
 	if pid <= 0 {
 		return false, fmt.Errorf("invalid IPC namespace request")
 	}
@@ -535,8 +538,8 @@ func Verify(e Evidence, result plan.Result, generation int64, expectedMounts []M
 	if e.NetworkMode != "none" {
 		return fmt.Errorf("network mode is %q, want none", e.NetworkMode)
 	}
-	if (e.IPCMode != "private" && e.IPCMode != "shareable") || !e.IPCIsolated || e.PIDMode != "private" || e.UTSMode != "private" {
-		return fmt.Errorf("namespace evidence mismatch: ipc=%q pid=%q uts=%q", e.IPCMode, e.PIDMode, e.UTSMode)
+	if (e.IPCMode != "private" && e.IPCMode != "shareable") || !e.IPCIsolatedFromHost || e.PIDMode != "private" || e.UTSMode != "private" {
+		return fmt.Errorf("namespace evidence mismatch: ipc=%q ipc_isolated_from_host=%t pid=%q uts=%q", e.IPCMode, e.IPCIsolatedFromHost, e.PIDMode, e.UTSMode)
 	}
 	if e.UserNSMode == "host" || !mapsIdentity(e.UIDMap, int64(os.Getuid())) || !mapsIdentity(e.GIDMap, int64(os.Getgid())) {
 		return fmt.Errorf("keep-id mapping evidence missing (mode %q)", e.UserNSMode)
