@@ -242,7 +242,7 @@ func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "validate host mounts:", err)
 		return 1
 	}
-	comparison, err := a.CompareUp(prepared)
+	comparison, err := a.CompareUpContext(ctx, prepared)
 	if err != nil {
 		fmt.Fprintln(stderr, "compare prior world:", err)
 		return 1

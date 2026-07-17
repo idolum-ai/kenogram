@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -48,6 +49,32 @@ type workspaceMutatingRunner struct {
 	runtimeRunner
 	workspace string
 	mutated   bool
+}
+
+type workspaceStartingRunner struct {
+	runtimeRunner
+	workspace string
+	mutated   bool
+}
+
+type cancellationRunner struct{ runtimeRunner }
+
+func (r *cancellationRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if len(args) > 0 && args[0] == "ps" {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return r.runtimeRunner.Run(ctx, name, args...)
+}
+
+func (r *workspaceStartingRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if len(args) > 0 && args[0] == "ps" && !r.mutated {
+		r.mutated = true
+		if err := os.WriteFile(filepath.Join(r.workspace, "started-after-review"), []byte("changed"), 0o600); err != nil {
+			return nil, err
+		}
+	}
+	return r.runtimeRunner.Run(ctx, name, args...)
 }
 
 func (r *workspaceMutatingRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -502,6 +529,22 @@ func TestCompareUpRejectsLiveAuthorityWithMissingWorkspaceMount(t *testing.T) {
 	}
 }
 
+func TestCompareUpContextCancelsRuntimeObservation(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	a.Backend = testBackend(&cancellationRunner{runtimeRunner: *runner})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := a.CompareUpContext(ctx, prepared); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", err)
+	}
+}
+
 func mutateState(t *testing.T, layout worldfs.Layout, mutate func(*worldfs.State)) {
 	t.Helper()
 	state, err := layout.ReadState()
@@ -754,6 +797,41 @@ func TestUpReviewedRejectsInactiveWorkspaceChangedAtCutover(t *testing.T) {
 	}
 	if containsCall(stopped.calls, "start ", "kenogram-w-g2") {
 		t.Fatalf("successor started with unreviewed inactive workspace: %v", stopped.calls)
+	}
+}
+
+func TestUpReviewedRejectsQuiescentPredecessorBecomingActive(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Down(context.Background(), "w"); err != nil {
+		t.Fatal(err)
+	}
+	stopped := &stoppedRunner{runtimeRunner: *runner}
+	a.Backend = testBackend(stopped)
+	successor := prepared
+	successor.Result.Plan.Resources.CPUs++
+	refreshPreparedPlanDigest(&successor)
+	comparison, err := a.CompareUp(successor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	started := &workspaceStartingRunner{runtimeRunner: *runner, workspace: layout.Workspace}
+	started.successorPlanDigest = successor.Result.PlanDigest
+	started.successorDeclDigest = successor.Result.DeclarationDigest
+	started.successorNanoCPUs = successor.Result.Plan.Resources.CPUs * 1_000_000_000
+	a.Backend = testBackend(started)
+	err = a.UpReviewed(context.Background(), successor, comparison)
+	if err == nil || !strings.Contains(err.Error(), "reviewed quiescent predecessor became active") {
+		t.Fatalf("error = %v", err)
+	}
+	if containsCall(started.calls, "create ", "kenogram-w-g2") || containsCall(started.calls, "start ", "kenogram-w-g2") {
+		t.Fatalf("successor mutated after classification changed: %v", started.calls)
 	}
 }
 

@@ -171,7 +171,7 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 	}
 	defer lock.Release()
 	if reviewed != nil {
-		current, compareErr := a.CompareUp(prepared)
+		current, compareErr := a.CompareUpContext(ctx, prepared)
 		if compareErr != nil {
 			return fmt.Errorf("revalidate reviewed comparison: %w", compareErr)
 		}
@@ -185,7 +185,7 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 		return fmt.Errorf("recover interrupted transition: %w", err)
 	}
 	if reviewed != nil && reviewed.recoveryPending {
-		recovered, compareErr := a.CompareUp(prepared)
+		recovered, compareErr := a.CompareUpContext(ctx, prepared)
 		if compareErr != nil {
 			return fmt.Errorf("compare recovered predecessor: %w", compareErr)
 		}
@@ -211,6 +211,14 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 				return fmt.Errorf("observe predecessor runtime: %w", inspectErr)
 			}
 			priorActive = evidence.Running
+		}
+	}
+	if reviewed != nil {
+		if reviewed.workspaceMode == workspaceModeActive && !priorActive {
+			return fmt.Errorf("reviewed live predecessor is no longer active; review the workspace again")
+		}
+		if reviewed.workspaceMode == workspaceModeExact && priorActive {
+			return fmt.Errorf("reviewed quiescent predecessor became active; review the workspace again")
 		}
 	}
 	if priorErr == nil && prior.PlanDigest == prepared.Result.PlanDigest && prior.Container != "" && priorExists {
@@ -340,7 +348,7 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 				return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
 			}
 		case workspaceModeExact:
-			if !priorActive && cutoverWorkspace.Root != reviewed.workspaceRoot {
+			if cutoverWorkspace.Root != reviewed.workspaceRoot {
 				return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
 			}
 		case workspaceModeActive:
@@ -447,6 +455,11 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 // workspace entries is classified as new; every other read or validation
 // failure is returned to the caller.
 func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
+	return a.CompareUpContext(context.Background(), prepared)
+}
+
+// CompareUpContext is CompareUp with cancellation for runtime observations.
+func (a *App) CompareUpContext(ctx context.Context, prepared Prepared) (UpComparison, error) {
 	if err := validatePreparedIntegrity(prepared); err != nil {
 		return UpComparison{}, fmt.Errorf("validate prepared candidate: %w", err)
 	}
@@ -541,7 +554,7 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 		priorDigest = &digest
 	}
 	if priorExists && state.Status == "running" && a.Backend != nil {
-		active, err := a.comparisonPredecessorActive(l, state, prior.Result)
+		active, err := a.comparisonPredecessorActive(ctx, l, state, prior.Result)
 		if err != nil {
 			return UpComparison{}, fmt.Errorf("observe predecessor runtime for workspace comparison: %w", err)
 		}
@@ -549,7 +562,7 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 			if err := verifyComparisonHistory(l, true, transitionEvidence); err != nil {
 				return UpComparison{}, err
 			}
-			workspace := fmt.Sprintf("workspace: live authoritative g%d (exact drift settles at cutover; applied %s)", state.Generation, worldfs.ShortDigest(priorDigest.Root))
+			workspace := fmt.Sprintf("workspace: live authoritative g%d (current tree captured during apply; applied %s)", state.Generation, worldfs.ShortDigest(priorDigest.Root))
 			return newUpComparison(prepared, changes, workspace, workspaceModeActive, transitionEvidence, &state, &prior, nil, priorDigest)
 		}
 	}
@@ -591,12 +604,12 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 	return newUpComparison(prepared, changes, workspace, workspaceModeExact, transitionEvidence, stateEvidence, priorEvidence, &current, priorDigest)
 }
 
-func (a *App) comparisonPredecessorActive(l worldfs.Layout, state worldfs.State, result plan.Result) (bool, error) {
-	exists, err := a.Backend.Exists(context.Background(), state.Container)
+func (a *App) comparisonPredecessorActive(ctx context.Context, l worldfs.Layout, state worldfs.State, result plan.Result) (bool, error) {
+	exists, err := a.Backend.Exists(ctx, state.Container)
 	if err != nil || !exists {
 		return false, err
 	}
-	evidence, err := a.Backend.Inspect(context.Background(), state.Container)
+	evidence, err := a.Backend.Inspect(ctx, state.Container)
 	if err != nil {
 		return false, err
 	}
