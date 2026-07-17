@@ -310,6 +310,13 @@ func TestUpComparisonFailuresPrecedeOutputAndConfirmation(t *testing.T) {
 				if err := layout.WriteApplied(prepared.Raw); err != nil {
 					t.Fatal(err)
 				}
+				digest, err := worldfs.Digest(layout.Workspace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := layout.WriteDigest(1, digest); err != nil {
+					t.Fatal(err)
+				}
 				if err := os.RemoveAll(layout.Workspace); err != nil {
 					t.Fatal(err)
 				}

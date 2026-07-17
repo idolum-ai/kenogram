@@ -23,12 +23,15 @@ import (
 )
 
 type runtimeRunner struct {
-	calls       []string
-	network     string
-	mountSource string
-	containers  string
-	planDigest  string
-	declDigest  string
+	calls               []string
+	network             string
+	mountSource         string
+	containers          string
+	planDigest          string
+	declDigest          string
+	successorPlanDigest string
+	successorDeclDigest string
+	successorNanoCPUs   int64
 }
 
 type destroyFailRunner struct{ runtimeRunner }
@@ -119,13 +122,20 @@ func (r *runtimeRunner) Run(_ context.Context, _ string, args ...string) ([]byte
 			network = "none"
 		}
 		planDigest, declDigest := r.planDigest, r.declDigest
+		if generation == 2 && r.successorPlanDigest != "" {
+			planDigest, declDigest = r.successorPlanDigest, r.successorDeclDigest
+		}
 		if planDigest == "" {
 			planDigest = preparedFixture().Result.PlanDigest
 		}
 		if declDigest == "" {
 			declDigest = preparedFixture().Result.DeclarationDigest
 		}
-		return []byte(fmt.Sprintf(`[{"Name":%q,"BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":%q,"io.kenogram.plan-digest":%q,"io.kenogram.declaration-digest":%q}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, container, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), strconv.Itoa(generation), planDigest, declDigest, network, r.mountSource)), nil
+		nanoCPUs := int64(1_000_000_000)
+		if generation == 2 && r.successorNanoCPUs != 0 {
+			nanoCPUs = r.successorNanoCPUs
+		}
+		return []byte(fmt.Sprintf(`[{"Name":%q,"BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":%q,"io.kenogram.plan-digest":%q,"io.kenogram.declaration-digest":%q}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":%d,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, container, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), strconv.Itoa(generation), planDigest, declDigest, network, nanoCPUs, r.mountSource)), nil
 	}
 	if len(args) > 0 && args[0] == "ps" {
 		if r.containers != "" {
@@ -475,6 +485,23 @@ func TestCompareUpRejectsCorruptAuthoritativeEvidence(t *testing.T) {
 	}
 }
 
+func TestCompareUpRejectsLiveAuthorityWithMissingWorkspaceMount(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	if err := os.RemoveAll(layout.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CompareUp(prepared); err == nil || !strings.Contains(err.Error(), "running container does not match recorded authority") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func mutateState(t *testing.T, layout worldfs.Layout, mutate func(*worldfs.State)) {
 	t.Helper()
 	state, err := layout.ReadState()
@@ -636,7 +663,7 @@ paths = ["/workspace"]
 	}
 }
 
-func TestUpReviewedRejectsWorkspaceChangedAtCutover(t *testing.T) {
+func TestUpReviewedCarriesWorkspaceAdvancedByActivePredecessor(t *testing.T) {
 	base := t.TempDir()
 	prepared := preparedFixture()
 	runner := &workspaceMutatingRunner{}
@@ -651,22 +678,82 @@ func TestUpReviewedRejectsWorkspaceChangedAtCutover(t *testing.T) {
 	successor := prepared
 	successor.Result.Plan.Resources.CPUs++
 	refreshPreparedPlanDigest(&successor)
+	runner.successorPlanDigest = successor.Result.PlanDigest
+	runner.successorDeclDigest = successor.Result.DeclarationDigest
+	runner.successorNanoCPUs = successor.Result.Plan.Resources.CPUs * 1_000_000_000
 	comparison, err := a.CompareUp(successor)
 	if err != nil {
 		t.Fatal(err)
+	}
+	cutoverRecorded := false
+	a.lifecycleCheckpoint = func(name string) {
+		if name != "cutover-workspace-recorded" {
+			return
+		}
+		transition, err := layout.ReadTransition()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cutover, err := worldfs.Digest(layout.Workspace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if transition.Workspace.Root != cutover.Root {
+			t.Fatalf("recorded cutover root = %q, want %q", transition.Workspace.Root, cutover.Root)
+		}
+		cutoverRecorded = true
+	}
+	if err := a.UpReviewed(context.Background(), successor, comparison); err != nil {
+		t.Fatal(err)
+	}
+	if !cutoverRecorded {
+		t.Fatal("cutover workspace was not durably recorded")
+	}
+	if !containsCall(runner.calls, "start ", "kenogram-w-g2") {
+		t.Fatalf("successor did not start with authoritative workspace: %v", runner.calls)
+	}
+	if got, err := os.ReadFile(filepath.Join(layout.Workspace, "after-review")); err != nil || string(got) != "changed" {
+		t.Fatalf("carried workspace = %q, %v", got, err)
+	}
+}
+
+func TestUpReviewedRejectsInactiveWorkspaceChangedAtCutover(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Down(context.Background(), "w"); err != nil {
+		t.Fatal(err)
+	}
+	stopped := &stoppedRunner{runtimeRunner: *runner}
+	a.Backend = testBackend(stopped)
+	layout := worldfs.For(base, "w")
+	successor := prepared
+	successor.Result.Plan.Resources.CPUs++
+	refreshPreparedPlanDigest(&successor)
+	runner.successorPlanDigest = successor.Result.PlanDigest
+	runner.successorDeclDigest = successor.Result.DeclarationDigest
+	runner.successorNanoCPUs = successor.Result.Plan.Resources.CPUs * 1_000_000_000
+	comparison, err := a.CompareUp(successor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.lifecycleCheckpoint = func(name string) {
+		if name == "rollback-recorded" {
+			if err := os.WriteFile(filepath.Join(layout.Workspace, "after-review"), []byte("changed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	err = a.UpReviewed(context.Background(), successor, comparison)
 	if err == nil || !strings.Contains(err.Error(), "reviewed workspace changed before successor start") {
 		t.Fatalf("error = %v", err)
 	}
-	if containsCall(runner.calls, "start ", "kenogram-w-g2") {
-		t.Fatalf("successor started with unreviewed workspace: %v", runner.calls)
-	}
-	if !containsCall(runner.calls, "start ", "kenogram-w-g1") {
-		t.Fatalf("predecessor was not restored: %v", runner.calls)
-	}
-	if _, err := os.Stat(layout.Transition); !os.IsNotExist(err) {
-		t.Fatalf("rollback transition remains: %v", err)
+	if containsCall(stopped.calls, "start ", "kenogram-w-g2") {
+		t.Fatalf("successor started with unreviewed inactive workspace: %v", stopped.calls)
 	}
 }
 

@@ -94,7 +94,14 @@ type UpComparison struct {
 	snapshot        string
 	recoveryPending bool
 	workspaceRoot   string
+	workspaceMode   string
 }
+
+const (
+	workspaceModeEmpty  = "empty"
+	workspaceModeExact  = "exact"
+	workspaceModeActive = "active"
+)
 
 // GenerationObservation keeps recorded authority distinct from runtime
 // observation. A missing runtime is evidence too, so Exists is explicit.
@@ -322,17 +329,35 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 		}
 		a.checkpoint("predecessor-stopped")
 	}
+	cutoverWorkspace, digestErr := worldfs.Digest(l.Workspace)
+	if digestErr != nil {
+		return fmt.Errorf("capture workspace at cutover: %w", digestErr)
+	}
 	if reviewed != nil {
-		cutoverWorkspace, digestErr := worldfs.Digest(l.Workspace)
-		if digestErr != nil {
-			return fmt.Errorf("revalidate reviewed workspace at cutover: %w", digestErr)
+		switch reviewed.workspaceMode {
+		case workspaceModeEmpty:
+			if !workspaceHasOnlyEmptyMounts(cutoverWorkspace, l, prepared.Result.Plan.Workspace) {
+				return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
+			}
+		case workspaceModeExact:
+			if !priorActive && cutoverWorkspace.Root != reviewed.workspaceRoot {
+				return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
+			}
+		case workspaceModeActive:
+			if !priorActive {
+				return fmt.Errorf("reviewed live predecessor is no longer active; review a stable workspace before replacement")
+			}
+		default:
+			return fmt.Errorf("reviewed workspace mode is invalid")
 		}
-		if reviewed.workspaceRoot == "" && !workspaceHasOnlyEmptyMounts(cutoverWorkspace, l, prepared.Result.Plan.Workspace) {
-			return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
-		}
-		if reviewed.workspaceRoot != "" && cutoverWorkspace.Root != reviewed.workspaceRoot {
-			return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
-		}
+	}
+	transition.Workspace = cutoverWorkspace
+	if err := l.WriteTransition(transition); err != nil {
+		return fmt.Errorf("record cutover workspace: %w", err)
+	}
+	a.checkpoint("cutover-workspace-recorded")
+	if reviewed != nil && reviewed.workspaceMode == workspaceModeActive {
+		fmt.Fprintf(a.Out, "workspace: captured authoritative cutover (%s)\n", worldfs.ShortDigest(cutoverWorkspace.Root))
 	}
 	if err := a.Backend.Start(ctx, container); err != nil {
 		return a.recordFailure(l, prepared, "start successor", err)
@@ -500,29 +525,6 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 			return UpComparison{}, fmt.Errorf("compare predecessor plan: %w", err)
 		}
 	}
-
-	current, currentErr := worldfs.Digest(l.Workspace)
-	if currentErr != nil {
-		if !priorExists && errors.Is(currentErr, os.ErrNotExist) {
-			if err := verifyComparisonHistory(l, false, transitionEvidence); err != nil {
-				return UpComparison{}, err
-			}
-			workspace := "workspace: new (no carried state)"
-			return newUpComparison(prepared, changes, workspace, transitionEvidence, nil, nil, nil, nil)
-		}
-		return UpComparison{}, fmt.Errorf("digest current workspace: %w", currentErr)
-	}
-	if !priorExists && workspaceHasNoCarriedEntries(current) {
-		if err := verifyComparisonHistory(l, false, transitionEvidence); err != nil {
-			return UpComparison{}, err
-		}
-		return newUpComparison(prepared, changes, "workspace: new (no carried state)", transitionEvidence, nil, nil, nil, nil)
-	}
-	if !priorExists && transitionErr != nil {
-		return UpComparison{}, fmt.Errorf("predecessor state is missing while carried workspace entries exist")
-	}
-
-	workspace := fmt.Sprintf("workspace: new (%d entries, %s)", len(current.Entries), worldfs.ShortDigest(current.Root))
 	var priorDigest *worldfs.DigestTree
 	if priorExists {
 		var digest worldfs.DigestTree
@@ -537,7 +539,45 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 			return UpComparison{}, fmt.Errorf("read predecessor workspace digest: %w", err)
 		}
 		priorDigest = &digest
-		workspace = fmt.Sprintf("workspace: %d files changed since g%d (%s -> %s)", worldfs.ChangedFiles(digest, current), state.Generation, worldfs.ShortDigest(digest.Root), worldfs.ShortDigest(current.Root))
+	}
+	if priorExists && state.Status == "running" && a.Backend != nil {
+		active, err := a.comparisonPredecessorActive(l, state, prior.Result)
+		if err != nil {
+			return UpComparison{}, fmt.Errorf("observe predecessor runtime for workspace comparison: %w", err)
+		}
+		if active {
+			if err := verifyComparisonHistory(l, true, transitionEvidence); err != nil {
+				return UpComparison{}, err
+			}
+			workspace := fmt.Sprintf("workspace: live authoritative g%d (exact drift settles at cutover; applied %s)", state.Generation, worldfs.ShortDigest(priorDigest.Root))
+			return newUpComparison(prepared, changes, workspace, workspaceModeActive, transitionEvidence, &state, &prior, nil, priorDigest)
+		}
+	}
+
+	current, currentErr := worldfs.Digest(l.Workspace)
+	if currentErr != nil {
+		if !priorExists && errors.Is(currentErr, os.ErrNotExist) {
+			if err := verifyComparisonHistory(l, false, transitionEvidence); err != nil {
+				return UpComparison{}, err
+			}
+			workspace := "workspace: new (no carried state)"
+			return newUpComparison(prepared, changes, workspace, workspaceModeEmpty, transitionEvidence, nil, nil, nil, nil)
+		}
+		return UpComparison{}, fmt.Errorf("digest current workspace: %w", currentErr)
+	}
+	if !priorExists && workspaceHasNoCarriedEntries(current) {
+		if err := verifyComparisonHistory(l, false, transitionEvidence); err != nil {
+			return UpComparison{}, err
+		}
+		return newUpComparison(prepared, changes, "workspace: new (no carried state)", workspaceModeEmpty, transitionEvidence, nil, nil, nil, nil)
+	}
+	if !priorExists && transitionErr != nil {
+		return UpComparison{}, fmt.Errorf("predecessor state is missing while carried workspace entries exist")
+	}
+
+	workspace := fmt.Sprintf("workspace: new (%d entries, %s)", len(current.Entries), worldfs.ShortDigest(current.Root))
+	if priorExists {
+		workspace = fmt.Sprintf("workspace: %d files changed since g%d (%s -> %s)", worldfs.ChangedFiles(*priorDigest, current), state.Generation, worldfs.ShortDigest(priorDigest.Root), worldfs.ShortDigest(current.Root))
 	}
 	if err := verifyComparisonHistory(l, priorExists, transitionEvidence); err != nil {
 		return UpComparison{}, err
@@ -548,7 +588,32 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 		stateEvidence = &state
 		priorEvidence = &prior
 	}
-	return newUpComparison(prepared, changes, workspace, transitionEvidence, stateEvidence, priorEvidence, &current, priorDigest)
+	return newUpComparison(prepared, changes, workspace, workspaceModeExact, transitionEvidence, stateEvidence, priorEvidence, &current, priorDigest)
+}
+
+func (a *App) comparisonPredecessorActive(l worldfs.Layout, state worldfs.State, result plan.Result) (bool, error) {
+	exists, err := a.Backend.Exists(context.Background(), state.Container)
+	if err != nil || !exists {
+		return false, err
+	}
+	evidence, err := a.Backend.Inspect(context.Background(), state.Container)
+	if err != nil {
+		return false, err
+	}
+	if !evidence.Running {
+		return false, nil
+	}
+	expected := make([]backend.Mount, 0, len(result.Plan.Workspace)+len(result.Plan.Mounts))
+	for _, target := range result.Plan.Workspace {
+		expected = append(expected, backend.Mount{Source: l.WorkspacePath(target), Target: target, Mode: "rw"})
+	}
+	for _, mount := range result.Plan.Mounts {
+		expected = append(expected, backend.Mount{Source: mount.Source, Target: mount.Target, Mode: mount.Mode})
+	}
+	if err := a.verifyRuntimeEvidence(evidence, result, state.Generation, expected); err != nil {
+		return false, fmt.Errorf("running container does not match recorded authority: %w", err)
+	}
+	return true, nil
 }
 
 func validateComparisonTransition(transition worldfs.Transition, world string) error {
@@ -703,10 +768,11 @@ func validatePreparedIntegrity(prepared Prepared) error {
 	return nil
 }
 
-func newUpComparison(prepared Prepared, changes []plan.Change, workspace string, transition *worldfs.Transition, state *worldfs.State, prior *Prepared, current, priorDigest *worldfs.DigestTree) (UpComparison, error) {
+func newUpComparison(prepared Prepared, changes []plan.Change, workspace, workspaceMode string, transition *worldfs.Transition, state *worldfs.State, prior *Prepared, current, priorDigest *worldfs.DigestTree) (UpComparison, error) {
 	payload := struct {
 		Changes                    []plan.Change       `json:"changes"`
 		Workspace                  string              `json:"workspace"`
+		WorkspaceMode              string              `json:"workspace_mode"`
 		CandidatePlanDigest        string              `json:"candidate_plan_digest"`
 		CandidateDeclarationDigest string              `json:"candidate_declaration_digest"`
 		Transition                 *worldfs.Transition `json:"transition,omitempty"`
@@ -715,7 +781,7 @@ func newUpComparison(prepared Prepared, changes []plan.Change, workspace string,
 		PriorDeclarationDigest     string              `json:"prior_declaration_digest,omitempty"`
 		CurrentWorkspaceRoot       string              `json:"current_workspace_root,omitempty"`
 		PredecessorWorkspaceRoot   string              `json:"predecessor_workspace_root,omitempty"`
-	}{Changes: changes, Workspace: workspace, CandidatePlanDigest: prepared.Result.PlanDigest, CandidateDeclarationDigest: prepared.Result.DeclarationDigest, Transition: transition, State: state}
+	}{Changes: changes, Workspace: workspace, WorkspaceMode: workspaceMode, CandidatePlanDigest: prepared.Result.PlanDigest, CandidateDeclarationDigest: prepared.Result.DeclarationDigest, Transition: transition, State: state}
 	if prior != nil {
 		payload.PriorPlanDigest = prior.Result.PlanDigest
 		payload.PriorDeclarationDigest = DeclarationDigest(prior.Raw)
@@ -731,7 +797,7 @@ func newUpComparison(prepared Prepared, changes []plan.Change, workspace string,
 		return UpComparison{}, fmt.Errorf("encode comparison snapshot: %w", err)
 	}
 	sum := sha256.Sum256(raw)
-	comparison := UpComparison{Changes: changes, Workspace: workspace, snapshot: hex.EncodeToString(sum[:]), recoveryPending: transition != nil}
+	comparison := UpComparison{Changes: changes, Workspace: workspace, snapshot: hex.EncodeToString(sum[:]), recoveryPending: transition != nil, workspaceMode: workspaceMode}
 	if current != nil {
 		comparison.workspaceRoot = current.Root
 	}

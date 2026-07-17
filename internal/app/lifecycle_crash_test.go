@@ -270,8 +270,8 @@ func TestLifecycleSIGKILLHelper(t *testing.T) {
 
 func TestLifecycleRecoversAfterSIGKILLAtCommitBoundaries(t *testing.T) {
 	checkpoints := lifecycleCrashCheckpoints
-	if len(checkpoints) != 14 {
-		t.Fatalf("lifecycle checkpoint count = %d, want 14", len(checkpoints))
+	if len(checkpoints) != 15 {
+		t.Fatalf("lifecycle checkpoint count = %d, want 15", len(checkpoints))
 	}
 	for _, checkpoint := range checkpoints {
 		t.Run(checkpoint, func(t *testing.T) {
@@ -568,7 +568,7 @@ func crashProxyReady(layout worldfs.Layout) bool {
 }
 
 var lifecycleCrashCheckpoints = []string{
-	"rollback-recorded", "predecessor-stopped", "successor-started", "boundary-verified", "services-started", "successor-verified",
+	"rollback-recorded", "predecessor-stopped", "cutover-workspace-recorded", "successor-started", "boundary-verified", "services-started", "successor-verified",
 	"commit-recorded", "digest-written", "declaration-written", "recovery-plan-written", "state-written", "history-written",
 	"predecessor-destroyed", "transition-cleared",
 }

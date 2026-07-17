@@ -21,8 +21,11 @@ also reports the byte-sensitive declaration digest.
 | `repair-history --yes <world>` | remove one proven truncated final fragment | yes |
 | `doctor [--json]` | report all host prerequisites and image-entry notes | no |
 
-`up` renders the full successor plan, exact semantic changes, and workspace
-drift before an interactive confirmation or `--yes`. It stages and verifies the
+`up` renders the full successor plan and exact semantic changes before an
+interactive confirmation or `--yes`. A quiescent predecessor also renders exact
+workspace drift. A verified running predecessor is reported as live authority:
+its workspace may advance while Kenogram stages the successor, so its stable
+handoff tree is captured only after it stops. `up` stages and verifies the
 successor before recording it applied. A predecessor is new only when state,
 applied artifacts, authoritative history, runtime-proxy artifacts, recorded
 digests, staged generation artifacts, and carried workspace entries are all
@@ -31,10 +34,14 @@ or inconsistent plan, state, declaration, history, or canonical workspace-digest
 evidence fails before confirmation. The
 reviewed predecessor evidence is revalidated under the world mutation lock
 before application; if that lock guards transition recovery, the recovered
-authority must reproduce the reviewed changes and workspace observation before
-application continues. Immediately before successor start, after any predecessor
-has stopped, the canonical workspace root must still equal the reviewed root or
-the cutover fails and restores the predecessor. `down`, `destroy`, `enter --repair`,
+authority must reproduce the reviewed changes and workspace classification
+before application continues. Immediately before successor start, after any
+predecessor has stopped, Kenogram must capture and fsync a stable canonical
+workspace tree. New and inactive worlds must still equal their reviewed empty or
+exact state. A verified active predecessor may advance its workspace until stop;
+that final tree is authoritative handoff evidence, not a claim that its bytes
+were frozen at confirmation. Operators requiring byte-exact review first run
+`down`, then review and apply. `down`, `destroy`, `enter --repair`,
 `status`, `allow`, and `worlds` operate only from host-side state. `version`
 reports build provenance.
 
