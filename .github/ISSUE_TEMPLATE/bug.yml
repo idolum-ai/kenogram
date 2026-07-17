@@ -11,7 +11,7 @@ body:
     attributes:
       label: Kenogram version
       description: Paste `kenogram version`, or provide the commit SHA.
-      placeholder: v0.1.0
+      placeholder: v0.1.1
     validations:
       required: true
   - type: textarea

@@ -4,6 +4,20 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+## [v0.1.1] - 2026-07-17
+
+- Accept Podman's `shareable` inspection label for a requested private IPC
+  namespace only when live namespace file identity proves separation from
+  Kenogram's ambient IPC namespace, restoring compatibility with rootless
+  Podman 4.3.1 on Debian 12 without weakening verification.
+- Keep each world's network proxy independent of the applying terminal and
+  process group, make post-readiness ownership explicit, and prevent proxy
+  leaks across integration cleanup and startup failure paths.
+- Strengthen the OpenClaw Telegram, TUI, replacement, and network-door proofs
+  while retaining failed structured test evidence in CI.
+- Refine the Kenogram mark and require SVG changes to pass the full asset
+  contract rather than the editorial-only gate.
+
 ## [v0.1.0] - 2026-07-14
 
 - Verify the candidate-reviewed release head in private repositories without

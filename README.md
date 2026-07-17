@@ -54,7 +54,7 @@ compliance or certification for that system.
 
 ## Status and supported runtime
 
-[Kenogram v0.1.0](https://github.com/idolum-ai/kenogram/releases/tag/v0.1.0)
+[Kenogram v0.1.1](https://github.com/idolum-ai/kenogram/releases/tag/v0.1.1)
 is evaluation software and does not make a production-stability claim. Release
 binaries support Linux on amd64 and arm64. The runtime exercised in mandatory
 CI requires rootless Podman on cgroups v2, `nsenter`, and subordinate UID/GID
@@ -71,12 +71,12 @@ the Linux kernel, rootless Podman, cgroups v2, and `nsenter`.
 
 ## Install and start one world
 
-Install the first release,
-[`v0.1.0`](https://github.com/idolum-ai/kenogram/releases/tag/v0.1.0), after
+Install the current release,
+[`v0.1.1`](https://github.com/idolum-ai/kenogram/releases/tag/v0.1.1), after
 inspecting its standalone installer:
 
 ```sh
-version=v0.1.0
+version=v0.1.1
 curl --fail --location --proto '=https' --tlsv1.2 \
   --output install-release.sh \
   "https://github.com/idolum-ai/kenogram/releases/download/${version}/install-release.sh"
