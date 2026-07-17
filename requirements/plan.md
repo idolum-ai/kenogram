@@ -23,8 +23,9 @@ budget is exhausted, it reports an exact redacted array-level replacement. If
 that replacement prevents safe positional attribution of changed secret-copy
 digests, `copies[*].source_digest` records a redacted change in either the global
 secret-digest multiset or a digest multiset attached to a stable `(source,
-target)` identity, without claiming which position changed. Pure reorder and
-source-only or target-only edits do not produce that marker.
+target)` identity whose multiplicity is unchanged, without claiming which
+position changed. Pure reorder and source-only or target-only edits do not
+produce that marker.
 
 The plan digest is lowercase SHA-256 over the canonical semantic JSON followed by
 one newline. The declaration digest is lowercase SHA-256 over the exact input

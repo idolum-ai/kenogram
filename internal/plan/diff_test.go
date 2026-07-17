@@ -403,6 +403,46 @@ func TestDiffLargeSequenceFallbackIgnoresSecretIdentityOnlyChanges(t *testing.T)
 	}
 }
 
+func TestDiffLargeSequenceFallbackIgnoresSecretIdentityCollisions(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func([]Copy)
+		change  func(*Copy, Copy)
+	}{
+		{
+			name: "source",
+			prepare: func(copies []Copy) {
+				copies[0].Target, copies[1].Target = "/shared", "/shared"
+				copies[0].SourceDigest, copies[1].SourceDigest = "shared-digest", "shared-digest"
+			},
+			change: func(copy *Copy, other Copy) { copy.Source = other.Source },
+		},
+		{
+			name: "target",
+			prepare: func(copies []Copy) {
+				copies[0].Source, copies[1].Source = "shared-source", "shared-source"
+				copies[0].SourceDigest, copies[1].SourceDigest = "shared-digest", "shared-digest"
+			},
+			change: func(copy *Copy, other Copy) { copy.Target = other.Target },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before := largeSecretCopies()
+			test.prepare(before)
+			after := append([]Copy(nil), before...)
+			test.change(&after[0], after[1])
+			changes, err := Diff(Plan{Copies: before}, Plan{Copies: after})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(changes) != 1 || changes[0].Path != "copies" {
+				t.Fatalf("identity-collision fallback = %#v", changes)
+			}
+		})
+	}
+}
+
 func largeSecretCopies() []Copy {
 	copies := make([]Copy, 1024)
 	for i := range copies {

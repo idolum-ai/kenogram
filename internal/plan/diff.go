@@ -321,11 +321,21 @@ func secretDigestEvidenceChanged(before, after []Copy) bool {
 	}
 	left, right := secretDigestsByIdentity(before), secretDigestsByIdentity(after)
 	for identity, leftDigests := range left {
-		if rightDigests, stable := right[identity]; stable && !reflect.DeepEqual(leftDigests, rightDigests) {
+		rightDigests, present := right[identity]
+		stable := present && digestMultiplicity(leftDigests) == digestMultiplicity(rightDigests)
+		if stable && !reflect.DeepEqual(leftDigests, rightDigests) {
 			return true
 		}
 	}
 	return false
+}
+
+func digestMultiplicity(digests map[string]int) int {
+	total := 0
+	for _, count := range digests {
+		total += count
+	}
+	return total
 }
 
 func secretDigestCounts(copies []Copy) map[string]int {
