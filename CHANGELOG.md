@@ -10,7 +10,7 @@ Notable user-visible and operational changes are recorded here.
 - Keep JSON dry-run output machine-clean and fail closed when candidate bytes or
   prior plan, declaration, state, history, staging, or canonical workspace
   evidence cannot be compared; revalidate the complete reviewed snapshot under
-  the world lock before applying it.
+  the world lock and again at the runtime cutover boundary before applying it.
 
 ## [v0.1.1] - 2026-07-17
 

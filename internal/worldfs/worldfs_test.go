@@ -94,6 +94,8 @@ func TestReadDigestRejectsNoncanonicalEvidence(t *testing.T) {
 		{name: "duplicate path", tree: withRoot([]DigestEntry{rootEntry, validFile, validFile})},
 		{name: "noncanonical order", tree: withRoot([]DigestEntry{rootEntry, {Path: "b", Type: "directory"}, {Path: "a", Type: "directory"}})},
 		{name: "noncanonical path", tree: withRoot([]DigestEntry{rootEntry, {Path: "../escape", Type: "directory"}})},
+		{name: "missing parent", tree: withRoot([]DigestEntry{rootEntry, {Path: "missing/child", Type: "file", Mode: 0o600, Size: 1, SHA256: strings.Repeat("a", 64)}})},
+		{name: "non-directory parent", tree: withRoot([]DigestEntry{rootEntry, validFile, {Path: "a/child", Type: "directory"}})},
 		{name: "invalid file digest", tree: withRoot([]DigestEntry{rootEntry, {Path: "a", Type: "file", Mode: 0o600, Size: 1, SHA256: "not-a-digest"}})},
 	}
 	for _, test := range tests {
@@ -109,6 +111,27 @@ func TestReadDigestRejectsNoncanonicalEvidence(t *testing.T) {
 				t.Fatalf("accepted digest tree %#v", test.tree)
 			}
 		})
+	}
+}
+
+func TestReadDigestAcceptsGeneratedBackslashPath(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, `a\b`), []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := Digest(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout := For(t.TempDir(), "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.WriteDigest(1, tree); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.ReadDigest(1); err != nil {
+		t.Fatalf("rejected generated backslash path: %v", err)
 	}
 }
 

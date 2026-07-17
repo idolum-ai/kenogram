@@ -8,6 +8,9 @@ Generations are named `kenogram-<world>-g<N>`. A successor is staged before the
 predecessor stops; they never run concurrently over one workspace. The successor
 starts and is verified from backend evidence before it is recorded as applied. On
 failure the predecessor is restarted and no hybrid state remains.
+The canonical workspace root reviewed before confirmation is checked again after
+the predecessor stops and before the successor starts. Drift aborts the cutover
+and restores the predecessor.
 
 Before the first cutover mutation, `up` fsyncs a transition record that retains
 both declarations and identifies the authoritative recovery direction. Before

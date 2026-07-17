@@ -41,6 +41,22 @@ type failOnceRunner struct {
 
 type stoppedRunner struct{ runtimeRunner }
 
+type workspaceMutatingRunner struct {
+	runtimeRunner
+	workspace string
+	mutated   bool
+}
+
+func (r *workspaceMutatingRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if len(args) > 0 && args[0] == "stop" && !r.mutated {
+		r.mutated = true
+		if err := os.WriteFile(filepath.Join(r.workspace, "after-review"), []byte("changed"), 0o600); err != nil {
+			return nil, err
+		}
+	}
+	return r.runtimeRunner.Run(ctx, name, args...)
+}
+
 func (r *stoppedRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	raw, err := r.runtimeRunner.Run(ctx, name, args...)
 	if len(args) > 0 && args[0] == "inspect" {
@@ -542,6 +558,40 @@ paths = ["/workspace"]
 	}
 	if _, err := os.Stat(layout.Transition); !os.IsNotExist(err) {
 		t.Fatalf("transition remains after reviewed recovery: %v", err)
+	}
+}
+
+func TestUpReviewedRejectsWorkspaceChangedAtCutover(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &workspaceMutatingRunner{}
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	runner.workspace = layout.Workspace
+	successor := prepared
+	successor.Result.Plan.Resources.CPUs++
+	refreshPreparedPlanDigest(&successor)
+	comparison, err := a.CompareUp(successor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = a.UpReviewed(context.Background(), successor, comparison)
+	if err == nil || !strings.Contains(err.Error(), "reviewed workspace changed before successor start") {
+		t.Fatalf("error = %v", err)
+	}
+	if containsCall(runner.calls, "start ", "kenogram-w-g2") {
+		t.Fatalf("successor started with unreviewed workspace: %v", runner.calls)
+	}
+	if !containsCall(runner.calls, "start ", "kenogram-w-g1") {
+		t.Fatalf("predecessor was not restored: %v", runner.calls)
+	}
+	if _, err := os.Stat(layout.Transition); !os.IsNotExist(err) {
+		t.Fatalf("rollback transition remains: %v", err)
 	}
 }
 

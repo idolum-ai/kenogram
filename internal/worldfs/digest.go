@@ -194,6 +194,7 @@ func ValidateDigestTree(tree DigestTree) error {
 	if len(tree.Entries) == 0 {
 		return fmt.Errorf("entries are empty")
 	}
+	types := make(map[string]string, len(tree.Entries))
 	for i, entry := range tree.Entries {
 		if i == 0 {
 			if entry.Path != "" || entry.Type != "directory" {
@@ -202,8 +203,17 @@ func ValidateDigestTree(tree DigestTree) error {
 		} else if tree.Entries[i-1].Path >= entry.Path {
 			return fmt.Errorf("entries are not in unique canonical path order at %q", entry.Path)
 		}
-		if entry.Path != "" && (path.IsAbs(entry.Path) || entry.Path == "." || entry.Path == ".." || strings.HasPrefix(entry.Path, "../") || path.Clean(entry.Path) != entry.Path || strings.Contains(entry.Path, "\\")) {
+		if entry.Path != "" && (path.IsAbs(entry.Path) || entry.Path == "." || entry.Path == ".." || strings.HasPrefix(entry.Path, "../") || path.Clean(entry.Path) != entry.Path) {
 			return fmt.Errorf("entry path %q is not canonical", entry.Path)
+		}
+		if entry.Path != "" {
+			parent := path.Dir(entry.Path)
+			if parent == "." {
+				parent = ""
+			}
+			if types[parent] != "directory" {
+				return fmt.Errorf("entry %q has missing or non-directory parent %q", entry.Path, parent)
+			}
 		}
 		if entry.Mode > 0o777 {
 			return fmt.Errorf("entry %q has invalid mode", entry.Path)
@@ -230,6 +240,7 @@ func ValidateDigestTree(tree DigestTree) error {
 		if entry.Type != "symlink" && entry.Link != "" {
 			return fmt.Errorf("non-symlink entry %q has a link target", entry.Path)
 		}
+		types[entry.Path] = entry.Type
 	}
 	want, err := digestEntriesRoot(tree.Entries)
 	if err != nil {

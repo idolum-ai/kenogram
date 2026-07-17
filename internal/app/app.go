@@ -93,6 +93,7 @@ type UpComparison struct {
 	Workspace       string
 	snapshot        string
 	recoveryPending bool
+	workspaceRoot   string
 }
 
 // GenerationObservation keeps recorded authority distinct from runtime
@@ -184,6 +185,7 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 		if !slices.Equal(recovered.Changes, reviewed.Changes) || recovered.Workspace != reviewed.Workspace {
 			return fmt.Errorf("transition recovery changed predecessor evidence; review the plan again")
 		}
+		*reviewed = recovered
 	}
 	prior, priorErr := l.ReadState()
 	if priorErr != nil && !os.IsNotExist(priorErr) {
@@ -225,7 +227,10 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 		}
 	}
 	generation := l.NextGeneration()
-	before, _ := worldfs.Digest(l.Workspace)
+	before, err := worldfs.Digest(l.Workspace)
+	if err != nil {
+		return fmt.Errorf("digest workspace before staging: %w", err)
+	}
 	fmt.Fprintf(a.Out, "workspace: %d entries (%s)\n", len(before.Entries), worldfs.ShortDigest(before.Root))
 	mounts, err := a.mounts(l, prepared.Result)
 	if err != nil {
@@ -316,6 +321,15 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 			return a.recordFailure(l, prepared, "stop predecessor", err)
 		}
 		a.checkpoint("predecessor-stopped")
+	}
+	if reviewed != nil && reviewed.workspaceRoot != "" {
+		cutoverWorkspace, digestErr := worldfs.Digest(l.Workspace)
+		if digestErr != nil {
+			return fmt.Errorf("revalidate reviewed workspace at cutover: %w", digestErr)
+		}
+		if cutoverWorkspace.Root != reviewed.workspaceRoot {
+			return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
+		}
 	}
 	if err := a.Backend.Start(ctx, container); err != nil {
 		return a.recordFailure(l, prepared, "start successor", err)
@@ -640,7 +654,11 @@ func newUpComparison(prepared Prepared, changes []plan.Change, workspace string,
 		return UpComparison{}, fmt.Errorf("encode comparison snapshot: %w", err)
 	}
 	sum := sha256.Sum256(raw)
-	return UpComparison{Changes: changes, Workspace: workspace, snapshot: hex.EncodeToString(sum[:]), recoveryPending: transition != nil}, nil
+	comparison := UpComparison{Changes: changes, Workspace: workspace, snapshot: hex.EncodeToString(sum[:]), recoveryPending: transition != nil}
+	if current != nil {
+		comparison.workspaceRoot = current.Root
+	}
+	return comparison, nil
 }
 
 func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, prepared Prepared, running bool) (adopted bool, retErr error) {

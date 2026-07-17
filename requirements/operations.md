@@ -32,7 +32,9 @@ evidence fails before confirmation. The
 reviewed predecessor evidence is revalidated under the world mutation lock
 before application; if that lock guards transition recovery, the recovered
 authority must reproduce the reviewed changes and workspace observation before
-application continues. `down`, `destroy`, `enter --repair`,
+application continues. Immediately before successor start, after any predecessor
+has stopped, the canonical workspace root must still equal the reviewed root or
+the cutover fails and restores the predecessor. `down`, `destroy`, `enter --repair`,
 `status`, `allow`, and `worlds` operate only from host-side state. `version`
 reports build provenance.
 
