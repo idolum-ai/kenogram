@@ -297,33 +297,60 @@ func (d *differ) largeSecretChanges(path string) []Change {
 
 // largeSecretDigestSummary preserves the fact of a secret-content difference
 // when bounded fallback cannot safely claim positional identity. Comparing
-// content-binding multisets avoids describing a pure reorder as a change while
-// still detecting a digest reassigned between stable sources and targets.
+// global and stable-identity digest multisets avoids describing a pure reorder
+// or metadata-only move as a digest change while still detecting reassignment.
 func (d *differ) largeSecretDigestSummary(path string) []Change {
-	if path != "copies" || reflect.DeepEqual(secretContentBindingCounts(d.beforeCopies), secretContentBindingCounts(d.afterCopies)) {
+	if path != "copies" || !secretDigestEvidenceChanged(d.beforeCopies, d.afterCopies) {
 		return nil
 	}
 	return []Change{{
 		Path:   "copies[*].source_digest",
-		Before: "<secret content bindings>",
-		After:  "<secret content bindings changed>",
+		Before: "<secret digests>",
+		After:  "<secret digests changed>",
 	}}
 }
 
-type secretContentBinding struct {
+type secretCopyIdentity struct {
 	Source string
 	Target string
-	Digest string
 }
 
-func secretContentBindingCounts(copies []Copy) map[secretContentBinding]int {
-	counts := make(map[secretContentBinding]int)
+func secretDigestEvidenceChanged(before, after []Copy) bool {
+	if !reflect.DeepEqual(secretDigestCounts(before), secretDigestCounts(after)) {
+		return true
+	}
+	left, right := secretDigestsByIdentity(before), secretDigestsByIdentity(after)
+	for identity, leftDigests := range left {
+		if rightDigests, stable := right[identity]; stable && !reflect.DeepEqual(leftDigests, rightDigests) {
+			return true
+		}
+	}
+	return false
+}
+
+func secretDigestCounts(copies []Copy) map[string]int {
+	counts := make(map[string]int)
 	for _, copy := range copies {
 		if copy.Secret {
-			counts[secretContentBinding{Source: copy.Source, Target: copy.Target, Digest: copy.SourceDigest}]++
+			counts[copy.SourceDigest]++
 		}
 	}
 	return counts
+}
+
+func secretDigestsByIdentity(copies []Copy) map[secretCopyIdentity]map[string]int {
+	byIdentity := make(map[secretCopyIdentity]map[string]int)
+	for _, copy := range copies {
+		if !copy.Secret {
+			continue
+		}
+		identity := secretCopyIdentity{Source: copy.Source, Target: copy.Target}
+		if byIdentity[identity] == nil {
+			byIdentity[identity] = make(map[string]int)
+		}
+		byIdentity[identity][copy.SourceDigest]++
+	}
+	return byIdentity
 }
 
 func sequencePath(path string, index int) string {

@@ -336,8 +336,8 @@ func TestDiffLargeSequenceFallbackSummarizesMixedSecretChange(t *testing.T) {
 	}
 	wantSummary := Change{
 		Path:   "copies[*].source_digest",
-		Before: "<secret content bindings>",
-		After:  "<secret content bindings changed>",
+		Before: "<secret digests>",
+		After:  "<secret digests changed>",
 	}
 	if len(changes) != 2 || changes[0].Path != "copies" || changes[1] != wantSummary {
 		t.Fatalf("mixed large fallback = %#v", changes)
@@ -376,6 +376,30 @@ func TestDiffLargeSequenceFallbackIgnoresPureSecretReorder(t *testing.T) {
 	}
 	if len(changes) != 1 || changes[0].Path != "copies" {
 		t.Fatalf("pure reorder fallback = %#v", changes)
+	}
+}
+
+func TestDiffLargeSequenceFallbackIgnoresSecretIdentityOnlyChanges(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(*Copy)
+	}{
+		{name: "source", change: func(copy *Copy) { copy.Source = "relocated-secret" }},
+		{name: "target", change: func(copy *Copy) { copy.Target = "/relocated-secret" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before := largeSecretCopies()
+			after := append([]Copy(nil), before...)
+			test.change(&after[0])
+			changes, err := Diff(Plan{Copies: before}, Plan{Copies: after})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(changes) != 1 || changes[0].Path != "copies" {
+				t.Fatalf("identity-only fallback = %#v", changes)
+			}
+		})
 	}
 }
 
