@@ -562,7 +562,7 @@ func (a *App) CompareUpContext(ctx context.Context, prepared Prepared) (UpCompar
 			if err := verifyComparisonHistory(l, true, transitionEvidence); err != nil {
 				return UpComparison{}, err
 			}
-			workspace := fmt.Sprintf("workspace: live authoritative g%d (current tree captured during apply; applied %s)", state.Generation, worldfs.ShortDigest(priorDigest.Root))
+			workspace := fmt.Sprintf("workspace: live authoritative g%d (may advance during apply; applied %s)", state.Generation, worldfs.ShortDigest(priorDigest.Root))
 			return newUpComparison(prepared, changes, workspace, workspaceModeActive, transitionEvidence, &state, &prior, nil, priorDigest)
 		}
 	}
