@@ -336,8 +336,8 @@ func TestDiffLargeSequenceFallbackSummarizesMixedSecretChange(t *testing.T) {
 	}
 	wantSummary := Change{
 		Path:   "copies[*].source_digest",
-		Before: "<secret digest multiset>",
-		After:  "<secret digest multiset changed>",
+		Before: "<secret content bindings>",
+		After:  "<secret content bindings changed>",
 	}
 	if len(changes) != 2 || changes[0].Path != "copies" || changes[1] != wantSummary {
 		t.Fatalf("mixed large fallback = %#v", changes)
@@ -350,17 +350,43 @@ func TestDiffLargeSequenceFallbackSummarizesMixedSecretChange(t *testing.T) {
 	}
 }
 
-func TestLargeSecretDigestSummaryIgnoresReorder(t *testing.T) {
-	left := copyNamed("left")
-	left.Secret = true
-	left.SourceDigest = "left-digest"
-	right := copyNamed("right")
-	right.Secret = true
-	right.SourceDigest = "right-digest"
-	d := differ{beforeCopies: []Copy{left, right}, afterCopies: []Copy{right, left}}
-	if changes := d.largeSecretDigestSummary("copies"); len(changes) != 0 {
-		t.Fatalf("pure reorder reported secret digest change: %#v", changes)
+func TestDiffLargeSequenceFallbackDetectsSecretDigestReassignment(t *testing.T) {
+	before := largeSecretCopies()
+	after := append([]Copy(nil), before...)
+	after[0].Mode = "0400"
+	after[1].SourceDigest, after[2].SourceDigest = after[2].SourceDigest, after[1].SourceDigest
+	changes, err := Diff(Plan{Copies: before}, Plan{Copies: after})
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(changes) != 2 || changes[0].Path != "copies" || changes[1].Path != "copies[*].source_digest" {
+		t.Fatalf("digest reassignment fallback = %#v", changes)
+	}
+}
+
+func TestDiffLargeSequenceFallbackIgnoresPureSecretReorder(t *testing.T) {
+	before := largeSecretCopies()
+	after := make([]Copy, len(before))
+	for i := range before {
+		after[len(before)-1-i] = before[i]
+	}
+	changes, err := Diff(Plan{Copies: before}, Plan{Copies: after})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 1 || changes[0].Path != "copies" {
+		t.Fatalf("pure reorder fallback = %#v", changes)
+	}
+}
+
+func largeSecretCopies() []Copy {
+	copies := make([]Copy, 1024)
+	for i := range copies {
+		copies[i] = copyNamed(fmt.Sprintf("secret-%d", i))
+		copies[i].Secret = true
+		copies[i].SourceDigest = fmt.Sprintf("SECRET-DIGEST-%d", i)
+	}
+	return copies
 }
 
 func copyNamed(name string) Copy {

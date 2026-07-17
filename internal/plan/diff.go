@@ -297,23 +297,30 @@ func (d *differ) largeSecretChanges(path string) []Change {
 
 // largeSecretDigestSummary preserves the fact of a secret-content difference
 // when bounded fallback cannot safely claim positional identity. Comparing
-// multisets avoids describing a pure reorder as a digest change.
+// content-binding multisets avoids describing a pure reorder as a change while
+// still detecting a digest reassigned between stable sources and targets.
 func (d *differ) largeSecretDigestSummary(path string) []Change {
-	if path != "copies" || reflect.DeepEqual(secretDigestCounts(d.beforeCopies), secretDigestCounts(d.afterCopies)) {
+	if path != "copies" || reflect.DeepEqual(secretContentBindingCounts(d.beforeCopies), secretContentBindingCounts(d.afterCopies)) {
 		return nil
 	}
 	return []Change{{
 		Path:   "copies[*].source_digest",
-		Before: "<secret digest multiset>",
-		After:  "<secret digest multiset changed>",
+		Before: "<secret content bindings>",
+		After:  "<secret content bindings changed>",
 	}}
 }
 
-func secretDigestCounts(copies []Copy) map[string]int {
-	counts := make(map[string]int)
+type secretContentBinding struct {
+	Source string
+	Target string
+	Digest string
+}
+
+func secretContentBindingCounts(copies []Copy) map[secretContentBinding]int {
+	counts := make(map[secretContentBinding]int)
 	for _, copy := range copies {
 		if copy.Secret {
-			counts[copy.SourceDigest]++
+			counts[secretContentBinding{Source: copy.Source, Target: copy.Target, Digest: copy.SourceDigest}]++
 		}
 	}
 	return counts

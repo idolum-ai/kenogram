@@ -21,8 +21,9 @@ are matched by occurrence. The comparison uses resulting indices for additions
 and modifications and prior indices for removals; when its global alignment
 budget is exhausted, it reports an exact redacted array-level replacement. If
 that replacement prevents safe positional attribution of changed secret-copy
-digests, `copies[*].source_digest` records the redacted multiset change without
-claiming which copy changed; a pure reorder does not produce that marker.
+digests, `copies[*].source_digest` records a redacted change in the multiset of
+secret `(source, target, digest)` bindings without claiming which position
+changed; a pure reorder does not produce that marker.
 
 The plan digest is lowercase SHA-256 over the canonical semantic JSON followed by
 one newline. The declaration digest is lowercase SHA-256 over the exact input
