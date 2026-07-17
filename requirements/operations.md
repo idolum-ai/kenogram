@@ -29,7 +29,10 @@ handoff tree is captured only after it stops. `up` stages and verifies the
 successor before recording it applied. A predecessor is new only when state,
 applied artifacts, authoritative history, runtime-proxy artifacts, recorded
 digests, staged generation artifacts, and carried workspace entries are all
-absent; failure-only history is retained without inventing authority. Unreadable
+absent. Empty `0700` mount roots derived from the candidate's declared workspace
+paths are deterministic Kenogram scaffolding, not carried entries. Failure-only
+history, including a recorded repair of its proven truncated tail, is retained
+without inventing authority. Unreadable
 or inconsistent plan, state, declaration, history, or canonical workspace-digest
 evidence fails before confirmation. The
 reviewed predecessor evidence is revalidated under the world mutation lock
@@ -37,10 +40,11 @@ before application; if that lock guards transition recovery, the recovered
 authority must reproduce the reviewed changes and workspace classification
 before application continues. Immediately before successor start, after any
 predecessor has stopped, Kenogram must capture and fsync a stable canonical
-workspace tree. New and inactive worlds must still equal their reviewed empty or
-exact state. A verified active predecessor may advance its workspace until stop;
-that final tree is authoritative handoff evidence, not a claim that its bytes
-were frozen at confirmation. Operators requiring byte-exact review first run
+workspace tree. New and inactive worlds must preserve every reviewed workspace
+entry exactly; only missing empty mount roots for the reviewed candidate may be
+added before cutover. A verified active predecessor may advance its workspace
+until stop; that final tree is authoritative handoff evidence, not a claim that
+its bytes were frozen at confirmation. Operators requiring byte-exact review first run
 `down`, then review and apply. `down`, `destroy`, `enter --repair`,
 `status`, `allow`, and `worlds` operate only from host-side state. `version`
 reports build provenance.

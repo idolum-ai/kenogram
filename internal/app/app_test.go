@@ -60,6 +60,70 @@ type workspaceStartingRunner struct {
 
 type cancellationRunner struct{ runtimeRunner }
 
+type workspaceMountRunner struct {
+	runtimeRunner
+	mounts  map[string][]map[string]any
+	running map[string]bool
+}
+
+func (r *workspaceMountRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	raw, err := r.runtimeRunner.Run(ctx, name, args...)
+	if err != nil || len(args) == 0 {
+		return raw, err
+	}
+	switch args[0] {
+	case "create":
+		container := ""
+		mounts := []map[string]any{}
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--name" && i+1 < len(args) {
+				container = args[i+1]
+			}
+			if args[i] != "--mount" || i+1 >= len(args) {
+				continue
+			}
+			mount := map[string]any{"RW": false}
+			fields := strings.Split(args[i+1], ",")
+			for _, field := range fields {
+				switch {
+				case strings.HasPrefix(field, "src="):
+					mount["Source"] = strings.TrimPrefix(field, "src=")
+				case strings.HasPrefix(field, "dst="):
+					mount["Destination"] = strings.TrimPrefix(field, "dst=")
+				case field == "rw":
+					mount["RW"] = true
+				}
+			}
+			mount["Mode"] = strings.Join(fields[3:], ",")
+			mounts = append(mounts, mount)
+		}
+		if r.mounts == nil {
+			r.mounts = map[string][]map[string]any{}
+			r.running = map[string]bool{}
+		}
+		r.mounts[container] = mounts
+		r.running[container] = false
+	case "start":
+		r.running[args[len(args)-1]] = true
+	case "stop":
+		r.running[args[len(args)-1]] = false
+	case "inspect":
+		container := args[len(args)-1]
+		var documents []map[string]any
+		if err := json.Unmarshal(raw, &documents); err != nil || len(documents) != 1 {
+			return nil, fmt.Errorf("rewrite inspect fixture: %w", err)
+		}
+		documents[0]["Mounts"] = r.mounts[container]
+		state := documents[0]["State"].(map[string]any)
+		state["Running"] = r.running[container]
+		if !r.running[container] {
+			state["Pid"] = float64(0)
+		}
+		return json.Marshal(documents)
+	}
+	return raw, nil
+}
+
 func (r *cancellationRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	if len(args) > 0 && args[0] == "ps" {
 		<-ctx.Done()
@@ -408,6 +472,173 @@ func TestCompareUpAllowsFailureOnlyHistoryForRetry(t *testing.T) {
 	}
 	if comparison.Workspace != "workspace: new (no carried state)" {
 		t.Fatalf("workspace = %q", comparison.Workspace)
+	}
+}
+
+func TestFailedFirstCreateRemainsReviewable(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &failOnceRunner{prefix: "create"}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpReviewed(context.Background(), prepared, comparison); err == nil || !strings.Contains(err.Error(), "injected create failure") {
+		t.Fatalf("first apply error = %v", err)
+	}
+	retry, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.Workspace != "workspace: new (no carried state)" {
+		t.Fatalf("retry workspace = %q", retry.Workspace)
+	}
+	if err := a.UpReviewed(context.Background(), prepared, retry); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFailedStartedFirstApplyPreservesCarriedWorkspace(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &failOnceRunner{prefix: "inspect"}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	a.lifecycleCheckpoint = func(name string) {
+		if name != "successor-started" {
+			return
+		}
+		if err := os.WriteFile(filepath.Join(layout.WorkspacePath("/workspace"), "inhabitant-data"), []byte("preserve"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.UpReviewed(context.Background(), prepared, comparison); err == nil || !strings.Contains(err.Error(), "injected inspect failure") {
+		t.Fatalf("first apply error = %v", err)
+	}
+	if _, err := a.CompareUp(prepared); err == nil || !strings.Contains(err.Error(), "carried workspace entries exist") {
+		t.Fatalf("retry comparison error = %v", err)
+	}
+}
+
+func TestUpReviewedAcceptsQuiescentWorkspaceScaffolding(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		workspace []string
+	}{
+		{name: "add path", workspace: []string{"/workspace", "/data"}},
+		{name: "replace path", workspace: []string{"/data"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			prepared := preparedFixture()
+			runner := &workspaceMountRunner{}
+			runner.planDigest = prepared.Result.PlanDigest
+			runner.declDigest = prepared.Result.DeclarationDigest
+			a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+			if err := a.Up(context.Background(), prepared); err != nil {
+				t.Fatal(err)
+			}
+			layout := worldfs.For(base, "w")
+			if err := os.WriteFile(filepath.Join(layout.WorkspacePath("/workspace"), "carried"), []byte("stable"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.Down(context.Background(), "w"); err != nil {
+				t.Fatal(err)
+			}
+			successor := prepared
+			successor.Result.Plan.Workspace = test.workspace
+			refreshPreparedPlanDigest(&successor)
+			runner.successorPlanDigest = successor.Result.PlanDigest
+			runner.successorDeclDigest = successor.Result.DeclarationDigest
+			comparison, err := a.CompareUp(successor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := a.UpReviewed(context.Background(), successor, comparison); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := os.ReadFile(filepath.Join(layout.WorkspacePath("/workspace"), "carried")); err != nil || string(got) != "stable" {
+				t.Fatalf("carried workspace = %q, %v", got, err)
+			}
+			if info, err := os.Stat(layout.WorkspacePath("/data")); err != nil || !info.IsDir() {
+				t.Fatalf("candidate scaffold = %#v, %v", info, err)
+			}
+		})
+	}
+}
+
+func TestCompareUpAllowsRepairedFailureOnlyHistory(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	prepared := preparedFixture()
+	if _, err := history.Append(layout.History, history.Record{Action: "up", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, Outcome: "failed", Detail: "create: injected"}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(layout.History, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{\"truncated\":"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeRunner{}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.RepairHistory("w"); err != nil {
+		t.Fatal(err)
+	}
+	records, err := history.Verify(layout.History)
+	if err != nil || len(records) != 2 {
+		t.Fatalf("repaired history = %#v, %v", records, err)
+	}
+	repair := records[1]
+	if repair.Action != "history-repair" || repair.Outcome != "truncated-tail-removed" || repair.PlanDigest != "" || repair.DeclarationDigest != "" || len(repair.ImageDigests) != 0 || repair.WorkspaceDigest != "" || repair.Detail != "" {
+		t.Fatalf("repair record carries authority: %#v", repair)
+	}
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpReviewed(context.Background(), prepared, comparison); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompareUpRejectsAmbiguousHistoryRepair(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		records []history.Record
+	}{
+		{name: "standalone repair", records: []history.Record{{Action: "history-repair", Outcome: "truncated-tail-removed"}}},
+		{name: "repair with authority field", records: []history.Record{{Action: "up", Outcome: "failed"}, {Action: "history-repair", Outcome: "truncated-tail-removed", WorkspaceDigest: strings.Repeat("a", sha256.Size*2)}}},
+		{name: "repair after applied authority", records: []history.Record{{Action: "up", Outcome: "applied"}, {Action: "history-repair", Outcome: "truncated-tail-removed"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			layout := worldfs.For(base, "w")
+			if err := layout.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			for i, record := range test.records {
+				if _, err := history.Append(layout.History, record, time.Unix(int64(i+1), 0)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := (&App{BaseDir: base}).CompareUp(preparedFixture()); err == nil || !strings.Contains(err.Error(), "authoritative history exists") {
+				t.Fatalf("comparison error = %v", err)
+			}
+		})
 	}
 }
 

@@ -252,10 +252,26 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 		}
 	}
 	generation := l.NextGeneration()
+	var workspaceBeforeScaffolding *worldfs.DigestTree
 	if reviewed == nil || reviewed.workspaceMode != workspaceModeActive {
 		before, digestErr := a.digest(l.Workspace)
 		if digestErr != nil {
 			return fmt.Errorf("digest workspace before staging: %w", digestErr)
+		}
+		if reviewed != nil {
+			switch reviewed.workspaceMode {
+			case workspaceModeEmpty:
+				if !workspaceHasOnlyEmptyMounts(before, l, prepared.Result.Plan.Workspace) {
+					return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
+				}
+			case workspaceModeExact:
+				if before.Root != reviewed.workspaceRoot {
+					return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
+				}
+			default:
+				return fmt.Errorf("reviewed workspace mode is invalid")
+			}
+			workspaceBeforeScaffolding = &before
 		}
 		fmt.Fprintf(a.Out, "workspace: %d entries (%s)\n", len(before.Entries), worldfs.ShortDigest(before.Root))
 	}
@@ -355,12 +371,8 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 	}
 	if reviewed != nil {
 		switch reviewed.workspaceMode {
-		case workspaceModeEmpty:
-			if !workspaceHasOnlyEmptyMounts(cutoverWorkspace, l, prepared.Result.Plan.Workspace) {
-				return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
-			}
-		case workspaceModeExact:
-			if cutoverWorkspace.Root != reviewed.workspaceRoot {
+		case workspaceModeEmpty, workspaceModeExact:
+			if workspaceBeforeScaffolding == nil || !workspaceMatchesScaffolding(*workspaceBeforeScaffolding, cutoverWorkspace, l, prepared.Result.Plan.Workspace) {
 				return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
 			}
 		case workspaceModeActive:
@@ -590,7 +602,7 @@ func (a *App) CompareUpContext(ctx context.Context, prepared Prepared) (UpCompar
 		}
 		return UpComparison{}, fmt.Errorf("digest current workspace: %w", currentErr)
 	}
-	if !priorExists && workspaceHasNoCarriedEntries(current) {
+	if !priorExists && workspaceHasOnlyEmptyMounts(current, l, prepared.Result.Plan.Workspace) {
 		if err := verifyComparisonHistory(l, false, transitionEvidence); err != nil {
 			return UpComparison{}, err
 		}
@@ -693,24 +705,72 @@ func validateComparisonState(state worldfs.State, world string, allowedStatuses 
 	return nil
 }
 
-func workspaceHasNoCarriedEntries(tree worldfs.DigestTree) bool {
-	return len(tree.Entries) == 1 && tree.Entries[0].Path == "" && tree.Entries[0].Type == "directory"
-}
-
 func workspaceHasOnlyEmptyMounts(tree worldfs.DigestTree, l worldfs.Layout, targets []string) bool {
-	expected := map[string]struct{}{"": {}}
+	allowed := make(map[string]struct{}, len(targets))
 	for _, target := range targets {
-		expected[filepath.Base(l.WorkspacePath(target))] = struct{}{}
+		allowed[filepath.Base(l.WorkspacePath(target))] = struct{}{}
 	}
-	if len(tree.Entries) != len(expected) {
+	if len(tree.Entries) == 0 || tree.Entries[0].Path != "" || tree.Entries[0].Type != "directory" {
 		return false
 	}
-	for _, entry := range tree.Entries {
-		if _, ok := expected[entry.Path]; !ok || entry.Type != "directory" || entry.Mode != 0o700 || entry.Size != 0 || entry.SHA256 != "" || entry.Link != "" {
+	for _, entry := range tree.Entries[1:] {
+		if _, ok := allowed[entry.Path]; !ok || !isEmptyWorkspaceMount(entry) {
 			return false
 		}
 	}
 	return true
+}
+
+// workspaceMatchesScaffolding proves that mounts changed no reviewed entry and
+// added only the candidate's missing empty mount roots. This distinguishes
+// deterministic Kenogram structure from carried or externally changed data.
+func workspaceMatchesScaffolding(before, after worldfs.DigestTree, l worldfs.Layout, targets []string) bool {
+	baseline := make(map[string]worldfs.DigestEntry, len(before.Entries))
+	for _, entry := range before.Entries {
+		baseline[entry.Path] = entry
+	}
+	allowedAdded := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		path := filepath.Base(l.WorkspacePath(target))
+		if entry, ok := baseline[path]; ok {
+			if entry.Type != "directory" {
+				return false
+			}
+		} else {
+			allowedAdded[path] = struct{}{}
+		}
+	}
+	observed := make(map[string]worldfs.DigestEntry, len(after.Entries))
+	for _, entry := range after.Entries {
+		observed[entry.Path] = entry
+		if prior, ok := baseline[entry.Path]; ok {
+			if entry != prior {
+				return false
+			}
+			continue
+		}
+		if _, ok := allowedAdded[entry.Path]; !ok || !isEmptyWorkspaceMount(entry) {
+			return false
+		}
+	}
+	if len(observed) != len(baseline)+len(allowedAdded) {
+		return false
+	}
+	for path := range baseline {
+		if _, ok := observed[path]; !ok {
+			return false
+		}
+	}
+	for path := range allowedAdded {
+		if _, ok := observed[path]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func isEmptyWorkspaceMount(entry worldfs.DigestEntry) bool {
+	return entry.Type == "directory" && entry.Mode == 0o700 && entry.Size == 0 && entry.SHA256 == "" && entry.Link == ""
 }
 
 func directoryHasEntries(path string) (bool, error) {
@@ -752,12 +812,27 @@ func validateNewWorldArtifacts(l worldfs.Layout) error {
 	if err != nil {
 		return fmt.Errorf("verify predecessor history: %w", err)
 	}
-	for _, record := range records {
-		if record.Action != "up" || record.Outcome != "failed" {
-			return fmt.Errorf("predecessor state is missing while authoritative history exists")
-		}
+	if !historyIsAuthorityFree(records) {
+		return fmt.Errorf("predecessor state is missing while authoritative history exists")
 	}
 	return nil
+}
+
+func historyIsAuthorityFree(records []history.Record) bool {
+	seenFailure := false
+	for _, record := range records {
+		switch {
+		case record.Action == "up" && record.Outcome == "failed":
+			seenFailure = true
+		case record.Action == "history-repair" && record.Outcome == "truncated-tail-removed":
+			if !seenFailure || record.PlanDigest != "" || record.DeclarationDigest != "" || len(record.ImageDigests) != 0 || record.WorkspaceDigest != "" || record.Detail != "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func verifyComparisonHistory(l worldfs.Layout, priorExists bool, transition *worldfs.Transition) error {
