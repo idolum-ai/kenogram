@@ -45,6 +45,9 @@ type App struct {
 	// proxyReady is nil in production. Lifecycle crash tests replace the real
 	// control round trip because their proxy process is a persistence fixture.
 	proxyReady func(worldfs.Layout) bool
+	// digestWorkspace is nil in production. Tests use it to prove that a live
+	// predecessor is not required to produce a stable tree before cutover.
+	digestWorkspace func(string) (worldfs.DigestTree, error)
 }
 
 func New() (*App, error) {
@@ -63,6 +66,13 @@ func (a *App) checkpoint(name string) {
 	if a.lifecycleCheckpoint != nil {
 		a.lifecycleCheckpoint(name)
 	}
+}
+
+func (a *App) digest(path string) (worldfs.DigestTree, error) {
+	if a.digestWorkspace != nil {
+		return a.digestWorkspace(path)
+	}
+	return worldfs.Digest(path)
 }
 
 func (a *App) proxyIsReady(ctx context.Context, l worldfs.Layout) bool {
@@ -242,11 +252,13 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 		}
 	}
 	generation := l.NextGeneration()
-	before, err := worldfs.Digest(l.Workspace)
-	if err != nil {
-		return fmt.Errorf("digest workspace before staging: %w", err)
+	if reviewed == nil || reviewed.workspaceMode != workspaceModeActive {
+		before, digestErr := a.digest(l.Workspace)
+		if digestErr != nil {
+			return fmt.Errorf("digest workspace before staging: %w", digestErr)
+		}
+		fmt.Fprintf(a.Out, "workspace: %d entries (%s)\n", len(before.Entries), worldfs.ShortDigest(before.Root))
 	}
-	fmt.Fprintf(a.Out, "workspace: %d entries (%s)\n", len(before.Entries), worldfs.ShortDigest(before.Root))
 	mounts, err := a.mounts(l, prepared.Result)
 	if err != nil {
 		return err
@@ -337,7 +349,7 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 		}
 		a.checkpoint("predecessor-stopped")
 	}
-	cutoverWorkspace, digestErr := worldfs.Digest(l.Workspace)
+	cutoverWorkspace, digestErr := a.digest(l.Workspace)
 	if digestErr != nil {
 		return fmt.Errorf("capture workspace at cutover: %w", digestErr)
 	}

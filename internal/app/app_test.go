@@ -49,6 +49,7 @@ type workspaceMutatingRunner struct {
 	runtimeRunner
 	workspace string
 	mutated   bool
+	stopped   bool
 }
 
 type workspaceStartingRunner struct {
@@ -78,13 +79,18 @@ func (r *workspaceStartingRunner) Run(ctx context.Context, name string, args ...
 }
 
 func (r *workspaceMutatingRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	if len(args) > 0 && args[0] == "stop" && !r.mutated {
+	stopping := len(args) > 0 && args[0] == "stop"
+	if stopping && !r.mutated {
 		r.mutated = true
 		if err := os.WriteFile(filepath.Join(r.workspace, "after-review"), []byte("changed"), 0o600); err != nil {
 			return nil, err
 		}
 	}
-	return r.runtimeRunner.Run(ctx, name, args...)
+	raw, err := r.runtimeRunner.Run(ctx, name, args...)
+	if stopping && err == nil {
+		r.stopped = true
+	}
+	return raw, err
 }
 
 func (r *stoppedRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -728,6 +734,14 @@ func TestUpReviewedCarriesWorkspaceAdvancedByActivePredecessor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	digestCalls := 0
+	a.digestWorkspace = func(path string) (worldfs.DigestTree, error) {
+		digestCalls++
+		if !runner.stopped {
+			return worldfs.DigestTree{}, fmt.Errorf("live workspace cannot be observed atomically")
+		}
+		return worldfs.Digest(path)
+	}
 	cutoverRecorded := false
 	a.lifecycleCheckpoint = func(name string) {
 		if name != "cutover-workspace-recorded" {
@@ -751,6 +765,9 @@ func TestUpReviewedCarriesWorkspaceAdvancedByActivePredecessor(t *testing.T) {
 	}
 	if !cutoverRecorded {
 		t.Fatal("cutover workspace was not durably recorded")
+	}
+	if digestCalls != 1 {
+		t.Fatalf("workspace digest calls = %d, want only the post-stop cutover", digestCalls)
 	}
 	if !containsCall(runner.calls, "start ", "kenogram-w-g2") {
 		t.Fatalf("successor did not start with authoritative workspace: %v", runner.calls)
