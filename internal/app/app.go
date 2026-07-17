@@ -322,12 +322,15 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 		}
 		a.checkpoint("predecessor-stopped")
 	}
-	if reviewed != nil && reviewed.workspaceRoot != "" {
+	if reviewed != nil {
 		cutoverWorkspace, digestErr := worldfs.Digest(l.Workspace)
 		if digestErr != nil {
 			return fmt.Errorf("revalidate reviewed workspace at cutover: %w", digestErr)
 		}
-		if cutoverWorkspace.Root != reviewed.workspaceRoot {
+		if reviewed.workspaceRoot == "" && !workspaceHasOnlyEmptyMounts(cutoverWorkspace, l, prepared.Result.Plan.Workspace) {
+			return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
+		}
+		if reviewed.workspaceRoot != "" && cutoverWorkspace.Root != reviewed.workspaceRoot {
 			return fmt.Errorf("reviewed workspace changed before successor start; review the plan again")
 		}
 	}
@@ -440,6 +443,9 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 	var prior Prepared
 	priorExists := false
 	if transitionErr == nil {
+		if err := validateComparisonTransition(transition, prepared.Result.Plan.Name); err != nil {
+			return UpComparison{}, fmt.Errorf("validate predecessor transition: %w", err)
+		}
 		authoritative, _ := transitionAuthority(transition)
 		if authoritative != nil {
 			state = *authoritative
@@ -454,6 +460,9 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 		var err error
 		state, err = l.ReadState()
 		if err == nil {
+			if err := validateComparisonState(state, prepared.Result.Plan.Name, "running", "down"); err != nil {
+				return UpComparison{}, fmt.Errorf("validate predecessor state: %w", err)
+			}
 			loaded, loadErr := a.loadPredecessor(l, state)
 			if loadErr != nil {
 				return UpComparison{}, fmt.Errorf("prepare predecessor: %w", loadErr)
@@ -542,8 +551,76 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 	return newUpComparison(prepared, changes, workspace, transitionEvidence, stateEvidence, priorEvidence, &current, priorDigest)
 }
 
+func validateComparisonTransition(transition worldfs.Transition, world string) error {
+	successorStatus := "staging"
+	if transition.Phase == "commit" {
+		successorStatus = "running"
+	}
+	if err := validateComparisonState(transition.Successor, world, successorStatus); err != nil {
+		return fmt.Errorf("successor: %w", err)
+	}
+	if transition.Prior == nil {
+		if transition.PriorWasRunning {
+			return fmt.Errorf("prior is absent but recorded running")
+		}
+		if transition.Successor.Generation != 1 {
+			return fmt.Errorf("first successor generation is %d, not 1", transition.Successor.Generation)
+		}
+		return nil
+	}
+	if err := validateComparisonState(*transition.Prior, world, "running", "down"); err != nil {
+		return fmt.Errorf("prior: %w", err)
+	}
+	if transition.Successor.Generation != transition.Prior.Generation+1 {
+		return fmt.Errorf("successor generation %d does not follow prior generation %d", transition.Successor.Generation, transition.Prior.Generation)
+	}
+	if transition.PriorWasRunning && transition.Prior.Status != "running" {
+		return fmt.Errorf("prior is recorded running with status %q", transition.Prior.Status)
+	}
+	return nil
+}
+
+func validateComparisonState(state worldfs.State, world string, allowedStatuses ...string) error {
+	if state.Name != world {
+		return fmt.Errorf("name %q does not match world %q", state.Name, world)
+	}
+	if state.Generation < 1 {
+		return fmt.Errorf("generation %d is not positive", state.Generation)
+	}
+	wantContainer := backend.ContainerName(world, state.Generation)
+	if state.Container != wantContainer {
+		return fmt.Errorf("container %q does not match %q", state.Container, wantContainer)
+	}
+	if !slices.Contains(allowedStatuses, state.Status) {
+		return fmt.Errorf("status %q is not valid here", state.Status)
+	}
+	if state.ProxyPID < 0 {
+		return fmt.Errorf("proxy PID %d is negative", state.ProxyPID)
+	}
+	if (state.Status == "down" || state.Status == "staging") && state.ProxyPID != 0 {
+		return fmt.Errorf("status %q has proxy PID %d", state.Status, state.ProxyPID)
+	}
+	return nil
+}
+
 func workspaceHasNoCarriedEntries(tree worldfs.DigestTree) bool {
 	return len(tree.Entries) == 1 && tree.Entries[0].Path == "" && tree.Entries[0].Type == "directory"
+}
+
+func workspaceHasOnlyEmptyMounts(tree worldfs.DigestTree, l worldfs.Layout, targets []string) bool {
+	expected := map[string]struct{}{"": {}}
+	for _, target := range targets {
+		expected[filepath.Base(l.WorkspacePath(target))] = struct{}{}
+	}
+	if len(tree.Entries) != len(expected) {
+		return false
+	}
+	for _, entry := range tree.Entries {
+		if _, ok := expected[entry.Path]; !ok || entry.Type != "directory" || entry.Mode != 0o700 || entry.Size != 0 || entry.SHA256 != "" || entry.Link != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func directoryHasEntries(path string) (bool, error) {

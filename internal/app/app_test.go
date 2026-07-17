@@ -428,6 +428,34 @@ func TestCompareUpRejectsCorruptAuthoritativeEvidence(t *testing.T) {
 			},
 			want: "validate digest tree",
 		},
+		{
+			name: "wrong state name",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				mutateState(t, layout, func(state *worldfs.State) { state.Name = "different-world" })
+			},
+			want: "does not match world",
+		},
+		{
+			name: "non-positive state generation",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				mutateState(t, layout, func(state *worldfs.State) { state.Generation = 0 })
+			},
+			want: "is not positive",
+		},
+		{
+			name: "non-canonical state container",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				mutateState(t, layout, func(state *worldfs.State) { state.Container = "" })
+			},
+			want: "does not match \"kenogram-w-g1\"",
+		},
+		{
+			name: "invalid state status",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				mutateState(t, layout, func(state *worldfs.State) { state.Status = "nonsense" })
+			},
+			want: "is not valid here",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -444,6 +472,18 @@ func TestCompareUpRejectsCorruptAuthoritativeEvidence(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func mutateState(t *testing.T, layout worldfs.Layout, mutate func(*worldfs.State)) {
+	t.Helper()
+	state, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&state)
+	if err := layout.WriteState(state); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -475,7 +515,7 @@ func TestCompareUpVerifiesOptionalFirstGenerationTransitionHistory(t *testing.T)
 	if err := layout.WriteTransition(worldfs.Transition{
 		Version:   1,
 		Phase:     "rollback",
-		Successor: worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1"},
+		Successor: worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", Status: "staging"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -491,6 +531,41 @@ func TestCompareUpVerifiesOptionalFirstGenerationTransitionHistory(t *testing.T)
 	}
 	if _, err := a.CompareUp(preparedFixture()); err != nil {
 		t.Fatalf("missing first-generation transition history = %v", err)
+	}
+}
+
+func TestValidateComparisonTransitionRejectsInconsistentStates(t *testing.T) {
+	valid := worldfs.Transition{
+		Version:         1,
+		Phase:           "rollback",
+		Prior:           &worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", Status: "running"},
+		PriorWasRunning: true,
+		Successor:       worldfs.State{Name: "w", Generation: 2, Container: "kenogram-w-g2", Status: "staging"},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*worldfs.Transition)
+		want   string
+	}{
+		{name: "wrong successor name", mutate: func(transition *worldfs.Transition) { transition.Successor.Name = "other" }, want: "does not match world"},
+		{name: "wrong successor container", mutate: func(transition *worldfs.Transition) { transition.Successor.Container = "other" }, want: "does not match"},
+		{name: "wrong successor status", mutate: func(transition *worldfs.Transition) { transition.Successor.Status = "running" }, want: "is not valid here"},
+		{name: "nonsequential generation", mutate: func(transition *worldfs.Transition) {
+			transition.Successor.Generation = 3
+			transition.Successor.Container = "kenogram-w-g3"
+		}, want: "does not follow"},
+		{name: "running down prior", mutate: func(transition *worldfs.Transition) { transition.Prior.Status = "down" }, want: "recorded running"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transition := valid
+			prior := *valid.Prior
+			transition.Prior = &prior
+			test.mutate(&transition)
+			if err := validateComparisonTransition(transition, "w"); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -534,7 +609,7 @@ paths = ["/workspace"]
 		Prior:            &state,
 		PriorDeclaration: prepared.Raw,
 		PriorPlan:        recoveryPlan,
-		Successor:        worldfs.State{Name: "w", Generation: 2},
+		Successor:        worldfs.State{Name: "w", Generation: 2, Container: "kenogram-w-g2", Status: "staging"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -589,6 +664,36 @@ func TestUpReviewedRejectsWorkspaceChangedAtCutover(t *testing.T) {
 	}
 	if !containsCall(runner.calls, "start ", "kenogram-w-g1") {
 		t.Fatalf("predecessor was not restored: %v", runner.calls)
+	}
+	if _, err := os.Stat(layout.Transition); !os.IsNotExist(err) {
+		t.Fatalf("rollback transition remains: %v", err)
+	}
+}
+
+func TestUpReviewedRejectsNewWorldWorkspaceCreatedAtCutover(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	a.lifecycleCheckpoint = func(name string) {
+		if name != "rollback-recorded" {
+			return
+		}
+		if err := os.WriteFile(filepath.Join(layout.Workspace, "after-review"), []byte("changed"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err = a.UpReviewed(context.Background(), prepared, comparison)
+	if err == nil || !strings.Contains(err.Error(), "reviewed workspace changed before successor start") {
+		t.Fatalf("error = %v", err)
+	}
+	if containsCall(runner.calls, "start ", "kenogram-w-g1") {
+		t.Fatalf("successor started with unreviewed workspace: %v", runner.calls)
 	}
 	if _, err := os.Stat(layout.Transition); !os.IsNotExist(err) {
 		t.Fatalf("rollback transition remains: %v", err)
