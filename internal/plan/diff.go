@@ -25,15 +25,15 @@ type differ struct {
 
 func Diff(before, after Plan) ([]Change, error) {
 	d := &differ{
-		beforeCopies: append([]Copy(nil), before.Copies...),
-		afterCopies:  append([]Copy(nil), after.Copies...),
+		beforeCopies: cloneCopies(before.Copies),
+		afterCopies:  cloneCopies(after.Copies),
 	}
 
 	// Plans are passed by value, but their slices still share backing arrays
 	// with the caller. Redact every secret copy on private slices before any
 	// value can reach a Change, including inserted and removed copies.
-	before.Copies = append([]Copy(nil), before.Copies...)
-	after.Copies = append([]Copy(nil), after.Copies...)
+	before.Copies = cloneCopies(before.Copies)
+	after.Copies = cloneCopies(after.Copies)
 	for i := range before.Copies {
 		if before.Copies[i].Secret {
 			before.Copies[i].SourceDigest = "<redacted>"
@@ -54,6 +54,17 @@ func Diff(before, after Plan) ([]Change, error) {
 		return nil, err
 	}
 	return d.diffValue("", left, right), nil
+}
+
+// cloneCopies preserves the canonical distinction between a nil (null) slice
+// and a present-but-empty array while giving redaction a private backing array.
+func cloneCopies(copies []Copy) []Copy {
+	if copies == nil {
+		return nil
+	}
+	cloned := make([]Copy, len(copies))
+	copy(cloned, copies)
+	return cloned
 }
 
 func decodeValue(value any) (any, error) {

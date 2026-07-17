@@ -111,6 +111,18 @@ func TestDiffSequenceEditShapes(t *testing.T) {
 		want   []Change
 	}{
 		{
+			name:   "first insert",
+			before: []Copy{},
+			after:  []Copy{a},
+			want:   []Change{{Path: "copies[0]", After: rendered(t, a)}},
+		},
+		{
+			name:   "last remove",
+			before: []Copy{a},
+			after:  []Copy{},
+			want:   []Change{{Path: "copies[0]", Before: rendered(t, a)}},
+		},
+		{
 			name:   "insert",
 			before: []Copy{a, b, c},
 			after:  []Copy{x, a, b, c},
@@ -143,6 +155,21 @@ func TestDiffSequenceEditShapes(t *testing.T) {
 			after:  []Copy{a, b},
 			want:   []Change{{Path: "copies[1]", Before: rendered(t, a)}},
 		},
+		{
+			name:   "duplicate insertion",
+			before: []Copy{a, a, b},
+			after:  []Copy{a, x, a, b},
+			want:   []Change{{Path: "copies[1]", After: rendered(t, x)}},
+		},
+		{
+			name:   "insert and modify",
+			before: []Copy{a, b, c},
+			after:  []Copy{x, a, b2, c},
+			want: []Change{
+				{Path: "copies[0]", After: rendered(t, x)},
+				{Path: "copies[2].source", Before: `"b"`, After: `"b2"`},
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -154,6 +181,17 @@ func TestDiffSequenceEditShapes(t *testing.T) {
 				t.Fatalf("changes\n got: %#v\nwant: %#v", changes, test.want)
 			}
 		})
+	}
+}
+
+func TestDiffPreservesNilAndEmptyCopies(t *testing.T) {
+	changes, err := Diff(Plan{}, Plan{Copies: []Copy{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Change{Path: "copies", Before: "null", After: "[]"}
+	if len(changes) != 1 || changes[0] != want {
+		t.Fatalf("nil to empty copies = %#v, want %#v", changes, want)
 	}
 }
 
@@ -226,6 +264,38 @@ func TestDiffBoundsLargeSequenceAlignment(t *testing.T) {
 	if len(changes) != 1 || changes[0].Path != "workspace_paths" {
 		t.Fatalf("large sequence fallback = %#v", changes)
 	}
+}
+
+func TestExactSequenceMatchesUsesInclusiveGlobalBudget(t *testing.T) {
+	t.Run("exact boundary", func(t *testing.T) {
+		d := differ{}
+		sequence := make([]any, 1023)
+		if _, bounded := d.exactSequenceMatches(sequence, sequence); !bounded {
+			t.Fatal("alignment at exact cell budget fell back")
+		}
+		if d.alignedCells != maxAlignmentCells {
+			t.Fatalf("aligned cells = %d, want %d", d.alignedCells, maxAlignmentCells)
+		}
+		if _, bounded := d.exactSequenceMatches(nil, nil); bounded {
+			t.Fatal("alignment beyond exhausted budget did not fall back")
+		}
+	})
+
+	t.Run("cumulative", func(t *testing.T) {
+		d := differ{}
+		sequence := make([]any, 511)
+		for i := 0; i < 4; i++ {
+			if _, bounded := d.exactSequenceMatches(sequence, sequence); !bounded {
+				t.Fatalf("alignment %d fell back before cumulative budget", i+1)
+			}
+		}
+		if d.alignedCells != maxAlignmentCells {
+			t.Fatalf("aligned cells = %d, want %d", d.alignedCells, maxAlignmentCells)
+		}
+		if _, bounded := d.exactSequenceMatches(nil, nil); bounded {
+			t.Fatal("alignment beyond cumulative budget did not fall back")
+		}
+	})
 }
 
 func TestDiffLargeSequenceFallbackStillReportsSecretDigestChange(t *testing.T) {
