@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -83,6 +84,17 @@ type Prepared struct {
 	Path        string
 }
 
+// UpComparison is the complete predecessor evidence rendered before an up.
+// Snapshot is opaque to callers; UpReviewed revalidates it under the world
+// mutation lock so the authority reviewed by an operator cannot change between
+// review and application.
+type UpComparison struct {
+	Changes         []plan.Change
+	Workspace       string
+	Snapshot        string
+	RecoveryPending bool
+}
+
 // GenerationObservation keeps recorded authority distinct from runtime
 // observation. A missing runtime is evidence too, so Exists is explicit.
 type GenerationObservation struct {
@@ -119,6 +131,19 @@ func PrepareBytes(raw []byte, path string) (Prepared, error) {
 }
 
 func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
+	return a.up(ctx, prepared, nil)
+}
+
+// UpReviewed applies a prepared declaration only while the predecessor
+// evidence still matches a comparison acquired with CompareUp.
+func (a *App) UpReviewed(ctx context.Context, prepared Prepared, comparison UpComparison) error {
+	if comparison.Snapshot == "" {
+		return fmt.Errorf("reviewed comparison snapshot is empty")
+	}
+	return a.up(ctx, prepared, &comparison)
+}
+
+func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison) (retErr error) {
 	if err := naming.World(prepared.Result.Plan.Name); err != nil {
 		return err
 	}
@@ -134,8 +159,26 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 		return err
 	}
 	defer lock.Release()
+	if reviewed != nil {
+		current, compareErr := a.CompareUp(prepared)
+		if compareErr != nil {
+			return fmt.Errorf("revalidate reviewed comparison: %w", compareErr)
+		}
+		if current.Snapshot != reviewed.Snapshot {
+			return fmt.Errorf("reviewed predecessor evidence changed; review the plan again")
+		}
+	}
 	if err := a.recoverTransition(ctx, l); err != nil {
 		return fmt.Errorf("recover interrupted transition: %w", err)
+	}
+	if reviewed != nil && reviewed.RecoveryPending {
+		recovered, compareErr := a.CompareUp(prepared)
+		if compareErr != nil {
+			return fmt.Errorf("compare recovered predecessor: %w", compareErr)
+		}
+		if !slices.Equal(recovered.Changes, reviewed.Changes) || recovered.Workspace != reviewed.Workspace {
+			return fmt.Errorf("transition recovery changed predecessor evidence; review the plan again")
+		}
 	}
 	prior, priorErr := l.ReadState()
 	if priorErr != nil && !os.IsNotExist(priorErr) {
@@ -351,6 +394,199 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 	return nil
 }
 
+// CompareUp acquires the settled or transition-authoritative predecessor plan
+// and the carried-workspace evidence that runUp must render before confirmation.
+// Only a world with no authority, no orphaned durable evidence, and no carried
+// workspace entries is classified as new; every other read or validation
+// failure is returned to the caller.
+func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
+	if err := naming.World(prepared.Result.Plan.Name); err != nil {
+		return UpComparison{}, err
+	}
+	l := worldfs.For(a.BaseDir, prepared.Result.Plan.Name)
+
+	transition, transitionErr := l.ReadTransition()
+	if transitionErr != nil && !os.IsNotExist(transitionErr) {
+		return UpComparison{}, fmt.Errorf("read predecessor transition: %w", transitionErr)
+	}
+	var transitionEvidence *worldfs.Transition
+	if transitionErr == nil {
+		transitionEvidence = &transition
+	}
+
+	var state worldfs.State
+	var prior Prepared
+	priorExists := false
+	if transitionErr == nil {
+		authoritative, _ := transitionAuthority(transition)
+		if authoritative != nil {
+			state = *authoritative
+			loaded, err := a.authoritativePrepared(l, state)
+			if err != nil {
+				return UpComparison{}, fmt.Errorf("prepare authoritative predecessor: %w", err)
+			}
+			prior = loaded
+			priorExists = true
+		}
+	} else {
+		var err error
+		state, err = l.ReadState()
+		if err == nil {
+			loaded, loadErr := a.loadPredecessor(l, state)
+			if loadErr != nil {
+				return UpComparison{}, fmt.Errorf("prepare predecessor: %w", loadErr)
+			}
+			prior = loaded
+			priorExists = true
+		} else if !os.IsNotExist(err) {
+			return UpComparison{}, fmt.Errorf("read predecessor state: %w", err)
+		} else if _, stateEntryErr := os.Lstat(l.State); stateEntryErr == nil {
+			return UpComparison{}, fmt.Errorf("read predecessor state: %w", err)
+		} else if !os.IsNotExist(stateEntryErr) {
+			return UpComparison{}, fmt.Errorf("inspect predecessor state: %w", stateEntryErr)
+		} else if _, appliedErr := os.Lstat(l.Applied); appliedErr == nil {
+			return UpComparison{}, fmt.Errorf("predecessor state is missing while applied declaration exists")
+		} else if !os.IsNotExist(appliedErr) {
+			return UpComparison{}, fmt.Errorf("inspect predecessor declaration: %w", appliedErr)
+		} else if _, planErr := os.Lstat(l.AppliedPlan); planErr == nil {
+			return UpComparison{}, fmt.Errorf("predecessor state is missing while applied plan exists")
+		} else if !os.IsNotExist(planErr) {
+			return UpComparison{}, fmt.Errorf("inspect predecessor plan: %w", planErr)
+		} else if recorded, digestErr := directoryHasEntries(l.Digests); digestErr != nil {
+			return UpComparison{}, fmt.Errorf("inspect predecessor workspace digests: %w", digestErr)
+		} else if recorded {
+			return UpComparison{}, fmt.Errorf("predecessor state is missing while recorded workspace digests exist")
+		} else if err := validateNewWorldArtifacts(l); err != nil {
+			return UpComparison{}, err
+		}
+	}
+
+	changes := []plan.Change{}
+	if priorExists {
+		var err error
+		changes, err = plan.Diff(prior.Result.Plan, prepared.Result.Plan)
+		if err != nil {
+			return UpComparison{}, fmt.Errorf("compare predecessor plan: %w", err)
+		}
+	}
+
+	current, currentErr := worldfs.Digest(l.Workspace)
+	if currentErr != nil {
+		if !priorExists && errors.Is(currentErr, os.ErrNotExist) {
+			workspace := "workspace: new (no carried state)"
+			return newUpComparison(prepared, changes, workspace, transitionEvidence, nil, nil, nil, nil)
+		}
+		return UpComparison{}, fmt.Errorf("digest current workspace: %w", currentErr)
+	}
+	if !priorExists && workspaceHasNoCarriedEntries(current) {
+		return newUpComparison(prepared, changes, "workspace: new (no carried state)", transitionEvidence, nil, nil, nil, nil)
+	}
+	if !priorExists && transitionErr != nil {
+		return UpComparison{}, fmt.Errorf("predecessor state is missing while carried workspace entries exist")
+	}
+
+	workspace := fmt.Sprintf("workspace: new (%d entries, %s)", len(current.Entries), worldfs.ShortDigest(current.Root))
+	var priorDigest *worldfs.DigestTree
+	if priorExists {
+		var digest worldfs.DigestTree
+		var err error
+		if transitionErr == nil && transition.Phase == "commit" && transition.Workspace.Root != "" {
+			digest = transition.Workspace
+		} else {
+			digest, err = l.ReadDigest(state.Generation)
+		}
+		if err != nil {
+			return UpComparison{}, fmt.Errorf("read predecessor workspace digest: %w", err)
+		}
+		priorDigest = &digest
+		workspace = fmt.Sprintf("workspace: %d files changed since g%d (%s -> %s)", worldfs.ChangedFiles(digest, current), state.Generation, worldfs.ShortDigest(digest.Root), worldfs.ShortDigest(current.Root))
+	}
+	var stateEvidence *worldfs.State
+	var priorEvidence *Prepared
+	if priorExists {
+		stateEvidence = &state
+		priorEvidence = &prior
+	}
+	return newUpComparison(prepared, changes, workspace, transitionEvidence, stateEvidence, priorEvidence, &current, priorDigest)
+}
+
+func workspaceHasNoCarriedEntries(tree worldfs.DigestTree) bool {
+	return len(tree.Entries) == 1 && tree.Entries[0].Path == "" && tree.Entries[0].Type == "directory"
+}
+
+func directoryHasEntries(path string) (bool, error) {
+	directory, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer directory.Close()
+	entries, err := directory.Readdirnames(1)
+	if errors.Is(err, io.EOF) {
+		return false, nil
+	}
+	return len(entries) > 0, err
+}
+
+func validateNewWorldArtifacts(l worldfs.Layout) error {
+	for _, artifact := range []struct {
+		path string
+		name string
+	}{{l.ProxyPID, "proxy identity"}, {l.ProxySocket, "proxy socket"}} {
+		if _, err := os.Lstat(artifact.path); err == nil {
+			return fmt.Errorf("predecessor state is missing while %s exists", artifact.name)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect predecessor %s: %w", artifact.name, err)
+		}
+	}
+	records, err := history.Verify(l.History)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("verify predecessor history: %w", err)
+	}
+	for _, record := range records {
+		if record.Action != "up" || record.Outcome != "failed" {
+			return fmt.Errorf("predecessor state is missing while authoritative history exists")
+		}
+	}
+	return nil
+}
+
+func newUpComparison(prepared Prepared, changes []plan.Change, workspace string, transition *worldfs.Transition, state *worldfs.State, prior *Prepared, current, priorDigest *worldfs.DigestTree) (UpComparison, error) {
+	payload := struct {
+		Changes                    []plan.Change       `json:"changes"`
+		Workspace                  string              `json:"workspace"`
+		CandidatePlanDigest        string              `json:"candidate_plan_digest"`
+		CandidateDeclarationDigest string              `json:"candidate_declaration_digest"`
+		Transition                 *worldfs.Transition `json:"transition,omitempty"`
+		State                      *worldfs.State      `json:"state,omitempty"`
+		PriorPlanDigest            string              `json:"prior_plan_digest,omitempty"`
+		PriorDeclarationDigest     string              `json:"prior_declaration_digest,omitempty"`
+		CurrentWorkspaceRoot       string              `json:"current_workspace_root,omitempty"`
+		PredecessorWorkspaceRoot   string              `json:"predecessor_workspace_root,omitempty"`
+	}{Changes: changes, Workspace: workspace, CandidatePlanDigest: prepared.Result.PlanDigest, CandidateDeclarationDigest: prepared.Result.DeclarationDigest, Transition: transition, State: state}
+	if prior != nil {
+		payload.PriorPlanDigest = prior.Result.PlanDigest
+		payload.PriorDeclarationDigest = DeclarationDigest(prior.Raw)
+	}
+	if current != nil {
+		payload.CurrentWorkspaceRoot = current.Root
+	}
+	if priorDigest != nil {
+		payload.PredecessorWorkspaceRoot = priorDigest.Root
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return UpComparison{}, fmt.Errorf("encode comparison snapshot: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return UpComparison{Changes: changes, Workspace: workspace, Snapshot: hex.EncodeToString(sum[:]), RecoveryPending: transition != nil}, nil
+}
+
 func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, prepared Prepared, running bool) (adopted bool, retErr error) {
 	restarted := false
 	proxyStarted := false
@@ -496,6 +732,9 @@ func (a *App) loadPredecessor(l worldfs.Layout, prior worldfs.State) (Prepared, 
 	}
 	if prepared.Result.PlanDigest != prior.PlanDigest {
 		return Prepared{}, fmt.Errorf("applied predecessor plan %s does not match state %s", prepared.Result.PlanDigest, prior.PlanDigest)
+	}
+	if prepared.Result.DeclarationDigest != prior.DeclarationDigest {
+		return Prepared{}, fmt.Errorf("applied predecessor declaration %s does not match state %s", prepared.Result.DeclarationDigest, prior.DeclarationDigest)
 	}
 	return prepared, nil
 }
@@ -1582,28 +1821,6 @@ func (a *App) Worlds() ([]worldfs.State, error) {
 		states = append(states, s)
 	}
 	return states, nil
-}
-func (a *App) WorkspaceDrift(name string) (string, error) {
-	if err := naming.World(name); err != nil {
-		return "", err
-	}
-	l := worldfs.For(a.BaseDir, name)
-	current, err := worldfs.Digest(l.Workspace)
-	if os.IsNotExist(err) {
-		return "workspace: new (no carried state)", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	state, err := l.ReadState()
-	if err != nil {
-		return fmt.Sprintf("workspace: new (%d entries, %s)", len(current.Entries), worldfs.ShortDigest(current.Root)), nil
-	}
-	prior, err := l.ReadDigest(state.Generation)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("workspace: %d files changed since g%d (%s -> %s)", worldfs.ChangedFiles(prior, current), state.Generation, worldfs.ShortDigest(prior.Root), worldfs.ShortDigest(current.Root)), nil
 }
 func DeclarationDigest(raw []byte) string {
 	sum := sha256.Sum256(raw)

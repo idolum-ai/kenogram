@@ -19,6 +19,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/app"
 	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/doctor"
+	"github.com/idolum-ai/kenogram/internal/history"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
 
@@ -112,6 +113,276 @@ func TestJSONDryRun(t *testing.T) {
 	code := run([]string{"up", "--dry-run", "--json", filepath.Join(root, "kenogram.example.toml")}, &stdout, &stderr)
 	if code != 0 || !strings.Contains(stdout.String(), `"plan_digest"`) {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestJSONDryRunOfExistingWorldIsExactlyOneObject(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		changePlan  bool
+		wantChanges bool
+	}{
+		{name: "semantic and workspace changes", changePlan: true, wantChanges: true},
+		{name: "workspace-only drift"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			declaration := filepath.Join(t.TempDir(), "world.toml")
+			priorRaw := comparisonDeclaration("reviewed")
+			if err := os.WriteFile(declaration, []byte(priorRaw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			prior, err := app.Prepare(declaration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeComparisonWorld(t, base, prior, declaration)
+			if err := os.WriteFile(filepath.Join(worldfs.For(base, "reviewed").Workspace, "drift.txt"), []byte("changed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if test.changePlan {
+				if err := os.WriteFile(declaration, []byte(strings.Replace(priorRaw, "cpus = 1", "cpus = 2", 1)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previous := newApp
+			newApp = func(io.Writer) (*app.App, error) { return &app.App{BaseDir: base}, nil }
+			t.Cleanup(func() { newApp = previous })
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"up", "--dry-run", "--json", declaration}, &stdout, &stderr); code != 0 {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			var payload struct {
+				Changes   []map[string]any `json:"changes"`
+				Workspace string           `json:"workspace"`
+			}
+			decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+			if err := decoder.Decode(&payload); err != nil {
+				t.Fatalf("decode stdout: %v: %q", err, stdout.String())
+			}
+			if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+				t.Fatalf("stdout contains more than one JSON value: %v: %q", err, stdout.String())
+			}
+			if (len(payload.Changes) > 0) != test.wantChanges || !strings.Contains(payload.Workspace, "1 files changed") || stderr.Len() != 0 {
+				t.Fatalf("payload=%#v stderr=%q", payload, stderr.String())
+			}
+		})
+	}
+}
+
+func TestUpComparisonFailuresPrecedeOutputAndConfirmation(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		set  func(*testing.T, worldfs.Layout, app.Prepared)
+		want string
+	}{
+		{
+			name: "corrupt state",
+			set: func(t *testing.T, layout worldfs.Layout, _ app.Prepared) {
+				if err := os.WriteFile(layout.State, []byte("not-json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "read predecessor state: decode state",
+		},
+		{
+			name: "applied declaration without state",
+			set: func(t *testing.T, layout worldfs.Layout, prepared app.Prepared) {
+				if err := layout.WriteApplied(prepared.Raw); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "state is missing while applied declaration exists",
+		},
+		{
+			name: "applied plan without state",
+			set: func(t *testing.T, layout worldfs.Layout, _ app.Prepared) {
+				if err := layout.WriteAppliedPlan([]byte("{}")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "state is missing while applied plan exists",
+		},
+		{
+			name: "recorded workspace digest without state",
+			set: func(t *testing.T, layout worldfs.Layout, _ app.Prepared) {
+				if _, err := layout.WriteDigest(1, worldfs.DigestTree{Root: "orphan"}); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "state is missing while recorded workspace digests exist",
+		},
+		{
+			name: "carried workspace without state",
+			set: func(t *testing.T, layout worldfs.Layout, _ app.Prepared) {
+				if err := os.WriteFile(filepath.Join(layout.Workspace, "orphan"), []byte("data"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "state is missing while carried workspace entries exist",
+		},
+		{
+			name: "proxy identity without state",
+			set: func(t *testing.T, layout worldfs.Layout, _ app.Prepared) {
+				if err := os.WriteFile(layout.ProxyPID, []byte("123 1\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "state is missing while proxy identity exists",
+		},
+		{
+			name: "authoritative history without state",
+			set: func(t *testing.T, layout worldfs.Layout, prepared app.Prepared) {
+				if _, err := history.Append(layout.History, history.Record{Action: "up", PlanDigest: prepared.Result.PlanDigest, Outcome: "applied"}, time.Unix(1, 0)); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "state is missing while authoritative history exists",
+		},
+		{
+			name: "missing applied declaration",
+			set: func(t *testing.T, layout worldfs.Layout, prepared app.Prepared) {
+				if err := layout.WriteState(comparisonState(prepared, "missing.toml")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "prepare predecessor:",
+		},
+		{
+			name: "invalid applied declaration",
+			set: func(t *testing.T, layout worldfs.Layout, prepared app.Prepared) {
+				if err := layout.WriteState(comparisonState(prepared, layout.Applied)); err != nil {
+					t.Fatal(err)
+				}
+				if err := layout.WriteApplied([]byte("not-toml")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "prepare predecessor:",
+		},
+		{
+			name: "applied declaration digest mismatch",
+			set: func(t *testing.T, layout worldfs.Layout, prepared app.Prepared) {
+				state := comparisonState(prepared, layout.Applied)
+				state.DeclarationDigest = strings.Repeat("0", 64)
+				if err := layout.WriteState(state); err != nil {
+					t.Fatal(err)
+				}
+				if err := layout.WriteApplied(prepared.Raw); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "applied predecessor declaration",
+		},
+		{
+			name: "invalid applied recovery plan",
+			set: func(t *testing.T, layout worldfs.Layout, prepared app.Prepared) {
+				if err := layout.WriteState(comparisonState(prepared, layout.Applied)); err != nil {
+					t.Fatal(err)
+				}
+				if err := layout.WriteApplied(prepared.Raw); err != nil {
+					t.Fatal(err)
+				}
+				if err := layout.WriteAppliedPlan([]byte("not-json")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "decode applied plan",
+		},
+		{
+			name: "missing predecessor workspace digest",
+			set: func(t *testing.T, layout worldfs.Layout, prepared app.Prepared) {
+				if err := layout.WriteState(comparisonState(prepared, layout.Applied)); err != nil {
+					t.Fatal(err)
+				}
+				if err := layout.WriteApplied(prepared.Raw); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "read predecessor workspace digest:",
+		},
+		{
+			name: "missing current workspace",
+			set: func(t *testing.T, layout worldfs.Layout, prepared app.Prepared) {
+				if err := layout.WriteState(comparisonState(prepared, layout.Applied)); err != nil {
+					t.Fatal(err)
+				}
+				if err := layout.WriteApplied(prepared.Raw); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.RemoveAll(layout.Workspace); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "digest current workspace:",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			declaration := filepath.Join(t.TempDir(), "world.toml")
+			if err := os.WriteFile(declaration, []byte(comparisonDeclaration("reviewed")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := app.Prepare(declaration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			layout := worldfs.For(base, "reviewed")
+			if err := layout.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			test.set(t, layout, prepared)
+			previous := newApp
+			newApp = func(io.Writer) (*app.App, error) { return &app.App{BaseDir: base}, nil }
+			t.Cleanup(func() { newApp = previous })
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"up", "--dry-run", "--json", declaration}, &stdout, &stderr)
+			if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("code=%d stdout=%q stderr=%q, want %q", code, stdout.String(), stderr.String(), test.want)
+			}
+		})
+	}
+}
+
+func comparisonDeclaration(name string) string {
+	return `version = 1
+name = "` + name + `"
+[world]
+hostname = "` + name + `"
+base = "example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+workdir = "/workspace"
+user = "agent"
+[resources]
+cpus = 1
+memory_bytes = 268435456
+pids = 32
+[workspace]
+paths = ["/workspace"]
+`
+}
+
+func comparisonState(prepared app.Prepared, declarationPath string) worldfs.State {
+	return worldfs.State{Name: prepared.Result.Plan.Name, Generation: 1, Container: "kenogram-" + prepared.Result.Plan.Name + "-g1", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, DeclarationPath: declarationPath, Status: "running"}
+}
+
+func writeComparisonWorld(t *testing.T, base string, prepared app.Prepared, declarationPath string) {
+	t.Helper()
+	layout := worldfs.For(base, prepared.Result.Plan.Name)
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteState(comparisonState(prepared, declarationPath)); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteApplied(prepared.Raw); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := worldfs.Digest(layout.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.WriteDigest(1, digest); err != nil {
+		t.Fatal(err)
 	}
 }
 

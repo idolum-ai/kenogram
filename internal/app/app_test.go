@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -162,6 +164,149 @@ func TestUpRecordsAppliedOnlyAfterEvidence(t *testing.T) {
 	}
 	if !containsCall(runner.calls, "cp ", "/generated/. kenogram-w-g1:/") {
 		t.Fatalf("generated root contents were not copied to /: %v", runner.calls)
+	}
+}
+
+func TestUpReviewedRejectsEvidenceChangedAfterReview(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	prepared := preparedFixture()
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layout.Workspace, "appeared-after-review"), []byte("unreviewed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = a.UpReviewed(context.Background(), prepared, comparison)
+	if err == nil || !strings.Contains(err.Error(), "revalidate reviewed comparison") {
+		t.Fatalf("error = %v", err)
+	}
+	if containsCall(runner.calls, "create ", "") {
+		t.Fatalf("runtime mutated after stale review: %v", runner.calls)
+	}
+}
+
+func TestUpReviewedAcceptsItsOwnEmptyWorldDirectoryCreation(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	prepared := preparedFixture()
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpReviewed(context.Background(), prepared, comparison); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpReviewedRejectsDifferentSuccessorThanReviewed(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	reviewed := preparedFixture()
+	comparison, err := a.CompareUp(reviewed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	different := reviewed
+	different.Result.Plan.Resources.CPUs++
+	canonical, err := plan.Canonical(different.Result.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(canonical)
+	different.Result.PlanDigest = hex.EncodeToString(sum[:])
+	err = a.UpReviewed(context.Background(), different, comparison)
+	if err == nil || !strings.Contains(err.Error(), "reviewed predecessor evidence changed") {
+		t.Fatalf("error = %v", err)
+	}
+	if containsCall(runner.calls, "create ", "") {
+		t.Fatalf("runtime mutated after successor changed: %v", runner.calls)
+	}
+}
+
+func TestCompareUpAllowsFailureOnlyHistoryForRetry(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := history.Append(layout.History, history.Record{Action: "up", Outcome: "failed", Detail: "create: injected"}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{BaseDir: base}
+	comparison, err := a.CompareUp(preparedFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comparison.Workspace != "workspace: new (no carried state)" {
+		t.Fatalf("workspace = %q", comparison.Workspace)
+	}
+}
+
+func TestUpReviewedRecomparesAuthorityAfterRollbackRecovery(t *testing.T) {
+	base := t.TempDir()
+	raw := []byte(`version = 1
+name = "w"
+[world]
+hostname = "w"
+base = "base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+workdir = "/workspace"
+user = "agent"
+[resources]
+cpus = 1
+memory_bytes = 2
+pids = 3
+[workspace]
+paths = ["/workspace"]
+`)
+	prepared, err := PrepareBytes(raw, filepath.Join(base, "world.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	state, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryPlan, err := encodeRecoveryPlan(prepared.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteTransition(worldfs.Transition{
+		Version:          1,
+		Phase:            "rollback",
+		Prior:            &state,
+		PriorDeclaration: prepared.Raw,
+		PriorPlan:        recoveryPlan,
+		Successor:        worldfs.State{Name: "w", Generation: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !comparison.RecoveryPending {
+		t.Fatal("comparison did not record pending recovery")
+	}
+	if err := a.UpReviewed(context.Background(), prepared, comparison); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(layout.Transition); !os.IsNotExist(err) {
+		t.Fatalf("transition remains after reviewed recovery: %v", err)
 	}
 }
 

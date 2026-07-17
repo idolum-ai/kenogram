@@ -7,6 +7,9 @@ Notable user-visible and operational changes are recorded here.
 - Make repeated-plan comparisons insertion-aware while preserving order and
   redacting secret copy digests across insertion, removal, modification, and
   reorder evidence.
+- Keep JSON dry-run output machine-clean and fail closed when prior plan,
+  declaration, state, or workspace evidence cannot be compared; revalidate the
+  reviewed predecessor snapshot under the world lock before applying it.
 
 ## [v0.1.1] - 2026-07-17
 

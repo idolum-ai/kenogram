@@ -23,7 +23,15 @@ also reports the byte-sensitive declaration digest.
 
 `up` renders the full successor plan, exact semantic changes, and workspace
 drift before an interactive confirmation or `--yes`. It stages and verifies the
-successor before recording it applied. `down`, `destroy`, `enter --repair`,
+successor before recording it applied. A predecessor is new only when state,
+applied artifacts, authoritative history, runtime-proxy artifacts, recorded
+digests, and carried workspace entries are all absent; failure-only history is
+retained without inventing authority. Unreadable or inconsistent plan, state,
+declaration, or workspace evidence fails before confirmation. The
+reviewed predecessor evidence is revalidated under the world mutation lock
+before application; if that lock guards transition recovery, the recovered
+authority must reproduce the reviewed changes and workspace observation before
+application continues. `down`, `destroy`, `enter --repair`,
 `status`, `allow`, and `worlds` operate only from host-side state. `version`
 reports build provenance.
 
