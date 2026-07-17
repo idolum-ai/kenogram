@@ -25,9 +25,10 @@ also reports the byte-sensitive declaration digest.
 drift before an interactive confirmation or `--yes`. It stages and verifies the
 successor before recording it applied. A predecessor is new only when state,
 applied artifacts, authoritative history, runtime-proxy artifacts, recorded
-digests, and carried workspace entries are all absent; failure-only history is
-retained without inventing authority. Unreadable or inconsistent plan, state,
-declaration, or workspace evidence fails before confirmation. The
+digests, staged generation artifacts, and carried workspace entries are all
+absent; failure-only history is retained without inventing authority. Unreadable
+or inconsistent plan, state, declaration, history, or canonical workspace-digest
+evidence fails before confirmation. The
 reviewed predecessor evidence is revalidated under the world mutation lock
 before application; if that lock guards transition recovery, the recovered
 authority must reproduce the reviewed changes and workspace observation before

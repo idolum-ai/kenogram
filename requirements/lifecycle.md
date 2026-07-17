@@ -27,8 +27,10 @@ the candidate. Confirmed destruction is terminal: it removes every distinct
 generation named by the transition without first starting either one.
 
 Workspace data is host-side, carried, and represented by a deterministic digest
-tree. Configuration is regenerated from the declaration. Confirmation surfaces
-workspace drift. Rootless operation, private namespaces, capability reduction,
+tree. Recorded trees are accepted as evidence only when their entries are
+canonical, uniquely ordered, and reproduce the recorded root hash. Configuration
+is regenerated from the declaration. Confirmation surfaces workspace drift.
+Rootless operation, private namespaces, capability reduction,
 seccomp, device allowlisting, cgroups v2, and absence of the runtime socket are
 mandatory. Exact mount identity and active seccomp mode are observed before the
 network door or any declared service starts.

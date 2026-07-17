@@ -85,14 +85,14 @@ type Prepared struct {
 }
 
 // UpComparison is the complete predecessor evidence rendered before an up.
-// Snapshot is opaque to callers; UpReviewed revalidates it under the world
+// The snapshot is opaque to callers; UpReviewed revalidates it under the world
 // mutation lock so the authority reviewed by an operator cannot change between
 // review and application.
 type UpComparison struct {
 	Changes         []plan.Change
 	Workspace       string
-	Snapshot        string
-	RecoveryPending bool
+	snapshot        string
+	recoveryPending bool
 }
 
 // GenerationObservation keeps recorded authority distinct from runtime
@@ -137,13 +137,16 @@ func (a *App) Up(ctx context.Context, prepared Prepared) (retErr error) {
 // UpReviewed applies a prepared declaration only while the predecessor
 // evidence still matches a comparison acquired with CompareUp.
 func (a *App) UpReviewed(ctx context.Context, prepared Prepared, comparison UpComparison) error {
-	if comparison.Snapshot == "" {
+	if comparison.snapshot == "" {
 		return fmt.Errorf("reviewed comparison snapshot is empty")
 	}
 	return a.up(ctx, prepared, &comparison)
 }
 
 func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison) (retErr error) {
+	if err := validatePreparedIntegrity(prepared); err != nil {
+		return fmt.Errorf("validate prepared candidate: %w", err)
+	}
 	if err := naming.World(prepared.Result.Plan.Name); err != nil {
 		return err
 	}
@@ -164,14 +167,16 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 		if compareErr != nil {
 			return fmt.Errorf("revalidate reviewed comparison: %w", compareErr)
 		}
-		if current.Snapshot != reviewed.Snapshot {
+		if current.snapshot != reviewed.snapshot || current.recoveryPending != reviewed.recoveryPending ||
+			!slices.Equal(current.Changes, reviewed.Changes) || current.Workspace != reviewed.Workspace {
 			return fmt.Errorf("reviewed predecessor evidence changed; review the plan again")
 		}
+		*reviewed = current
 	}
 	if err := a.recoverTransition(ctx, l); err != nil {
 		return fmt.Errorf("recover interrupted transition: %w", err)
 	}
-	if reviewed != nil && reviewed.RecoveryPending {
+	if reviewed != nil && reviewed.recoveryPending {
 		recovered, compareErr := a.CompareUp(prepared)
 		if compareErr != nil {
 			return fmt.Errorf("compare recovered predecessor: %w", compareErr)
@@ -400,6 +405,9 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 // workspace entries is classified as new; every other read or validation
 // failure is returned to the caller.
 func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
+	if err := validatePreparedIntegrity(prepared); err != nil {
+		return UpComparison{}, fmt.Errorf("validate prepared candidate: %w", err)
+	}
 	if err := naming.World(prepared.Result.Plan.Name); err != nil {
 		return UpComparison{}, err
 	}
@@ -473,12 +481,18 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 	current, currentErr := worldfs.Digest(l.Workspace)
 	if currentErr != nil {
 		if !priorExists && errors.Is(currentErr, os.ErrNotExist) {
+			if err := verifyComparisonHistory(l, false, transitionEvidence); err != nil {
+				return UpComparison{}, err
+			}
 			workspace := "workspace: new (no carried state)"
 			return newUpComparison(prepared, changes, workspace, transitionEvidence, nil, nil, nil, nil)
 		}
 		return UpComparison{}, fmt.Errorf("digest current workspace: %w", currentErr)
 	}
 	if !priorExists && workspaceHasNoCarriedEntries(current) {
+		if err := verifyComparisonHistory(l, false, transitionEvidence); err != nil {
+			return UpComparison{}, err
+		}
 		return newUpComparison(prepared, changes, "workspace: new (no carried state)", transitionEvidence, nil, nil, nil, nil)
 	}
 	if !priorExists && transitionErr != nil {
@@ -492,6 +506,7 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 		var err error
 		if transitionErr == nil && transition.Phase == "commit" && transition.Workspace.Root != "" {
 			digest = transition.Workspace
+			err = worldfs.ValidateDigestTree(digest)
 		} else {
 			digest, err = l.ReadDigest(state.Generation)
 		}
@@ -500,6 +515,9 @@ func (a *App) CompareUp(prepared Prepared) (UpComparison, error) {
 		}
 		priorDigest = &digest
 		workspace = fmt.Sprintf("workspace: %d files changed since g%d (%s -> %s)", worldfs.ChangedFiles(digest, current), state.Generation, worldfs.ShortDigest(digest.Root), worldfs.ShortDigest(current.Root))
+	}
+	if err := verifyComparisonHistory(l, priorExists, transitionEvidence); err != nil {
+		return UpComparison{}, err
 	}
 	var stateEvidence *worldfs.State
 	var priorEvidence *Prepared
@@ -541,6 +559,11 @@ func validateNewWorldArtifacts(l worldfs.Layout) error {
 			return fmt.Errorf("inspect predecessor %s: %w", artifact.name, err)
 		}
 	}
+	if recorded, err := directoryHasEntries(l.Staging); err != nil {
+		return fmt.Errorf("inspect predecessor staging: %w", err)
+	} else if recorded {
+		return fmt.Errorf("predecessor state is missing while staged generation artifacts exist")
+	}
 	records, err := history.Verify(l.History)
 	if os.IsNotExist(err) {
 		return nil
@@ -552,6 +575,39 @@ func validateNewWorldArtifacts(l worldfs.Layout) error {
 		if record.Action != "up" || record.Outcome != "failed" {
 			return fmt.Errorf("predecessor state is missing while authoritative history exists")
 		}
+	}
+	return nil
+}
+
+func verifyComparisonHistory(l worldfs.Layout, priorExists bool, transition *worldfs.Transition) error {
+	required := priorExists && transition == nil
+	if transition != nil {
+		required = transition.Prior != nil
+	}
+	records, err := history.Verify(l.History)
+	if os.IsNotExist(err) && !required {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("verify predecessor history: %w", err)
+	}
+	if required && len(records) == 0 {
+		return fmt.Errorf("verify predecessor history: authoritative history is empty")
+	}
+	return nil
+}
+
+func validatePreparedIntegrity(prepared Prepared) error {
+	canonical, err := plan.Canonical(prepared.Result.Plan)
+	if err != nil {
+		return fmt.Errorf("canonicalize plan: %w", err)
+	}
+	planSum := sha256.Sum256(canonical)
+	if hex.EncodeToString(planSum[:]) != prepared.Result.PlanDigest {
+		return fmt.Errorf("plan digest does not match prepared plan")
+	}
+	if DeclarationDigest(prepared.Raw) != prepared.Result.DeclarationDigest {
+		return fmt.Errorf("declaration digest does not match prepared bytes")
 	}
 	return nil
 }
@@ -584,7 +640,7 @@ func newUpComparison(prepared Prepared, changes []plan.Change, workspace string,
 		return UpComparison{}, fmt.Errorf("encode comparison snapshot: %w", err)
 	}
 	sum := sha256.Sum256(raw)
-	return UpComparison{Changes: changes, Workspace: workspace, Snapshot: hex.EncodeToString(sum[:]), RecoveryPending: transition != nil}, nil
+	return UpComparison{Changes: changes, Workspace: workspace, snapshot: hex.EncodeToString(sum[:]), recoveryPending: transition != nil}, nil
 }
 
 func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, prepared Prepared, running bool) (adopted bool, retErr error) {

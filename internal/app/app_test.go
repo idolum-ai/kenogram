@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -103,10 +104,10 @@ func (r *runtimeRunner) Run(_ context.Context, _ string, args ...string) ([]byte
 		}
 		planDigest, declDigest := r.planDigest, r.declDigest
 		if planDigest == "" {
-			planDigest = "pd"
+			planDigest = preparedFixture().Result.PlanDigest
 		}
 		if declDigest == "" {
-			declDigest = "dd"
+			declDigest = preparedFixture().Result.DeclarationDigest
 		}
 		return []byte(fmt.Sprintf(`[{"Name":%q,"BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":%q,"io.kenogram.plan-digest":%q,"io.kenogram.declaration-digest":%q}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, container, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), strconv.Itoa(generation), planDigest, declDigest, network, r.mountSource)), nil
 	}
@@ -134,7 +135,24 @@ func testBackend(r backend.Runner) *backend.Podman {
 }
 
 func preparedFixture() Prepared {
-	return Prepared{Raw: []byte("version = 1\n"), Result: plan.Result{PlanDigest: "pd", DeclarationDigest: "dd", Plan: plan.Plan{Version: 1, Name: "w", World: plan.World{Hostname: "w", Base: "base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workdir: "/workspace", User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}, Workspace: []string{"/workspace"}}}, Declaration: decl.Declaration{Name: "w"}}
+	prepared := Prepared{Raw: []byte("version = 1\n"), Result: plan.Result{Plan: plan.Plan{Version: 1, Name: "w", World: plan.World{Hostname: "w", Base: "base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workdir: "/workspace", User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}, Workspace: []string{"/workspace"}}}, Declaration: decl.Declaration{Name: "w"}}
+	canonical, err := plan.Canonical(prepared.Result.Plan)
+	if err != nil {
+		panic(err)
+	}
+	planSum := sha256.Sum256(canonical)
+	prepared.Result.PlanDigest = hex.EncodeToString(planSum[:])
+	prepared.Result.DeclarationDigest = DeclarationDigest(prepared.Raw)
+	return prepared
+}
+
+func refreshPreparedPlanDigest(prepared *Prepared) {
+	canonical, err := plan.Canonical(prepared.Result.Plan)
+	if err != nil {
+		panic(err)
+	}
+	sum := sha256.Sum256(canonical)
+	prepared.Result.PlanDigest = hex.EncodeToString(sum[:])
 }
 func TestUpRecordsAppliedOnlyAfterEvidence(t *testing.T) {
 	base := t.TempDir()
@@ -232,6 +250,89 @@ func TestUpReviewedRejectsDifferentSuccessorThanReviewed(t *testing.T) {
 	}
 }
 
+func TestUpReviewedRejectsCandidateContentChangedWithoutDigest(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Prepared)
+		want   string
+	}{
+		{
+			name: "plan",
+			mutate: func(prepared *Prepared) {
+				prepared.Result.Plan.Resources.CPUs++
+			},
+			want: "plan digest does not match prepared plan",
+		},
+		{
+			name: "declaration",
+			mutate: func(prepared *Prepared) {
+				prepared.Raw = append(append([]byte(nil), prepared.Raw...), []byte("# changed after review\n")...)
+			},
+			want: "declaration digest does not match prepared bytes",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			runner := &runtimeRunner{}
+			a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+			prepared := preparedFixture()
+			comparison, err := a.CompareUp(prepared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&prepared)
+			err = a.UpReviewed(context.Background(), prepared, comparison)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+			if containsCall(runner.calls, "create ", "") {
+				t.Fatalf("runtime mutated after candidate changed: %v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestUpReviewedRejectsTamperedComparisonPresentation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*UpComparison)
+	}{
+		{
+			name: "changes",
+			mutate: func(comparison *UpComparison) {
+				comparison.Changes = append(comparison.Changes, plan.Change{Path: "resources.cpus", Before: "1", After: "2"})
+			},
+		},
+		{
+			name: "workspace",
+			mutate: func(comparison *UpComparison) {
+				comparison.Workspace = "workspace: caller replacement"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			runner := &runtimeRunner{}
+			a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+			prepared := preparedFixture()
+			comparison, err := a.CompareUp(prepared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&comparison)
+			err = a.UpReviewed(context.Background(), prepared, comparison)
+			if err == nil || !strings.Contains(err.Error(), "reviewed predecessor evidence changed") {
+				t.Fatalf("error = %v", err)
+			}
+			if containsCall(runner.calls, "create ", "") {
+				t.Fatalf("runtime mutated after comparison changed: %v", runner.calls)
+			}
+		})
+	}
+}
+
 func TestCompareUpAllowsFailureOnlyHistoryForRetry(t *testing.T) {
 	base := t.TempDir()
 	layout := worldfs.For(base, "w")
@@ -248,6 +349,132 @@ func TestCompareUpAllowsFailureOnlyHistoryForRetry(t *testing.T) {
 	}
 	if comparison.Workspace != "workspace: new (no carried state)" {
 		t.Fatalf("workspace = %q", comparison.Workspace)
+	}
+}
+
+func TestCompareUpRejectsCorruptAuthoritativeEvidence(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, worldfs.Layout)
+		want   string
+	}{
+		{
+			name: "missing history",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				if err := os.Remove(layout.History); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "verify predecessor history",
+		},
+		{
+			name: "truncated history",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				if err := os.WriteFile(layout.History, []byte("{\"truncated\":"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "truncated final record",
+		},
+		{
+			name: "empty history",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				if err := os.WriteFile(layout.History, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "authoritative history is empty",
+		},
+		{
+			name: "hash-corrupt history",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				records, err := history.Verify(layout.History)
+				if err != nil || len(records) == 0 {
+					t.Fatalf("history before corruption = %#v, %v", records, err)
+				}
+				records[0].Hash = strings.Repeat("0", sha256.Size*2)
+				raw, err := json.Marshal(records[0])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(layout.History, append(raw, '\n'), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "hash mismatch",
+		},
+		{
+			name: "invalid workspace digest",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				if err := os.WriteFile(filepath.Join(layout.Digests, "g1.json"), []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "validate digest tree",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			prepared := preparedFixture()
+			runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+			a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+			if err := a.Up(context.Background(), prepared); err != nil {
+				t.Fatal(err)
+			}
+			layout := worldfs.For(base, "w")
+			test.mutate(t, layout)
+			if _, err := a.CompareUp(prepared); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCompareUpRejectsOrphanedStaging(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(layout.Staging, "g1")
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "partial"), []byte("orphan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{BaseDir: base}
+	if _, err := a.CompareUp(preparedFixture()); err == nil || !strings.Contains(err.Error(), "staged generation artifacts exist") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCompareUpVerifiesOptionalFirstGenerationTransitionHistory(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteTransition(worldfs.Transition{
+		Version:   1,
+		Phase:     "rollback",
+		Successor: worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.History, []byte("{\"truncated\":"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{BaseDir: base}
+	if _, err := a.CompareUp(preparedFixture()); err == nil || !strings.Contains(err.Error(), "truncated final record") {
+		t.Fatalf("corrupt optional history error = %v", err)
+	}
+	if err := os.Remove(layout.History); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CompareUp(preparedFixture()); err != nil {
+		t.Fatalf("missing first-generation transition history = %v", err)
 	}
 }
 
@@ -299,8 +526,16 @@ paths = ["/workspace"]
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !comparison.RecoveryPending {
+	if !comparison.recoveryPending {
 		t.Fatal("comparison did not record pending recovery")
+	}
+	tampered := comparison
+	tampered.recoveryPending = false
+	if err := a.UpReviewed(context.Background(), prepared, tampered); err == nil || !strings.Contains(err.Error(), "reviewed predecessor evidence changed") {
+		t.Fatalf("tampered comparison error = %v", err)
+	}
+	if _, err := os.Stat(layout.Transition); err != nil {
+		t.Fatalf("tampered comparison recovered transition: %v", err)
 	}
 	if err := a.UpReviewed(context.Background(), prepared, comparison); err != nil {
 		t.Fatal(err)
@@ -713,6 +948,9 @@ func TestUpRejectsBadRuntimeEvidence(t *testing.T) {
 	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
 	prepared := preparedFixture()
 	prepared.Result.Plan.Services = []plan.Service{{Name: "canary", Command: []string{"/bin/true"}, Autostart: true, Restart: "never"}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
 	err := a.Up(context.Background(), prepared)
 	if err == nil || !strings.Contains(err.Error(), "network mode") {
 		t.Fatalf("err=%v", err)
@@ -785,6 +1023,7 @@ func TestUpRejectsMountsOverlappingControlAndState(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			prepared := preparedFixture()
 			prepared.Result.Plan.Mounts = []plan.Mount{{Source: source, Target: "/host", Mode: "ro"}}
+			refreshPreparedPlanDigest(&prepared)
 			runner := &runtimeRunner{}
 			a := &App{Backend: testBackend(runner), BaseDir: stateRoot, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
 			err := a.Up(context.Background(), prepared)
@@ -875,6 +1114,7 @@ func TestUpRejectsCopyDriftBeforeCutover(t *testing.T) {
 	}
 	prepared := preparedFixture()
 	prepared.Result.Plan.Copies = []plan.Copy{{Source: source, SourceDigest: digest, Target: "/etc/config", Mode: "0600"}}
+	refreshPreparedPlanDigest(&prepared)
 	if err := os.WriteFile(source, []byte("changed"), 0o600); err != nil {
 		t.Fatal(err)
 	}

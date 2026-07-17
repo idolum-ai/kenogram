@@ -384,6 +384,15 @@ func writeComparisonWorld(t *testing.T, base string, prepared app.Prepared, decl
 	if _, err := layout.WriteDigest(1, digest); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := history.Append(layout.History, history.Record{
+		Action:            "up",
+		PlanDigest:        prepared.Result.PlanDigest,
+		DeclarationDigest: prepared.Result.DeclarationDigest,
+		WorkspaceDigest:   digest.Root,
+		Outcome:           "applied",
+	}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSubcommandHelpIsSuccessful(t *testing.T) {
