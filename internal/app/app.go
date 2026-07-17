@@ -1021,7 +1021,12 @@ func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, allows 
 	for _, allow := range allows {
 		args = append(args, "--allow", netJoin(allow.Host, int(allow.Port)))
 	}
-	command := exec.CommandContext(ctx, a.Executable, args...)
+	// The proxy outlives the command that applies the world. After readiness,
+	// its lifecycle is owned explicitly through ProxyPID and stopProxy rather
+	// than the startup context. A new session separates it from the applying
+	// terminal and process group.
+	command := exec.Command(a.Executable, args...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	logFile, logErr := os.OpenFile(filepath.Join(l.Root, "proxy.log"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if logErr != nil {
 		return 0, logErr
@@ -1034,15 +1039,13 @@ func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, allows 
 	processPID := command.Process.Pid
 	start := lockfile.ProcessStart(processPID)
 	if start == "" {
-		command.Process.Kill()
-		return 0, fmt.Errorf("observe proxy process start")
+		return 0, errors.Join(fmt.Errorf("observe proxy process start"), abortProxyStart(command, l))
 	}
 	if err := os.WriteFile(l.ProxyPID, []byte(strconv.Itoa(processPID)+" "+start+"\n"), 0o600); err != nil {
-		command.Process.Kill()
-		return 0, err
+		return 0, errors.Join(err, abortProxyStart(command, l))
 	}
 	if err := command.Process.Release(); err != nil {
-		return 0, err
+		return 0, errors.Join(err, abortProxyStart(command, l))
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
@@ -1059,6 +1062,15 @@ func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, allows 
 		}
 	}
 }
+
+func abortProxyStart(command *exec.Cmd, l worldfs.Layout) error {
+	if command.Process != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	}
+	return errors.Join(removeIfExists(l.ProxyPID), removeIfExists(l.ProxySocket))
+}
+
 func netJoin(host string, port int) string { return net.JoinHostPort(host, strconv.Itoa(port)) }
 func (a *App) stopProxy(l worldfs.Layout) error {
 	raw, err := os.ReadFile(l.ProxyPID)

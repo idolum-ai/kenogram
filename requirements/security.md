@@ -22,7 +22,13 @@ Host-specific mount safety is checked during dry-run and apply. A replacement
 also rejects a new source beneath a predecessor-writable host mount.
 Podman evidence must confirm rootless operation, cgroups v2, private none-network
 mode, active seccomp filtering, provenance labels, declared mounts, and resource
-limits before any service starts. The runtime socket is never mounted. Kenogram protects the host only to the extent provided by the
+limits before any service starts. Kenogram requests `--ipc private`. For Podman
+versions that report the resulting mode as `shareable`, Kenogram accepts that
+label only when the live holder's IPC namespace identity differs from
+Kenogram's ambient namespace. This proves separation from the IPC namespace
+ambient to the Kenogram process, not that a trusted host process cannot join
+the holder's namespace. No container-runtime control socket is mounted into a
+world. Kenogram protects the host only to the extent provided by the
 kernel, rootless runtime, and its own correctness; declared rw mounts and secrets
 remain world-owned input by design.
 

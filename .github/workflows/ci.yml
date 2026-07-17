@@ -67,11 +67,12 @@ jobs:
         working-directory: source
         run: make vulncheck
       - name: Test evidence
+        id: test-evidence
         if: steps.scope.outputs.mode == 'full'
         working-directory: source
         run: make test-evidence
       - name: Retain test evidence
-        if: steps.scope.outputs.mode == 'full'
+        if: always() && steps.scope.outputs.mode == 'full' && steps.test-evidence.outcome != 'skipped'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: go-test-evidence
