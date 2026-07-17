@@ -710,7 +710,7 @@ func workspaceHasOnlyEmptyMounts(tree worldfs.DigestTree, l worldfs.Layout, targ
 	for _, target := range targets {
 		allowed[filepath.Base(l.WorkspacePath(target))] = struct{}{}
 	}
-	if len(tree.Entries) == 0 || tree.Entries[0].Path != "" || tree.Entries[0].Type != "directory" {
+	if len(tree.Entries) == 0 || tree.Entries[0].Path != "" || !isEmptyWorkspaceMount(tree.Entries[0]) {
 		return false
 	}
 	for _, entry := range tree.Entries[1:] {

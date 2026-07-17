@@ -499,6 +499,20 @@ func TestFailedFirstCreateRemainsReviewable(t *testing.T) {
 	}
 }
 
+func TestCompareUpRejectsNoncanonicalEmptyWorkspaceRoot(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(layout.Workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&App{BaseDir: base}).CompareUp(preparedFixture()); err == nil || !strings.Contains(err.Error(), "carried workspace entries exist") {
+		t.Fatalf("comparison error = %v", err)
+	}
+}
+
 func TestFailedStartedFirstApplyPreservesCarriedWorkspace(t *testing.T) {
 	base := t.TempDir()
 	prepared := preparedFixture()
