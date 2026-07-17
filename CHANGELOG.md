@@ -4,6 +4,10 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+- Make repeated-plan comparisons insertion-aware while preserving order and
+  redacting secret copy digests across insertion, removal, modification, and
+  reorder evidence.
+
 ## [v0.1.1] - 2026-07-17
 
 - Accept Podman's `shareable` inspection label for a requested private IPC
