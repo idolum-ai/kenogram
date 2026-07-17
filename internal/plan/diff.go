@@ -155,7 +155,8 @@ func (d *differ) diffSequence(path string, before, after []any) []Change {
 		if reflect.DeepEqual(before, after) {
 			return d.largeSecretChanges(path)
 		}
-		return []Change{{Path: path, Before: renderValue(before), After: renderValue(after)}}
+		changes := []Change{{Path: path, Before: renderValue(before), After: renderValue(after)}}
+		return append(changes, d.largeSecretDigestSummary(path)...)
 	}
 
 	// Exact LCS matches are anchors. Items in each gap are paired in order as
@@ -292,6 +293,30 @@ func (d *differ) largeSecretChanges(path string) []Change {
 		}
 	}
 	return changes
+}
+
+// largeSecretDigestSummary preserves the fact of a secret-content difference
+// when bounded fallback cannot safely claim positional identity. Comparing
+// multisets avoids describing a pure reorder as a digest change.
+func (d *differ) largeSecretDigestSummary(path string) []Change {
+	if path != "copies" || reflect.DeepEqual(secretDigestCounts(d.beforeCopies), secretDigestCounts(d.afterCopies)) {
+		return nil
+	}
+	return []Change{{
+		Path:   "copies[*].source_digest",
+		Before: "<secret digest multiset>",
+		After:  "<secret digest multiset changed>",
+	}}
+}
+
+func secretDigestCounts(copies []Copy) map[string]int {
+	counts := make(map[string]int)
+	for _, copy := range copies {
+		if copy.Secret {
+			counts[copy.SourceDigest]++
+		}
+	}
+	return counts
 }
 
 func sequencePath(path string, index int) string {

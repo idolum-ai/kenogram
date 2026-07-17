@@ -320,6 +320,49 @@ func TestDiffLargeSequenceFallbackStillReportsSecretDigestChange(t *testing.T) {
 	}
 }
 
+func TestDiffLargeSequenceFallbackSummarizesMixedSecretChange(t *testing.T) {
+	before := make([]Copy, 1024)
+	for i := range before {
+		before[i] = copyNamed(fmt.Sprintf("secret-%d", i))
+		before[i].Secret = true
+		before[i].SourceDigest = fmt.Sprintf("SECRET-BEFORE-%d", i)
+	}
+	after := append([]Copy(nil), before...)
+	after[0].Mode = "0400"
+	after[512].SourceDigest = "SECRET-AFTER-CANARY"
+	changes, err := Diff(Plan{Copies: before}, Plan{Copies: after})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSummary := Change{
+		Path:   "copies[*].source_digest",
+		Before: "<secret digest multiset>",
+		After:  "<secret digest multiset changed>",
+	}
+	if len(changes) != 2 || changes[0].Path != "copies" || changes[1] != wantSummary {
+		t.Fatalf("mixed large fallback = %#v", changes)
+	}
+	encoded := fmt.Sprint(changes)
+	for _, canary := range []string{before[512].SourceDigest, after[512].SourceDigest} {
+		if strings.Contains(encoded, canary) {
+			t.Fatalf("mixed large fallback leaked %q: %#v", canary, changes)
+		}
+	}
+}
+
+func TestLargeSecretDigestSummaryIgnoresReorder(t *testing.T) {
+	left := copyNamed("left")
+	left.Secret = true
+	left.SourceDigest = "left-digest"
+	right := copyNamed("right")
+	right.Secret = true
+	right.SourceDigest = "right-digest"
+	d := differ{beforeCopies: []Copy{left, right}, afterCopies: []Copy{right, left}}
+	if changes := d.largeSecretDigestSummary("copies"); len(changes) != 0 {
+		t.Fatalf("pure reorder reported secret digest change: %#v", changes)
+	}
+}
+
 func copyNamed(name string) Copy {
 	return Copy{Source: name, SourceDigest: "digest", Target: "/" + name, Mode: "0600"}
 }
