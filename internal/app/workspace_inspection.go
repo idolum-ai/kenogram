@@ -116,21 +116,82 @@ func verifyInspectionHistory(l worldfs.Layout, state worldfs.State, baselineGene
 			applied = append(applied, record)
 		}
 	}
-	if int64(len(applied)) != state.Generation {
-		return fmt.Errorf("history has %d applied generations but state names g%d", len(applied), state.Generation)
+	if len(applied) == 0 {
+		return fmt.Errorf("history contains no applied generation evidence")
 	}
-	currentRecord := applied[state.Generation-1]
+	roots := make([]string, state.Generation)
+	for generation := int64(1); generation <= state.Generation; generation++ {
+		tree, readErr := l.ReadDigest(generation)
+		if readErr != nil {
+			return fmt.Errorf("read committed g%d digest: %w", generation, readErr)
+		}
+		roots[generation-1] = tree.Root
+	}
+	if roots[baselineGeneration-1] != baselineRoot {
+		return fmt.Errorf("baseline g%d changed while binding history", baselineGeneration)
+	}
+	baselineRecords, err := bindInspectionGenerations(roots, applied, int(baselineGeneration-1))
+	if err != nil {
+		return fmt.Errorf("bind committed generations to applied history: %w", err)
+	}
+	currentRecord := applied[len(applied)-1]
 	if currentRecord.PlanDigest != state.PlanDigest || currentRecord.DeclarationDigest != state.DeclarationDigest {
 		return fmt.Errorf("authoritative state does not match applied history for g%d", state.Generation)
 	}
-	baselineRecord := applied[baselineGeneration-1]
-	if baselineRecord.WorkspaceDigest != baselineRoot {
-		return fmt.Errorf("baseline g%d digest is not bound to its applied history record", baselineGeneration)
-	}
-	if baselineRecord.PlanDigest != state.PlanDigest {
-		return fmt.Errorf("baseline g%d used a different plan; declared-locus attribution is unavailable", baselineGeneration)
+	for _, recordIndex := range baselineRecords {
+		if applied[recordIndex].PlanDigest != state.PlanDigest {
+			return fmt.Errorf("baseline g%d may use a different plan; declared-locus attribution is unavailable", baselineGeneration)
+		}
 	}
 	return nil
+}
+
+// bindInspectionGenerations treats applied history as a run-length encoding of
+// committed generations. AppendOnce may omit an immediately repeated semantic
+// record, but every physical applied record still represents at least one
+// generation and records remain ordered. Consecutive records with the same
+// workspace root can make a baseline's exact record ambiguous; callers must
+// therefore validate every returned candidate before attributing a locus.
+func bindInspectionGenerations(roots []string, applied []history.Record, baseline int) ([]int, error) {
+	if len(roots) == 0 || baseline < 0 || baseline >= len(roots) {
+		return nil, fmt.Errorf("invalid generation range")
+	}
+	if len(applied) > len(roots) {
+		return nil, fmt.Errorf("history contains %d applied records for %d committed generations", len(applied), len(roots))
+	}
+	baselineRecords := []int(nil)
+	for generation, record := 0, 0; generation < len(roots) || record < len(applied); {
+		if generation == len(roots) || record == len(applied) || roots[generation] != applied[record].WorkspaceDigest {
+			return nil, fmt.Errorf("unexplained generation gap at g%d or applied record %d", generation+1, record+1)
+		}
+		generationEnd := generation + 1
+		for generationEnd < len(roots) && roots[generationEnd] == roots[generation] {
+			generationEnd++
+		}
+		recordEnd := record + 1
+		for recordEnd < len(applied) && applied[recordEnd].WorkspaceDigest == applied[record].WorkspaceDigest {
+			recordEnd++
+		}
+		generationCount := generationEnd - generation
+		recordCount := recordEnd - record
+		if recordCount > generationCount {
+			return nil, fmt.Errorf("%d applied records compete for %d generations beginning at g%d", recordCount, generationCount, generation+1)
+		}
+		if baseline >= generation && baseline < generationEnd {
+			position := baseline - generation
+			minimum := max(0, recordCount-(generationCount-position))
+			maximum := min(recordCount-1, position)
+			baselineRecords = make([]int, 0, maximum-minimum+1)
+			for candidate := minimum; candidate <= maximum; candidate++ {
+				baselineRecords = append(baselineRecords, record+candidate)
+			}
+		}
+		generation, record = generationEnd, recordEnd
+	}
+	if len(baselineRecords) == 0 {
+		return nil, fmt.Errorf("baseline generation has no applied history binding")
+	}
+	return baselineRecords, nil
 }
 
 func compareWorkspaceLoci(l worldfs.Layout, declared []string, before, after worldfs.DigestTree) ([]WorkspaceLocusInspection, error) {

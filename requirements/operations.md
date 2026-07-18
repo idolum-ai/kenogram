@@ -93,10 +93,13 @@ that committed canonical digest with one stable observation of the current
 carried tree. It holds the world mutation lock while reading authority, rejects
 any unresolved or malformed transition instead of recovering it, and fails on
 missing, corrupt, changing, or internally inconsistent state, plan, history, or
-digest evidence. The baseline digest must be bound to the corresponding
-sequential `up`/`applied` history record. Because v0.x does not retain every
-generation's resolved plan body, a historical baseline is inspectable only when
-its recorded plan digest equals the authoritative plan digest; otherwise
+digest evidence. Committed `g<N>` digests are bound in order to `up`/`applied`
+history. This binding accepts the run-length form produced when recovery-safe
+history deduplication omits an immediately repeated semantic record, while
+rejecting missing digests, unexplained gaps, excess records, and ambiguous
+baseline plans. Because v0.x does not retain every generation's resolved plan
+body, a historical baseline is inspectable only when every history record it
+could represent has the authoritative plan digest; otherwise
 declared-locus attribution is unavailable and inspection fails explicitly. The
 same retention limit applies after a declaration removes a workspace locus:
 carried storage for that old locus remains by design, but its target mapping is
