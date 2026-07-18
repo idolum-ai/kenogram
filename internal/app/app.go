@@ -129,6 +129,17 @@ type StatusResult struct {
 	RecoveryPhase string                 `json:"recovery_phase,omitempty"`
 }
 
+type NetworkDiagnosticsResult struct {
+	World         string                    `json:"world"`
+	Generation    int64                     `json:"generation"`
+	Scope         string                    `json:"scope"`
+	Events        []proxy.NetworkDiagnostic `json:"events"`
+	Truncated     bool                      `json:"truncated"`
+	Omitted       uint64                    `json:"omitted"`
+	EncodedBytes  int                       `json:"encoded_bytes"`
+	SensitiveData string                    `json:"sensitive_metadata"`
+}
+
 func Prepare(path string) (Prepared, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -406,7 +417,7 @@ func (a *App) up(ctx context.Context, prepared Prepared, reviewed *UpComparison)
 	a.checkpoint("boundary-verified")
 	proxyPID := 0
 	if len(prepared.Result.Plan.NetworkAllow) > 0 {
-		proxyPID, err = a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
+		proxyPID, err = a.startProxy(ctx, l, evidence.PID, generation, prepared.Result.Plan.NetworkAllow)
 		if err != nil {
 			return a.recordFailure(l, prepared, "start proxy", err)
 		}
@@ -947,7 +958,7 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 			err = proxy.SendControlContext(ctx, l.ProxySocket, proxy.ControlRequest{Operation: "reconcile", Destinations: destinations})
 		}
 		if !a.proxyAlive(l) || err != nil {
-			proxyPID, err = a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
+			proxyPID, err = a.startProxy(ctx, l, evidence.PID, state.Generation, prepared.Result.Plan.NetworkAllow)
 			if err != nil {
 				return false, err
 			}
@@ -1136,7 +1147,7 @@ func (a *App) recoverTransition(ctx context.Context, l worldfs.Layout) error {
 		return fmt.Errorf("verify committed successor; preserving commit transition: %w", verifyErr)
 	}
 	if len(prepared.Result.Plan.NetworkAllow) > 0 && (restarted || !a.proxyIsReady(ctx, l)) {
-		pid, err := a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
+		pid, err := a.startProxy(ctx, l, evidence.PID, transition.Successor.Generation, prepared.Result.Plan.NetworkAllow)
 		if err != nil {
 			return fmt.Errorf("restore committed successor proxy; preserving commit transition: %w", err)
 		}
@@ -1259,7 +1270,7 @@ func (a *App) restorePredecessor(ctx context.Context, l worldfs.Layout, prior wo
 	}
 	proxyPID := 0
 	if len(prepared.Result.Plan.NetworkAllow) > 0 {
-		proxyPID, err = a.startProxy(ctx, l, evidence.PID, prepared.Result.Plan.NetworkAllow)
+		proxyPID, err = a.startProxy(ctx, l, evidence.PID, prior.Generation, prepared.Result.Plan.NetworkAllow)
 		if err != nil {
 			return err
 		}
@@ -1569,11 +1580,11 @@ func (a *App) recordFailure(l worldfs.Layout, p Prepared, detail string, cause e
 	return errors.Join(fmt.Errorf("%s: %w", detail, cause), historyErr)
 }
 
-func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, allows []plan.NetworkAllow) (int, error) {
+func (a *App) startProxy(ctx context.Context, l worldfs.Layout, pid int, generation int64, allows []plan.NetworkAllow) (int, error) {
 	if err := a.stopProxy(l); err != nil {
 		return 0, err
 	}
-	args := []string{"_proxy", "--pid", strconv.Itoa(pid), "--control", l.ProxySocket, "--log", filepath.Join(l.Root, "proxy.log")}
+	args := []string{"_proxy", "--pid", strconv.Itoa(pid), "--generation", strconv.FormatInt(generation, 10), "--control", l.ProxySocket, "--log", filepath.Join(l.Root, "proxy.log")}
 	for _, allow := range allows {
 		args = append(args, "--allow", netJoin(allow.Host, int(allow.Port)))
 	}
@@ -1942,6 +1953,87 @@ func (a *App) authoritativePrepared(l worldfs.Layout, state worldfs.State) (Prep
 	}
 	return a.loadPredecessor(l, state)
 }
+
+func (a *App) NetworkDiagnostics(ctx context.Context, name string, limit, maxBytes int) (NetworkDiagnosticsResult, error) {
+	if err := naming.World(name); err != nil {
+		return NetworkDiagnosticsResult{}, err
+	}
+	if limit < 1 || limit > proxy.MaxDiagnosticLimit {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("diagnostic limit must be between 1 and %d", proxy.MaxDiagnosticLimit)
+	}
+	if maxBytes < 1 || maxBytes > proxy.MaxDiagnosticBytes {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("diagnostic byte bound must be between 1 and %d", proxy.MaxDiagnosticBytes)
+	}
+	l := worldfs.For(a.BaseDir, name)
+	lock, err := lockfile.AcquireShared(l.Lock)
+	if err != nil {
+		return NetworkDiagnosticsResult{}, err
+	}
+	defer lock.Release()
+	if _, err := os.Lstat(l.Transition); err == nil {
+		transition, readErr := l.ReadTransition()
+		if readErr != nil {
+			return NetworkDiagnosticsResult{}, fmt.Errorf("inspect transition before network diagnostics: %w", readErr)
+		}
+		return NetworkDiagnosticsResult{}, fmt.Errorf("world has an unresolved %s transition; run up, down, or destroy to recover it first", transition.Phase)
+	} else if !os.IsNotExist(err) {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("inspect transition before network diagnostics: %w", err)
+	}
+	if _, err := history.Verify(l.History); err != nil {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("verify history before network diagnostics: %w", err)
+	}
+	state, err := l.ReadState()
+	if err != nil {
+		return NetworkDiagnosticsResult{}, err
+	}
+	if err := validateComparisonState(state, name, "running"); err != nil {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("network diagnostics require a running authoritative generation: %w", err)
+	}
+	prepared, err := a.authoritativePrepared(l, state)
+	if err != nil {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("load authoritative evidence before network diagnostics: %w", err)
+	}
+	active, err := a.comparisonPredecessorActive(ctx, l, state, prepared.Result)
+	if err != nil {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("verify authoritative runtime before network diagnostics: %w", err)
+	}
+	if !active {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("authoritative generation g%d is not active", state.Generation)
+	}
+	if state.ProxyPID <= 1 || !a.proxyAlive(l) {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("current generation has no responsive network door")
+	}
+	identity, err := os.ReadFile(l.ProxyPID)
+	if err != nil {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("read proxy identity: %w", err)
+	}
+	fields := strings.Fields(string(identity))
+	if len(fields) != 2 {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("proxy identity does not match authoritative generation")
+	}
+	recordedPID, parseErr := strconv.Atoi(fields[0])
+	if parseErr != nil || recordedPID != state.ProxyPID {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("proxy identity does not match authoritative generation")
+	}
+	snapshot, err := proxy.QueryDiagnosticsContext(ctx, l.ProxySocket, limit, maxBytes)
+	if err != nil {
+		return NetworkDiagnosticsResult{}, err
+	}
+	if snapshot.Generation != state.Generation {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("proxy generation g%d does not match authoritative generation g%d", snapshot.Generation, state.Generation)
+	}
+	return NetworkDiagnosticsResult{
+		World:         name,
+		Generation:    state.Generation,
+		Scope:         "current-generation-ephemeral",
+		Events:        snapshot.Events,
+		Truncated:     snapshot.Truncated,
+		Omitted:       snapshot.Omitted,
+		EncodedBytes:  snapshot.EncodedBytes,
+		SensitiveData: "destination host and port",
+	}, nil
+}
+
 func (a *App) Allow(name, destination, duration string) error {
 	if err := naming.World(name); err != nil {
 		return err

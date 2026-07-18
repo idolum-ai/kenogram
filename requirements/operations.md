@@ -16,6 +16,7 @@ also reports the byte-sensitive declaration digest.
 | `enter [--repair] <world>` | attach to the world | world processes may |
 | `connect <world> <interface>` | relay stdin/stdout to one declared loopback stream | world processes may |
 | `status <world>` / `worlds` | report recorded and observed state | no |
+| `network-diagnostics … <world>` | inspect recent current-generation proxy refusals and upstream dial failures | no |
 | `allow … --for <duration>` | grant temporary destination access | yes |
 | `revoke <world> <destination>` | remove access and close admitted connections | yes |
 | `repair-history --yes <world>` | remove one proven truncated final fragment | yes |
@@ -86,6 +87,28 @@ confirmed `destroy` instead removes every generation named by the transition.
 `status --json` preserves the `state` and `runtime_evidence`
 aliases while also reporting authoritative and candidate observations; during
 recovery, its declaration and state provenance is `transition.json`.
+
+`network-diagnostics [--json] [--limit N] [--max-bytes N] <world>` is an
+explicitly invoked local operator diagnostic, not an event stream or authority
+source. It reads only the responsive proxy belonging to the settled, running
+authoritative generation and rejects a generation mismatch. Each observation
+contains a UTC timestamp, generation, coarse `refused` or `dial_failed`
+outcome, and exact destination host and port. Host and port are sensitive
+operator metadata. The command never copies observations into `status`,
+history, generated files, composition channels, or declarations, and it never
+grants access. It records no payloads, headers, credentials, URL paths, query
+strings, or environment values.
+
+The proxy retains at most 256 observations and 64 KiB in memory for its own
+process lifetime. The command defaults to 64 observations and a 16 KiB output;
+accepted bounds are 1–256 observations and 512–65536 complete output bytes.
+Both text and JSON honor the complete-output byte bound; JSON is exactly one
+document. `truncated`, `omitted`, and `encoded_bytes` report known loss and the
+JSON-encoded event bytes independently of the complete document bound. The
+newest fitting observations are returned in chronological order. Collection is
+drop-on-contention so it cannot wait behind a diagnostic reader; overload is
+reported as omitted. There are no cursors, retention guarantees, durable or
+cross-generation continuity, service/lifecycle events, or automatic actions.
 
 Parse, validation, or runtime failures use exit status 1. CLI usage or missing
 confirmation uses status 2.

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -85,6 +86,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runConnect(ctx, args[1:], stdout, stderr)
 	case "status":
 		return runStatus(ctx, args[1:], stdout, stderr)
+	case "network-diagnostics":
+		return runNetworkDiagnostics(ctx, args[1:], stdout, stderr)
 	case "allow":
 		return runAllow(args[1:], stdout, stderr)
 	case "revoke":
@@ -544,6 +547,98 @@ func newStatusPayload(status app.StatusResult) statusPayload {
 	}
 	return payload
 }
+
+func runNetworkDiagnostics(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram network-diagnostics [--json] [--limit <count>] [--max-bytes <bytes>] <world>"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
+	fs := flag.NewFlagSet("network-diagnostics", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprintln(stderr, usage) }
+	jsonOut := fs.Bool("json", false, "JSON output")
+	limit := fs.Int("limit", proxy.DefaultDiagnosticLimit, "maximum observations")
+	maxBytes := fs.Int("max-bytes", proxy.DefaultDiagnosticBytes, "maximum complete output bytes")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return 2
+	}
+	if err := worldfs.ValidateName(fs.Arg(0)); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if *limit < 1 || *limit > proxy.MaxDiagnosticLimit {
+		fmt.Fprintf(stderr, "network-diagnostics: --limit must be between 1 and %d\n", proxy.MaxDiagnosticLimit)
+		return 2
+	}
+	if *maxBytes < 512 || *maxBytes > proxy.MaxDiagnosticBytes {
+		fmt.Fprintf(stderr, "network-diagnostics: --max-bytes must be between 512 and %d\n", proxy.MaxDiagnosticBytes)
+		return 2
+	}
+	a, err := newApp(io.Discard)
+	if err != nil {
+		fmt.Fprintln(stderr, "network-diagnostics:", err)
+		return 1
+	}
+	result, err := a.NetworkDiagnostics(ctx, fs.Arg(0), *limit, proxy.MaxDiagnosticBytes)
+	if err != nil {
+		fmt.Fprintln(stderr, "network-diagnostics:", err)
+		return 1
+	}
+	output, err := boundedNetworkDiagnostics(result, *maxBytes, *jsonOut)
+	if err != nil {
+		fmt.Fprintln(stderr, "network-diagnostics:", err)
+		return 1
+	}
+	if _, err := stdout.Write(output); err != nil {
+		fmt.Fprintln(stderr, "network-diagnostics:", err)
+		return 1
+	}
+	return 0
+}
+
+func boundedNetworkDiagnostics(result app.NetworkDiagnosticsResult, maxBytes int, jsonOut bool) ([]byte, error) {
+	for {
+		result.EncodedBytes = 0
+		for _, event := range result.Events {
+			raw, err := json.Marshal(event)
+			if err != nil {
+				return nil, err
+			}
+			result.EncodedBytes += len(raw)
+		}
+		var output []byte
+		if jsonOut {
+			raw, err := json.Marshal(result)
+			if err != nil {
+				return nil, err
+			}
+			output = append(raw, '\n')
+		} else {
+			var text strings.Builder
+			fmt.Fprintf(&text, "world: %s\ngeneration: g%d\nscope: %s\nsensitive metadata: %s\n", result.World, result.Generation, result.Scope, result.SensitiveData)
+			for _, event := range result.Events {
+				fmt.Fprintf(&text, "%s\t%s\t%s\n", event.Timestamp, event.Outcome, net.JoinHostPort(event.Host, strconv.Itoa(event.Port)))
+			}
+			fmt.Fprintf(&text, "truncated: %t\nomitted: %d\nencoded event bytes: %d\n", result.Truncated, result.Omitted, result.EncodedBytes)
+			output = []byte(text.String())
+		}
+		if len(output) <= maxBytes {
+			return output, nil
+		}
+		if len(result.Events) == 0 {
+			return nil, fmt.Errorf("--max-bytes cannot contain the diagnostic envelope")
+		}
+		result.Events = result.Events[1:]
+		result.Omitted++
+		result.Truncated = true
+	}
+}
+
 func runWorlds(args []string, stdout, stderr io.Writer) int {
 	const usage = "usage: kenogram worlds [--json]"
 	if helpRequested(args) {
@@ -672,15 +767,50 @@ type repeated []string
 
 func (r *repeated) String() string         { return strings.Join(*r, ",") }
 func (r *repeated) Set(value string) error { *r = append(*r, value); return nil }
+
+const metadataLogLimit = 1 << 20
+
+type boundedMetadataLog struct {
+	file *os.File
+}
+
+func (w boundedMetadataLog) Write(buffer []byte) (int, error) {
+	originalLength := len(buffer)
+	if len(buffer) > metadataLogLimit {
+		buffer = buffer[:metadataLogLimit]
+	}
+	info, err := w.file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if info.Size()+int64(len(buffer)) > metadataLogLimit {
+		if err := w.file.Truncate(0); err != nil {
+			return 0, err
+		}
+		if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+			return 0, err
+		}
+	}
+	written, err := w.file.Write(buffer)
+	if err != nil {
+		return 0, err
+	}
+	if written != len(buffer) {
+		return 0, io.ErrShortWrite
+	}
+	return originalLength, nil
+}
+
 func runProxy(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("_proxy", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	pid := fs.Int("pid", 0, "world pid")
+	generation := fs.Int64("generation", 0, "world generation")
 	control := fs.String("control", "", "control socket")
 	logPath := fs.String("log", "", "metadata log")
 	var allows repeated
 	fs.Var(&allows, "allow", "allowed host:port")
-	if err := fs.Parse(args); err != nil || *pid <= 0 || *control == "" || *logPath == "" {
+	if err := fs.Parse(args); err != nil || *pid <= 0 || *generation <= 0 || *control == "" || *logPath == "" {
 		return 2
 	}
 	destinations := []proxy.Destination{}
@@ -706,7 +836,7 @@ func runProxy(args []string, stderr io.Writer) int {
 		return 1
 	}
 	defer listener.Close()
-	p := proxy.New(destinations, proxy.Options{Logger: log.New(file, "", log.LstdFlags|log.LUTC)})
+	p := proxy.New(destinations, proxy.Options{Logger: log.New(boundedMetadataLog{file: file}, "", log.LstdFlags|log.LUTC), Generation: *generation})
 	go func() { <-ctx.Done(); listener.Close() }()
 	go func() {
 		if err := p.ServeControl(*control); err != nil {
@@ -750,6 +880,7 @@ func printHelp(w io.Writer) {
   kenogram enter [--repair] <world>
   kenogram connect <world> <interface>
   kenogram status [--json] <world>
+  kenogram network-diagnostics [--json] [--limit <count>] [--max-bytes <bytes>] <world>
   kenogram allow <world> <host>:<port> --for <duration>
   kenogram revoke <world> <host>:<port>
   kenogram repair-history --yes <world>

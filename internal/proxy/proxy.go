@@ -39,6 +39,8 @@ type Options struct {
 	Resolver             Resolver
 	Dialer               Dialer
 	Logger               *log.Logger
+	Generation           int64
+	Now                  func() time.Time
 }
 type grant struct {
 	destination Destination
@@ -50,17 +52,19 @@ type tracked struct {
 	admission string
 }
 type Proxy struct {
-	mu         sync.Mutex
-	durable    map[string]string
-	grants     map[string]grant
-	active     map[uint64]tracked
-	next       uint64
-	opts       Options
-	sem        chan struct{}
-	rateMu     sync.Mutex
-	rateWindow time.Time
-	rateCount  int
-	admission  uint64
+	mu          sync.Mutex
+	durable     map[string]string
+	grants      map[string]grant
+	active      map[uint64]tracked
+	next        uint64
+	opts        Options
+	sem         chan struct{}
+	rateMu      sync.Mutex
+	rateWindow  time.Time
+	rateCount   int
+	admission   uint64
+	diagnostics *diagnosticBuffer
+	logMessages chan string
 }
 
 func New(destinations []Destination, opts Options) *Proxy {
@@ -76,10 +80,15 @@ func New(destinations []Destination, opts Options) *Proxy {
 	if opts.Dialer == nil {
 		opts.Dialer = &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	}
-	if opts.Logger == nil {
-		opts.Logger = log.New(io.Discard, "", 0)
+	p := &Proxy{durable: map[string]string{}, grants: map[string]grant{}, active: map[uint64]tracked{}, opts: opts, sem: make(chan struct{}, opts.MaxConnections), diagnostics: newDiagnosticBuffer(opts.Generation, opts.Now)}
+	if opts.Logger != nil {
+		p.logMessages = make(chan string, MaxDiagnosticLimit)
+		go func() {
+			for message := range p.logMessages {
+				opts.Logger.Print(message)
+			}
+		}()
 	}
-	p := &Proxy{durable: map[string]string{}, grants: map[string]grant{}, active: map[uint64]tracked{}, opts: opts, sem: make(chan struct{}, opts.MaxConnections)}
 	for _, d := range destinations {
 		p.durable[d.key()] = p.newAdmissionLocked("declaration", d.key())
 	}
@@ -139,25 +148,27 @@ func (p *Proxy) handle(client net.Conn) {
 	}
 	admission, ok := p.allowed(Destination{host, port})
 	if !ok {
-		p.opts.Logger.Printf("outcome=refused host=%q port=%d", host, port)
+		p.diagnostics.record("refused", host, port)
+		p.logf("outcome=refused host=%q port=%d", host, port)
 		writeError(client, http.StatusForbidden)
 		return
 	}
 	outbound, address, err := p.dialResolved(request.Context(), host, port)
 	if err != nil {
-		p.opts.Logger.Printf("outcome=dial_failed host=%q port=%d", host, port)
+		p.diagnostics.record("dial_failed", host, port)
+		p.logf("outcome=dial_failed host=%q port=%d", host, port)
 		writeError(client, http.StatusBadGateway)
 		return
 	}
 	defer outbound.Close()
 	id, current := p.trackIfCurrent(client, admission)
 	if !current {
-		p.opts.Logger.Printf("outcome=revoked_during_dial host=%q port=%d", host, port)
+		p.logf("outcome=revoked_during_dial host=%q port=%d", host, port)
 		writeError(client, http.StatusForbidden)
 		return
 	}
 	defer p.untrack(id)
-	p.opts.Logger.Printf("outcome=connected host=%q port=%d address=%q", host, port, address)
+	p.logf("outcome=connected host=%q port=%d address=%q", host, port, address)
 	if request.Method == http.MethodConnect {
 		if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 			return
@@ -175,6 +186,16 @@ func (p *Proxy) handle(client net.Conn) {
 		return
 	}
 	relay(client, outbound)
+}
+
+func (p *Proxy) logf(format string, arguments ...any) {
+	if p.logMessages == nil {
+		return
+	}
+	select {
+	case p.logMessages <- fmt.Sprintf(format, arguments...):
+	default:
+	}
 }
 
 var errHeaderTooLarge = errors.New("proxy request header exceeds 64 KiB")
@@ -225,8 +246,8 @@ func requestDestination(r *http.Request) (string, int, error) {
 		return "", 0, fmt.Errorf("invalid port")
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	if host == "" {
-		return "", 0, fmt.Errorf("empty host")
+	if err := naming.Host(host); err != nil {
+		return "", 0, err
 	}
 	return host, port, nil
 }
@@ -289,6 +310,9 @@ func (p *Proxy) dialResolved(ctx context.Context, host string, port int) (net.Co
 	ips, err := p.opts.Resolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return nil, "", err
+	}
+	if len(ips) == 0 {
+		return nil, "", errors.New("resolver returned no addresses")
 	}
 	var errs []error
 	for _, ip := range ips {

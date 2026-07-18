@@ -37,6 +37,13 @@ declaration and generation but does not authenticate, encrypt, authorize, or
 interpret relayed bytes; the composed protocol must do so. An interface is not
 an input-sanitization or prompt-contamination boundary.
 
+`network-diagnostics` deliberately reveals exact destination host and port as
+sensitive operator metadata only after explicit local invocation. It never
+captures or emits payloads, headers, credentials, complete URLs, paths, query
+strings, environment values, or arbitrary application output. Its ephemeral
+observations are not copied into status, history, generated projections, or
+message channels and do not authorize a declaration or temporary grant.
+
 ## Trust boundary
 
 The host operator and host-authored declaration are trusted authority. World

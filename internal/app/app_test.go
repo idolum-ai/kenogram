@@ -1278,7 +1278,7 @@ func TestStartProxyDoesNotAcceptStaleSocketAsReady(t *testing.T) {
 	a := &App{BaseDir: base, Executable: executable}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if _, err := a.startProxy(ctx, layout, 123, nil); err == nil {
+	if _, err := a.startProxy(ctx, layout, 123, 1, nil); err == nil {
 		t.Fatal("proxy without a control server was accepted as ready")
 	}
 	if _, err := os.Stat(layout.ProxySocket); !os.IsNotExist(err) {
@@ -1308,6 +1308,87 @@ func TestStoppedStatusStillObservesRetainedContainer(t *testing.T) {
 	if observation == nil || !observation.Exists || observation.Evidence == nil || observation.Evidence.Running {
 		t.Fatalf("status = %#v", status)
 	}
+}
+
+func TestNetworkDiagnosticsRequireVerifiedActiveRuntimeWithoutRewritingLock(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		runner func(runtimeRunner) backend.Runner
+		want   string
+	}{
+		{name: "missing", runner: func(base runtimeRunner) backend.Runner { base.containers = "other\n"; return &base }, want: "is not active"},
+		{name: "stopped", runner: func(base runtimeRunner) backend.Runner { return &stoppedRunner{runtimeRunner: base} }, want: "is not active"},
+		{name: "mismatched", runner: func(base runtimeRunner) backend.Runner { base.network = "bridge"; return &base }, want: "network mode"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			layout, state := writeNetworkDiagnosticsAuthority(t, base)
+			lockBytes := []byte("retained observation metadata\n")
+			if err := os.WriteFile(layout.Lock, lockBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runner := test.runner(runtimeRunner{mountSource: layout.WorkspacePath("/workspace"), planDigest: state.PlanDigest, declDigest: state.DeclarationDigest})
+			a := &App{Backend: testBackend(runner), BaseDir: base}
+			if _, err := a.NetworkDiagnostics(context.Background(), "w", 1, 512); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v; want %q", err, test.want)
+			}
+			got, err := os.ReadFile(layout.Lock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, lockBytes) {
+				t.Fatalf("read-only diagnostic rewrote lock: %q", got)
+			}
+		})
+	}
+}
+
+func TestNetworkDiagnosticsRejectDanglingTransitionEntry(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.Lock, []byte("lock\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "missing-transition"), layout.Transition); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Backend: testBackend(&runtimeRunner{}), BaseDir: base}
+	if _, err := a.NetworkDiagnostics(context.Background(), "w", 1, 512); err == nil || !strings.Contains(err.Error(), "inspect transition") {
+		t.Fatalf("dangling transition error = %v", err)
+	}
+}
+
+func writeNetworkDiagnosticsAuthority(t *testing.T, base string) (worldfs.Layout, worldfs.State) {
+	t.Helper()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.EnsureWorkspace("/workspace"); err != nil {
+		t.Fatal(err)
+	}
+	prepared := preparedFixture()
+	rawPlan, err := encodeRecoveryPlan(prepared.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteApplied(prepared.Raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteAppliedPlan(rawPlan); err != nil {
+		t.Fatal(err)
+	}
+	state := worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, Status: "running", ProxyPID: 4242}
+	if err := layout.WriteState(state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := history.Append(layout.History, history.Record{Action: "up", PlanDigest: state.PlanDigest, DeclarationDigest: state.DeclarationDigest, Outcome: "applied"}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	return layout, state
 }
 
 func TestMutationsFailClosedDuringTransition(t *testing.T) {
