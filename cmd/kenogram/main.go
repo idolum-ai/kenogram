@@ -242,9 +242,13 @@ func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "validate host mounts:", err)
 		return 1
 	}
-	changes, drift := priorChanges(a, prepared)
+	comparison, err := a.CompareUpContext(ctx, prepared)
+	if err != nil {
+		fmt.Fprintln(stderr, "compare prior world:", err)
+		return 1
+	}
 	planWriter := stdout
-	if *jsonOut && !*dry {
+	if *jsonOut {
 		planWriter = stderr
 	}
 	if !*jsonOut || !*dry {
@@ -252,12 +256,12 @@ func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-	}
-	for _, change := range changes {
-		fmt.Fprintf(planWriter, "change: %s: %s -> %s\n", change.Path, change.Before, change.After)
-	}
-	if drift != "" {
-		fmt.Fprintln(planWriter, drift)
+		for _, change := range comparison.Changes {
+			fmt.Fprintf(planWriter, "change: %s: %s -> %s\n", change.Path, change.Before, change.After)
+		}
+		if comparison.Workspace != "" {
+			fmt.Fprintln(planWriter, comparison.Workspace)
+		}
 	}
 	if *dry {
 		if *jsonOut {
@@ -265,7 +269,7 @@ func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 				Result    plan.Result   `json:"result"`
 				Changes   []plan.Change `json:"changes"`
 				Workspace string        `json:"workspace"`
-			}{prepared.Result, changes, drift})
+			}{prepared.Result, comparison.Changes, comparison.Workspace})
 		}
 		return 0
 	}
@@ -276,7 +280,7 @@ func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if *jsonOut {
 		a.Out = stderr
 	}
-	if err := a.Up(ctx, prepared); err != nil {
+	if err := a.UpReviewed(ctx, prepared, comparison); err != nil {
 		fmt.Fprintln(stderr, "up:", err)
 		return 1
 	}
@@ -284,26 +288,6 @@ func runUp(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return encode(stdout, stderr, map[string]any{"outcome": "applied", "world": prepared.Result.Plan.Name, "plan_digest": prepared.Result.PlanDigest, "declaration_digest": prepared.Result.DeclarationDigest})
 	}
 	return 0
-}
-
-func priorChanges(a *app.App, prepared app.Prepared) ([]plan.Change, string) {
-	l := worldfs.For(a.BaseDir, prepared.Result.Plan.Name)
-	state, err := l.ReadState()
-	changes := []plan.Change{}
-	if err == nil {
-		raw, readErr := os.ReadFile(l.Applied)
-		if readErr == nil {
-			source := state.DeclarationPath
-			if source == "" {
-				source = l.Applied
-			}
-			if prior, prepareErr := app.PrepareBytes(raw, source); prepareErr == nil {
-				changes, _ = plan.Diff(prior.Result.Plan, prepared.Result.Plan)
-			}
-		}
-	}
-	drift, _ := a.WorkspaceDrift(prepared.Result.Plan.Name)
-	return changes, drift
 }
 func confirm(w io.Writer) bool {
 	info, err := os.Stdin.Stat()

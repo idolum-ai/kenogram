@@ -8,6 +8,11 @@ Generations are named `kenogram-<world>-g<N>`. A successor is staged before the
 predecessor stops; they never run concurrently over one workspace. The successor
 starts and is verified from backend evidence before it is recorded as applied. On
 failure the predecessor is restarted and no hybrid state remains.
+New and inactive worlds must retain their reviewed workspace through cutover. A
+verified active predecessor remains the workspace authority during successor
+staging and may advance it. After that predecessor stops, Kenogram captures and
+fsyncs the stable handoff tree into the rollback transition before the successor
+starts. Capture failure aborts the cutover and restores the predecessor.
 
 Before the first cutover mutation, `up` fsyncs a transition record that retains
 both declarations and identifies the authoritative recovery direction. Before
@@ -27,8 +32,10 @@ the candidate. Confirmed destruction is terminal: it removes every distinct
 generation named by the transition without first starting either one.
 
 Workspace data is host-side, carried, and represented by a deterministic digest
-tree. Configuration is regenerated from the declaration. Confirmation surfaces
-workspace drift. Rootless operation, private namespaces, capability reduction,
+tree. Recorded trees are accepted as evidence only when their entries are
+canonical, uniquely ordered, and reproduce the recorded root hash. Configuration
+is regenerated from the declaration. Confirmation surfaces workspace drift.
+Rootless operation, private namespaces, capability reduction,
 seccomp, device allowlisting, cgroups v2, and absence of the runtime socket are
 mandatory. Exact mount identity and active seccomp mode are observed before the
 network door or any declared service starts.
@@ -38,10 +45,11 @@ persistent substance of the world. Replacement is correct when provenance is
 preserved, carried state is handled explicitly, and the successor satisfies the
 same observable contracts.
 
-The unit suite kills a replacement process at fourteen lifecycle boundaries:
-after the rollback record, predecessor stop, successor start, both evidence
-checks, service start, commit record, each commit-artifact write, history
-append, predecessor removal, and transition removal. A fresh process must then
+The unit suite kills a replacement process at fifteen lifecycle boundaries:
+after the rollback record, predecessor stop, durable cutover-workspace record,
+successor start, both evidence checks, service start, commit record, each
+commit-artifact write, history append, predecessor removal, and transition
+removal. A fresh process must then
 load the persisted runtime exactly as the killed process left it, converge
 recovery alone on the phase-authoritative generation without creating a
 container, and only then apply the successor. This is process-crash evidence,

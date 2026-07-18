@@ -3,6 +3,10 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -20,12 +24,15 @@ import (
 )
 
 type runtimeRunner struct {
-	calls       []string
-	network     string
-	mountSource string
-	containers  string
-	planDigest  string
-	declDigest  string
+	calls               []string
+	network             string
+	mountSource         string
+	containers          string
+	planDigest          string
+	declDigest          string
+	successorPlanDigest string
+	successorDeclDigest string
+	successorNanoCPUs   int64
 }
 
 type destroyFailRunner struct{ runtimeRunner }
@@ -37,6 +44,118 @@ type failOnceRunner struct {
 }
 
 type stoppedRunner struct{ runtimeRunner }
+
+type workspaceMutatingRunner struct {
+	runtimeRunner
+	workspace string
+	mutated   bool
+	stopped   bool
+}
+
+type workspaceStartingRunner struct {
+	runtimeRunner
+	workspace string
+	mutated   bool
+}
+
+type cancellationRunner struct{ runtimeRunner }
+
+type workspaceMountRunner struct {
+	runtimeRunner
+	mounts  map[string][]map[string]any
+	running map[string]bool
+}
+
+func (r *workspaceMountRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	raw, err := r.runtimeRunner.Run(ctx, name, args...)
+	if err != nil || len(args) == 0 {
+		return raw, err
+	}
+	switch args[0] {
+	case "create":
+		container := ""
+		mounts := []map[string]any{}
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--name" && i+1 < len(args) {
+				container = args[i+1]
+			}
+			if args[i] != "--mount" || i+1 >= len(args) {
+				continue
+			}
+			mount := map[string]any{"RW": false}
+			fields := strings.Split(args[i+1], ",")
+			for _, field := range fields {
+				switch {
+				case strings.HasPrefix(field, "src="):
+					mount["Source"] = strings.TrimPrefix(field, "src=")
+				case strings.HasPrefix(field, "dst="):
+					mount["Destination"] = strings.TrimPrefix(field, "dst=")
+				case field == "rw":
+					mount["RW"] = true
+				}
+			}
+			mount["Mode"] = strings.Join(fields[3:], ",")
+			mounts = append(mounts, mount)
+		}
+		if r.mounts == nil {
+			r.mounts = map[string][]map[string]any{}
+			r.running = map[string]bool{}
+		}
+		r.mounts[container] = mounts
+		r.running[container] = false
+	case "start":
+		r.running[args[len(args)-1]] = true
+	case "stop":
+		r.running[args[len(args)-1]] = false
+	case "inspect":
+		container := args[len(args)-1]
+		var documents []map[string]any
+		if err := json.Unmarshal(raw, &documents); err != nil || len(documents) != 1 {
+			return nil, fmt.Errorf("rewrite inspect fixture: %w", err)
+		}
+		documents[0]["Mounts"] = r.mounts[container]
+		state := documents[0]["State"].(map[string]any)
+		state["Running"] = r.running[container]
+		if !r.running[container] {
+			state["Pid"] = float64(0)
+		}
+		return json.Marshal(documents)
+	}
+	return raw, nil
+}
+
+func (r *cancellationRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if len(args) > 0 && args[0] == "ps" {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return r.runtimeRunner.Run(ctx, name, args...)
+}
+
+func (r *workspaceStartingRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if len(args) > 0 && args[0] == "ps" && !r.mutated {
+		r.mutated = true
+		if err := os.WriteFile(filepath.Join(r.workspace, "started-after-review"), []byte("changed"), 0o600); err != nil {
+			return nil, err
+		}
+	}
+	return r.runtimeRunner.Run(ctx, name, args...)
+}
+
+func (r *workspaceMutatingRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	stopping := len(args) > 0 && args[0] == "stop"
+	if stopping && !r.mutated {
+		r.mutated = true
+		if err := os.WriteFile(filepath.Join(r.workspace, "after-review"), []byte("changed"), 0o600); err != nil {
+			return nil, err
+		}
+	}
+	raw, err := r.runtimeRunner.Run(ctx, name, args...)
+	if stopping && err == nil {
+		r.stopped = true
+	}
+	return raw, err
+}
 
 func (r *stoppedRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	raw, err := r.runtimeRunner.Run(ctx, name, args...)
@@ -100,13 +219,20 @@ func (r *runtimeRunner) Run(_ context.Context, _ string, args ...string) ([]byte
 			network = "none"
 		}
 		planDigest, declDigest := r.planDigest, r.declDigest
+		if generation == 2 && r.successorPlanDigest != "" {
+			planDigest, declDigest = r.successorPlanDigest, r.successorDeclDigest
+		}
 		if planDigest == "" {
-			planDigest = "pd"
+			planDigest = preparedFixture().Result.PlanDigest
 		}
 		if declDigest == "" {
-			declDigest = "dd"
+			declDigest = preparedFixture().Result.DeclarationDigest
 		}
-		return []byte(fmt.Sprintf(`[{"Name":%q,"BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":%q,"io.kenogram.plan-digest":%q,"io.kenogram.declaration-digest":%q}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":1000000000,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, container, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), strconv.Itoa(generation), planDigest, declDigest, network, r.mountSource)), nil
+		nanoCPUs := int64(1_000_000_000)
+		if generation == 2 && r.successorNanoCPUs != 0 {
+			nanoCPUs = r.successorNanoCPUs
+		}
+		return []byte(fmt.Sprintf(`[{"Name":%q,"BoundingCaps":[],"State":{"Running":true,"Pid":123},"IDMappings":{"UidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}],"GidMap":[{"ContainerID":%d,"HostID":%d,"Size":1}]},"Config":{"User":"agent","Hostname":"w","WorkingDir":"/workspace","Labels":{"io.kenogram.world":"w","io.kenogram.generation":%q,"io.kenogram.plan-digest":%q,"io.kenogram.declaration-digest":%q}},"HostConfig":{"NetworkMode":%q,"IpcMode":"private","PidMode":"private","UTSMode":"private","UsernsMode":"","CapDrop":["CAP_ALL"],"SecurityOpt":["no-new-privileges"],"Memory":2,"NanoCpus":%d,"PidsLimit":3},"Mounts":[{"Source":%q,"Destination":"/workspace","RW":true,"Mode":"rw,nodev,nosuid"}]}]`, container, os.Getuid(), os.Getuid(), os.Getgid(), os.Getgid(), strconv.Itoa(generation), planDigest, declDigest, network, nanoCPUs, r.mountSource)), nil
 	}
 	if len(args) > 0 && args[0] == "ps" {
 		if r.containers != "" {
@@ -132,7 +258,24 @@ func testBackend(r backend.Runner) *backend.Podman {
 }
 
 func preparedFixture() Prepared {
-	return Prepared{Raw: []byte("version = 1\n"), Result: plan.Result{PlanDigest: "pd", DeclarationDigest: "dd", Plan: plan.Plan{Version: 1, Name: "w", World: plan.World{Hostname: "w", Base: "base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workdir: "/workspace", User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}, Workspace: []string{"/workspace"}}}, Declaration: decl.Declaration{Name: "w"}}
+	prepared := Prepared{Raw: []byte("version = 1\n"), Result: plan.Result{Plan: plan.Plan{Version: 1, Name: "w", World: plan.World{Hostname: "w", Base: "base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Workdir: "/workspace", User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}, Workspace: []string{"/workspace"}}}, Declaration: decl.Declaration{Name: "w"}}
+	canonical, err := plan.Canonical(prepared.Result.Plan)
+	if err != nil {
+		panic(err)
+	}
+	planSum := sha256.Sum256(canonical)
+	prepared.Result.PlanDigest = hex.EncodeToString(planSum[:])
+	prepared.Result.DeclarationDigest = DeclarationDigest(prepared.Raw)
+	return prepared
+}
+
+func refreshPreparedPlanDigest(prepared *Prepared) {
+	canonical, err := plan.Canonical(prepared.Result.Plan)
+	if err != nil {
+		panic(err)
+	}
+	sum := sha256.Sum256(canonical)
+	prepared.Result.PlanDigest = hex.EncodeToString(sum[:])
 }
 func TestUpRecordsAppliedOnlyAfterEvidence(t *testing.T) {
 	base := t.TempDir()
@@ -162,6 +305,825 @@ func TestUpRecordsAppliedOnlyAfterEvidence(t *testing.T) {
 	}
 	if !containsCall(runner.calls, "cp ", "/generated/. kenogram-w-g1:/") {
 		t.Fatalf("generated root contents were not copied to /: %v", runner.calls)
+	}
+}
+
+func TestUpReviewedRejectsEvidenceChangedAfterReview(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	prepared := preparedFixture()
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layout.Workspace, "appeared-after-review"), []byte("unreviewed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = a.UpReviewed(context.Background(), prepared, comparison)
+	if err == nil || !strings.Contains(err.Error(), "revalidate reviewed comparison") {
+		t.Fatalf("error = %v", err)
+	}
+	if containsCall(runner.calls, "create ", "") {
+		t.Fatalf("runtime mutated after stale review: %v", runner.calls)
+	}
+}
+
+func TestUpReviewedAcceptsItsOwnEmptyWorldDirectoryCreation(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	prepared := preparedFixture()
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpReviewed(context.Background(), prepared, comparison); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpReviewedRejectsDifferentSuccessorThanReviewed(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	reviewed := preparedFixture()
+	comparison, err := a.CompareUp(reviewed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	different := reviewed
+	different.Result.Plan.Resources.CPUs++
+	canonical, err := plan.Canonical(different.Result.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(canonical)
+	different.Result.PlanDigest = hex.EncodeToString(sum[:])
+	err = a.UpReviewed(context.Background(), different, comparison)
+	if err == nil || !strings.Contains(err.Error(), "reviewed predecessor evidence changed") {
+		t.Fatalf("error = %v", err)
+	}
+	if containsCall(runner.calls, "create ", "") {
+		t.Fatalf("runtime mutated after successor changed: %v", runner.calls)
+	}
+}
+
+func TestUpReviewedRejectsCandidateContentChangedWithoutDigest(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Prepared)
+		want   string
+	}{
+		{
+			name: "plan",
+			mutate: func(prepared *Prepared) {
+				prepared.Result.Plan.Resources.CPUs++
+			},
+			want: "plan digest does not match prepared plan",
+		},
+		{
+			name: "declaration",
+			mutate: func(prepared *Prepared) {
+				prepared.Raw = append(append([]byte(nil), prepared.Raw...), []byte("# changed after review\n")...)
+			},
+			want: "declaration digest does not match prepared bytes",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			runner := &runtimeRunner{}
+			a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+			prepared := preparedFixture()
+			comparison, err := a.CompareUp(prepared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&prepared)
+			err = a.UpReviewed(context.Background(), prepared, comparison)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+			if containsCall(runner.calls, "create ", "") {
+				t.Fatalf("runtime mutated after candidate changed: %v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestUpReviewedRejectsTamperedComparisonPresentation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*UpComparison)
+	}{
+		{
+			name: "changes",
+			mutate: func(comparison *UpComparison) {
+				comparison.Changes = append(comparison.Changes, plan.Change{Path: "resources.cpus", Before: "1", After: "2"})
+			},
+		},
+		{
+			name: "workspace",
+			mutate: func(comparison *UpComparison) {
+				comparison.Workspace = "workspace: caller replacement"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			runner := &runtimeRunner{}
+			a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+			prepared := preparedFixture()
+			comparison, err := a.CompareUp(prepared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&comparison)
+			err = a.UpReviewed(context.Background(), prepared, comparison)
+			if err == nil || !strings.Contains(err.Error(), "reviewed predecessor evidence changed") {
+				t.Fatalf("error = %v", err)
+			}
+			if containsCall(runner.calls, "create ", "") {
+				t.Fatalf("runtime mutated after comparison changed: %v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestCompareUpAllowsFailureOnlyHistoryForRetry(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := history.Append(layout.History, history.Record{Action: "up", Outcome: "failed", Detail: "create: injected"}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{BaseDir: base}
+	comparison, err := a.CompareUp(preparedFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comparison.Workspace != "workspace: new (no carried state)" {
+		t.Fatalf("workspace = %q", comparison.Workspace)
+	}
+}
+
+func TestFailedFirstCreateRemainsReviewable(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &failOnceRunner{prefix: "create"}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpReviewed(context.Background(), prepared, comparison); err == nil || !strings.Contains(err.Error(), "injected create failure") {
+		t.Fatalf("first apply error = %v", err)
+	}
+	retry, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.Workspace != "workspace: new (no carried state)" {
+		t.Fatalf("retry workspace = %q", retry.Workspace)
+	}
+	if err := a.UpReviewed(context.Background(), prepared, retry); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompareUpRejectsNoncanonicalEmptyWorkspaceRoot(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(layout.Workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&App{BaseDir: base}).CompareUp(preparedFixture()); err == nil || !strings.Contains(err.Error(), "carried workspace entries exist") {
+		t.Fatalf("comparison error = %v", err)
+	}
+}
+
+func TestFailedStartedFirstApplyPreservesCarriedWorkspace(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &failOnceRunner{prefix: "inspect"}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	a.lifecycleCheckpoint = func(name string) {
+		if name != "successor-started" {
+			return
+		}
+		if err := os.WriteFile(filepath.Join(layout.WorkspacePath("/workspace"), "inhabitant-data"), []byte("preserve"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.UpReviewed(context.Background(), prepared, comparison); err == nil || !strings.Contains(err.Error(), "injected inspect failure") {
+		t.Fatalf("first apply error = %v", err)
+	}
+	if _, err := a.CompareUp(prepared); err == nil || !strings.Contains(err.Error(), "carried workspace entries exist") {
+		t.Fatalf("retry comparison error = %v", err)
+	}
+}
+
+func TestUpReviewedAcceptsQuiescentWorkspaceScaffolding(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		workspace []string
+	}{
+		{name: "add path", workspace: []string{"/workspace", "/data"}},
+		{name: "replace path", workspace: []string{"/data"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			prepared := preparedFixture()
+			runner := &workspaceMountRunner{}
+			runner.planDigest = prepared.Result.PlanDigest
+			runner.declDigest = prepared.Result.DeclarationDigest
+			a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+			if err := a.Up(context.Background(), prepared); err != nil {
+				t.Fatal(err)
+			}
+			layout := worldfs.For(base, "w")
+			if err := os.WriteFile(filepath.Join(layout.WorkspacePath("/workspace"), "carried"), []byte("stable"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.Down(context.Background(), "w"); err != nil {
+				t.Fatal(err)
+			}
+			successor := prepared
+			successor.Result.Plan.Workspace = test.workspace
+			refreshPreparedPlanDigest(&successor)
+			runner.successorPlanDigest = successor.Result.PlanDigest
+			runner.successorDeclDigest = successor.Result.DeclarationDigest
+			comparison, err := a.CompareUp(successor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := a.UpReviewed(context.Background(), successor, comparison); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := os.ReadFile(filepath.Join(layout.WorkspacePath("/workspace"), "carried")); err != nil || string(got) != "stable" {
+				t.Fatalf("carried workspace = %q, %v", got, err)
+			}
+			if info, err := os.Stat(layout.WorkspacePath("/data")); err != nil || !info.IsDir() {
+				t.Fatalf("candidate scaffold = %#v, %v", info, err)
+			}
+		})
+	}
+}
+
+func TestCompareUpAllowsRepairedFailureOnlyHistory(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	prepared := preparedFixture()
+	if _, err := history.Append(layout.History, history.Record{Action: "up", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, Outcome: "failed", Detail: "create: injected"}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(layout.History, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("{\"truncated\":"); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeRunner{}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.RepairHistory("w"); err != nil {
+		t.Fatal(err)
+	}
+	records, err := history.Verify(layout.History)
+	if err != nil || len(records) != 2 {
+		t.Fatalf("repaired history = %#v, %v", records, err)
+	}
+	repair := records[1]
+	if repair.Action != "history-repair" || repair.Outcome != "truncated-tail-removed" || repair.PlanDigest != "" || repair.DeclarationDigest != "" || len(repair.ImageDigests) != 0 || repair.WorkspaceDigest != "" || repair.Detail != "" {
+		t.Fatalf("repair record carries authority: %#v", repair)
+	}
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpReviewed(context.Background(), prepared, comparison); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompareUpRejectsAmbiguousHistoryRepair(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		records []history.Record
+	}{
+		{name: "standalone repair", records: []history.Record{{Action: "history-repair", Outcome: "truncated-tail-removed"}}},
+		{name: "repair with authority field", records: []history.Record{{Action: "up", Outcome: "failed"}, {Action: "history-repair", Outcome: "truncated-tail-removed", WorkspaceDigest: strings.Repeat("a", sha256.Size*2)}}},
+		{name: "repair after applied authority", records: []history.Record{{Action: "up", Outcome: "applied"}, {Action: "history-repair", Outcome: "truncated-tail-removed"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			layout := worldfs.For(base, "w")
+			if err := layout.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			for i, record := range test.records {
+				if _, err := history.Append(layout.History, record, time.Unix(int64(i+1), 0)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := (&App{BaseDir: base}).CompareUp(preparedFixture()); err == nil || !strings.Contains(err.Error(), "authoritative history exists") {
+				t.Fatalf("comparison error = %v", err)
+			}
+		})
+	}
+}
+
+func TestCompareUpRejectsCorruptAuthoritativeEvidence(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, worldfs.Layout)
+		want   string
+	}{
+		{
+			name: "missing history",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				if err := os.Remove(layout.History); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "verify predecessor history",
+		},
+		{
+			name: "truncated history",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				if err := os.WriteFile(layout.History, []byte("{\"truncated\":"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "truncated final record",
+		},
+		{
+			name: "empty history",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				if err := os.WriteFile(layout.History, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "authoritative history is empty",
+		},
+		{
+			name: "hash-corrupt history",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				records, err := history.Verify(layout.History)
+				if err != nil || len(records) == 0 {
+					t.Fatalf("history before corruption = %#v, %v", records, err)
+				}
+				records[0].Hash = strings.Repeat("0", sha256.Size*2)
+				raw, err := json.Marshal(records[0])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(layout.History, append(raw, '\n'), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "hash mismatch",
+		},
+		{
+			name: "invalid workspace digest",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				if err := os.WriteFile(filepath.Join(layout.Digests, "g1.json"), []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "validate digest tree",
+		},
+		{
+			name: "wrong state name",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				mutateState(t, layout, func(state *worldfs.State) { state.Name = "different-world" })
+			},
+			want: "does not match world",
+		},
+		{
+			name: "non-positive state generation",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				mutateState(t, layout, func(state *worldfs.State) { state.Generation = 0 })
+			},
+			want: "is not positive",
+		},
+		{
+			name: "non-canonical state container",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				mutateState(t, layout, func(state *worldfs.State) { state.Container = "" })
+			},
+			want: "does not match \"kenogram-w-g1\"",
+		},
+		{
+			name: "invalid state status",
+			mutate: func(t *testing.T, layout worldfs.Layout) {
+				mutateState(t, layout, func(state *worldfs.State) { state.Status = "nonsense" })
+			},
+			want: "is not valid here",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			prepared := preparedFixture()
+			runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+			a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+			if err := a.Up(context.Background(), prepared); err != nil {
+				t.Fatal(err)
+			}
+			layout := worldfs.For(base, "w")
+			test.mutate(t, layout)
+			if _, err := a.CompareUp(prepared); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCompareUpRejectsLiveAuthorityWithMissingWorkspaceMount(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	if err := os.RemoveAll(layout.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CompareUp(prepared); err == nil || !strings.Contains(err.Error(), "running container does not match recorded authority") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCompareUpContextCancelsRuntimeObservation(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	a.Backend = testBackend(&cancellationRunner{runtimeRunner: *runner})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := a.CompareUpContext(ctx, prepared); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", err)
+	}
+}
+
+func mutateState(t *testing.T, layout worldfs.Layout, mutate func(*worldfs.State)) {
+	t.Helper()
+	state, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&state)
+	if err := layout.WriteState(state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompareUpRejectsOrphanedStaging(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	stage := filepath.Join(layout.Staging, "g1")
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "partial"), []byte("orphan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{BaseDir: base}
+	if _, err := a.CompareUp(preparedFixture()); err == nil || !strings.Contains(err.Error(), "staged generation artifacts exist") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCompareUpVerifiesOptionalFirstGenerationTransitionHistory(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteTransition(worldfs.Transition{
+		Version:   1,
+		Phase:     "rollback",
+		Successor: worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", Status: "staging"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.History, []byte("{\"truncated\":"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{BaseDir: base}
+	if _, err := a.CompareUp(preparedFixture()); err == nil || !strings.Contains(err.Error(), "truncated final record") {
+		t.Fatalf("corrupt optional history error = %v", err)
+	}
+	if err := os.Remove(layout.History); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CompareUp(preparedFixture()); err != nil {
+		t.Fatalf("missing first-generation transition history = %v", err)
+	}
+}
+
+func TestValidateComparisonTransitionRejectsInconsistentStates(t *testing.T) {
+	valid := worldfs.Transition{
+		Version:         1,
+		Phase:           "rollback",
+		Prior:           &worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", Status: "running"},
+		PriorWasRunning: true,
+		Successor:       worldfs.State{Name: "w", Generation: 2, Container: "kenogram-w-g2", Status: "staging"},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*worldfs.Transition)
+		want   string
+	}{
+		{name: "wrong successor name", mutate: func(transition *worldfs.Transition) { transition.Successor.Name = "other" }, want: "does not match world"},
+		{name: "wrong successor container", mutate: func(transition *worldfs.Transition) { transition.Successor.Container = "other" }, want: "does not match"},
+		{name: "wrong successor status", mutate: func(transition *worldfs.Transition) { transition.Successor.Status = "running" }, want: "is not valid here"},
+		{name: "nonsequential generation", mutate: func(transition *worldfs.Transition) {
+			transition.Successor.Generation = 3
+			transition.Successor.Container = "kenogram-w-g3"
+		}, want: "does not follow"},
+		{name: "running down prior", mutate: func(transition *worldfs.Transition) { transition.Prior.Status = "down" }, want: "recorded running"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transition := valid
+			prior := *valid.Prior
+			transition.Prior = &prior
+			test.mutate(&transition)
+			if err := validateComparisonTransition(transition, "w"); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestUpReviewedRecomparesAuthorityAfterRollbackRecovery(t *testing.T) {
+	base := t.TempDir()
+	raw := []byte(`version = 1
+name = "w"
+[world]
+hostname = "w"
+base = "base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+workdir = "/workspace"
+user = "agent"
+[resources]
+cpus = 1
+memory_bytes = 2
+pids = 3
+[workspace]
+paths = ["/workspace"]
+`)
+	prepared, err := PrepareBytes(raw, filepath.Join(base, "world.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	state, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryPlan, err := encodeRecoveryPlan(prepared.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteTransition(worldfs.Transition{
+		Version:          1,
+		Phase:            "rollback",
+		Prior:            &state,
+		PriorDeclaration: prepared.Raw,
+		PriorPlan:        recoveryPlan,
+		Successor:        worldfs.State{Name: "w", Generation: 2, Container: "kenogram-w-g2", Status: "staging"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !comparison.recoveryPending {
+		t.Fatal("comparison did not record pending recovery")
+	}
+	tampered := comparison
+	tampered.recoveryPending = false
+	if err := a.UpReviewed(context.Background(), prepared, tampered); err == nil || !strings.Contains(err.Error(), "reviewed predecessor evidence changed") {
+		t.Fatalf("tampered comparison error = %v", err)
+	}
+	if _, err := os.Stat(layout.Transition); err != nil {
+		t.Fatalf("tampered comparison recovered transition: %v", err)
+	}
+	if err := a.UpReviewed(context.Background(), prepared, comparison); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(layout.Transition); !os.IsNotExist(err) {
+		t.Fatalf("transition remains after reviewed recovery: %v", err)
+	}
+}
+
+func TestUpReviewedCarriesWorkspaceAdvancedByActivePredecessor(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &workspaceMutatingRunner{}
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	runner.workspace = layout.Workspace
+	successor := prepared
+	successor.Result.Plan.Resources.CPUs++
+	refreshPreparedPlanDigest(&successor)
+	runner.successorPlanDigest = successor.Result.PlanDigest
+	runner.successorDeclDigest = successor.Result.DeclarationDigest
+	runner.successorNanoCPUs = successor.Result.Plan.Resources.CPUs * 1_000_000_000
+	comparison, err := a.CompareUp(successor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digestCalls := 0
+	a.digestWorkspace = func(path string) (worldfs.DigestTree, error) {
+		digestCalls++
+		if !runner.stopped {
+			return worldfs.DigestTree{}, fmt.Errorf("live workspace cannot be observed atomically")
+		}
+		return worldfs.Digest(path)
+	}
+	cutoverRecorded := false
+	a.lifecycleCheckpoint = func(name string) {
+		if name != "cutover-workspace-recorded" {
+			return
+		}
+		transition, err := layout.ReadTransition()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cutover, err := worldfs.Digest(layout.Workspace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if transition.Workspace.Root != cutover.Root {
+			t.Fatalf("recorded cutover root = %q, want %q", transition.Workspace.Root, cutover.Root)
+		}
+		cutoverRecorded = true
+	}
+	if err := a.UpReviewed(context.Background(), successor, comparison); err != nil {
+		t.Fatal(err)
+	}
+	if !cutoverRecorded {
+		t.Fatal("cutover workspace was not durably recorded")
+	}
+	if digestCalls != 1 {
+		t.Fatalf("workspace digest calls = %d, want only the post-stop cutover", digestCalls)
+	}
+	if !containsCall(runner.calls, "start ", "kenogram-w-g2") {
+		t.Fatalf("successor did not start with authoritative workspace: %v", runner.calls)
+	}
+	if got, err := os.ReadFile(filepath.Join(layout.Workspace, "after-review")); err != nil || string(got) != "changed" {
+		t.Fatalf("carried workspace = %q, %v", got, err)
+	}
+}
+
+func TestUpReviewedRejectsInactiveWorkspaceChangedAtCutover(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Down(context.Background(), "w"); err != nil {
+		t.Fatal(err)
+	}
+	stopped := &stoppedRunner{runtimeRunner: *runner}
+	a.Backend = testBackend(stopped)
+	layout := worldfs.For(base, "w")
+	successor := prepared
+	successor.Result.Plan.Resources.CPUs++
+	refreshPreparedPlanDigest(&successor)
+	runner.successorPlanDigest = successor.Result.PlanDigest
+	runner.successorDeclDigest = successor.Result.DeclarationDigest
+	runner.successorNanoCPUs = successor.Result.Plan.Resources.CPUs * 1_000_000_000
+	comparison, err := a.CompareUp(successor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.lifecycleCheckpoint = func(name string) {
+		if name == "rollback-recorded" {
+			if err := os.WriteFile(filepath.Join(layout.Workspace, "after-review"), []byte("changed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	err = a.UpReviewed(context.Background(), successor, comparison)
+	if err == nil || !strings.Contains(err.Error(), "reviewed workspace changed before successor start") {
+		t.Fatalf("error = %v", err)
+	}
+	if containsCall(stopped.calls, "start ", "kenogram-w-g2") {
+		t.Fatalf("successor started with unreviewed inactive workspace: %v", stopped.calls)
+	}
+}
+
+func TestUpReviewedRejectsQuiescentPredecessorBecomingActive(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Down(context.Background(), "w"); err != nil {
+		t.Fatal(err)
+	}
+	stopped := &stoppedRunner{runtimeRunner: *runner}
+	a.Backend = testBackend(stopped)
+	successor := prepared
+	successor.Result.Plan.Resources.CPUs++
+	refreshPreparedPlanDigest(&successor)
+	comparison, err := a.CompareUp(successor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	started := &workspaceStartingRunner{runtimeRunner: *runner, workspace: layout.Workspace}
+	started.successorPlanDigest = successor.Result.PlanDigest
+	started.successorDeclDigest = successor.Result.DeclarationDigest
+	started.successorNanoCPUs = successor.Result.Plan.Resources.CPUs * 1_000_000_000
+	a.Backend = testBackend(started)
+	err = a.UpReviewed(context.Background(), successor, comparison)
+	if err == nil || !strings.Contains(err.Error(), "reviewed quiescent predecessor became active") {
+		t.Fatalf("error = %v", err)
+	}
+	if containsCall(started.calls, "create ", "kenogram-w-g2") || containsCall(started.calls, "start ", "kenogram-w-g2") {
+		t.Fatalf("successor mutated after classification changed: %v", started.calls)
+	}
+}
+
+func TestUpReviewedRejectsNewWorldWorkspaceCreatedAtCutover(t *testing.T) {
+	base := t.TempDir()
+	prepared := preparedFixture()
+	runner := &runtimeRunner{planDigest: prepared.Result.PlanDigest, declDigest: prepared.Result.DeclarationDigest}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	comparison, err := a.CompareUp(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(base, "w")
+	a.lifecycleCheckpoint = func(name string) {
+		if name != "rollback-recorded" {
+			return
+		}
+		if err := os.WriteFile(filepath.Join(layout.Workspace, "after-review"), []byte("changed"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err = a.UpReviewed(context.Background(), prepared, comparison)
+	if err == nil || !strings.Contains(err.Error(), "reviewed workspace changed before successor start") {
+		t.Fatalf("error = %v", err)
+	}
+	if containsCall(runner.calls, "start ", "kenogram-w-g1") {
+		t.Fatalf("successor started with unreviewed workspace: %v", runner.calls)
+	}
+	if _, err := os.Stat(layout.Transition); !os.IsNotExist(err) {
+		t.Fatalf("rollback transition remains: %v", err)
 	}
 }
 
@@ -568,6 +1530,9 @@ func TestUpRejectsBadRuntimeEvidence(t *testing.T) {
 	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
 	prepared := preparedFixture()
 	prepared.Result.Plan.Services = []plan.Service{{Name: "canary", Command: []string{"/bin/true"}, Autostart: true, Restart: "never"}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
 	err := a.Up(context.Background(), prepared)
 	if err == nil || !strings.Contains(err.Error(), "network mode") {
 		t.Fatalf("err=%v", err)
@@ -640,6 +1605,7 @@ func TestUpRejectsMountsOverlappingControlAndState(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			prepared := preparedFixture()
 			prepared.Result.Plan.Mounts = []plan.Mount{{Source: source, Target: "/host", Mode: "ro"}}
+			refreshPreparedPlanDigest(&prepared)
 			runner := &runtimeRunner{}
 			a := &App{Backend: testBackend(runner), BaseDir: stateRoot, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
 			err := a.Up(context.Background(), prepared)
@@ -730,6 +1696,7 @@ func TestUpRejectsCopyDriftBeforeCutover(t *testing.T) {
 	}
 	prepared := preparedFixture()
 	prepared.Result.Plan.Copies = []plan.Copy{{Source: source, SourceDigest: digest, Target: "/etc/config", Mode: "0600"}}
+	refreshPreparedPlanDigest(&prepared)
 	if err := os.WriteFile(source, []byte("changed"), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package worldfs
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -137,12 +139,11 @@ func digestOnce(root string) (DigestTree, error) {
 		return DigestTree{}, err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	raw, err := json.Marshal(entries)
+	digestRoot, err := digestEntriesRoot(entries)
 	if err != nil {
 		return DigestTree{}, err
 	}
-	sum := sha256.Sum256(raw)
-	return DigestTree{Root: hex.EncodeToString(sum[:]), Entries: entries}, nil
+	return DigestTree{Root: digestRoot, Entries: entries}, nil
 }
 func hashFile(path string, before os.FileInfo) (string, error) {
 	f, err := os.Open(path)
@@ -173,10 +174,99 @@ func (l Layout) ReadDigest(generation int64) (DigestTree, error) {
 	if err != nil {
 		return tree, err
 	}
-	if err := json.Unmarshal(raw, &tree); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&tree); err != nil {
 		return tree, err
 	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return DigestTree{}, fmt.Errorf("digest tree contains trailing JSON")
+	}
+	if err := ValidateDigestTree(tree); err != nil {
+		return DigestTree{}, fmt.Errorf("validate digest tree: %w", err)
+	}
 	return tree, nil
+}
+
+// ValidateDigestTree proves that durable workspace evidence has the canonical
+// shape and root hash emitted by Digest. Decodable JSON alone is not evidence.
+func ValidateDigestTree(tree DigestTree) error {
+	if len(tree.Entries) == 0 {
+		return fmt.Errorf("entries are empty")
+	}
+	types := make(map[string]string, len(tree.Entries))
+	for i, entry := range tree.Entries {
+		if i == 0 {
+			if entry.Path != "" || entry.Type != "directory" {
+				return fmt.Errorf("first entry is not the workspace root directory")
+			}
+		} else if tree.Entries[i-1].Path >= entry.Path {
+			return fmt.Errorf("entries are not in unique canonical path order at %q", entry.Path)
+		}
+		if entry.Path != "" && (path.IsAbs(entry.Path) || entry.Path == "." || entry.Path == ".." || strings.HasPrefix(entry.Path, "../") || path.Clean(entry.Path) != entry.Path) {
+			return fmt.Errorf("entry path %q is not canonical", entry.Path)
+		}
+		if entry.Path != "" {
+			parent := path.Dir(entry.Path)
+			if parent == "." {
+				parent = ""
+			}
+			if types[parent] != "directory" {
+				return fmt.Errorf("entry %q has missing or non-directory parent %q", entry.Path, parent)
+			}
+		}
+		if entry.Mode > 0o777 {
+			return fmt.Errorf("entry %q has invalid mode", entry.Path)
+		}
+		if entry.Size < 0 {
+			return fmt.Errorf("entry %q has negative size", entry.Path)
+		}
+		switch entry.Type {
+		case "file":
+			if !isLowerSHA256(entry.SHA256) {
+				return fmt.Errorf("file entry %q has invalid sha256", entry.Path)
+			}
+		case "directory":
+			if entry.Size != 0 {
+				return fmt.Errorf("directory entry %q has nonzero size", entry.Path)
+			}
+		case "symlink", "socket", "fifo", "device", "special":
+		default:
+			return fmt.Errorf("entry %q has invalid type %q", entry.Path, entry.Type)
+		}
+		if entry.Type != "file" && entry.SHA256 != "" {
+			return fmt.Errorf("non-file entry %q has a sha256", entry.Path)
+		}
+		if entry.Type != "symlink" && entry.Link != "" {
+			return fmt.Errorf("non-symlink entry %q has a link target", entry.Path)
+		}
+		types[entry.Path] = entry.Type
+	}
+	want, err := digestEntriesRoot(tree.Entries)
+	if err != nil {
+		return err
+	}
+	if tree.Root != want {
+		return fmt.Errorf("root hash mismatch")
+	}
+	return nil
+}
+
+func digestEntriesRoot(entries []DigestEntry) (string, error) {
+	raw, err := json.Marshal(entries)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func isLowerSHA256(value string) bool {
+	if len(value) != sha256.Size*2 || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 func ChangedFiles(before, after DigestTree) int {
 	a := map[string]string{}

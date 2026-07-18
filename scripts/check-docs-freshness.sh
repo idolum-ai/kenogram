@@ -71,8 +71,8 @@ for entry in "${container_e2e_inventory[@]}"; do
   test "$tmp_line" -lt "$prepare_line"
 done
 lifecycle_checkpoint_count="$(sed -n '/var lifecycleCrashCheckpoints = \[\]string{/,/^}/p' internal/app/lifecycle_crash_test.go | rg -o '"[^"]+"' | wc -l)"
-test "$lifecycle_checkpoint_count" -eq 14
-rg -Fq 'fourteen lifecycle boundaries' requirements/lifecycle.md
+test "$lifecycle_checkpoint_count" -eq 15
+rg -Fq 'fifteen lifecycle boundaries' requirements/lifecycle.md
 if rg -iq 'make e2e.{0,40}(three proofs|runs all three|runs all five)' requirements/INDEX.md README.md; then
   echo "stale make e2e proof count" >&2
   exit 1
