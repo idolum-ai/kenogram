@@ -103,7 +103,7 @@ func (a *App) InspectWorkspaceContext(ctx context.Context, world string, baselin
 	if err != nil {
 		return WorkspaceInspection{}, fmt.Errorf("digest current workspace: %w", err)
 	}
-	loci, err := compareWorkspaceLoci(l, prepared.Result.Plan.Workspace, baseline, current)
+	loci, err := compareWorkspaceLociContext(ctx, l, prepared.Result.Plan.Workspace, baseline, current)
 	if err != nil {
 		return WorkspaceInspection{}, err
 	}
@@ -114,6 +114,12 @@ func (a *App) InspectWorkspaceContext(ctx context.Context, world string, baselin
 }
 
 const stableInspectionAttempts = 8
+
+var inspectionDigestLimits = worldfs.DigestLimits{
+	MaxEntries:       100_000,
+	MaxMetadataBytes: 32 << 20,
+	MaxFileBytes:     1 << 30,
+}
 
 func (a *App) stableInspectionDigest(ctx context.Context, workspace string) (worldfs.DigestTree, error) {
 	previous, err := a.digestContext(ctx, workspace)
@@ -143,6 +149,9 @@ func verifyInspectionHistory(ctx context.Context, l worldfs.Layout, state worldf
 	}
 	applied := make([]history.Record, 0)
 	for _, record := range records {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("filter applied history: %w", err)
+		}
 		if record.Action == "up" && record.Outcome == "applied" {
 			applied = append(applied, record)
 		}
@@ -171,7 +180,7 @@ func verifyInspectionHistory(ctx context.Context, l worldfs.Layout, state worldf
 	if baselineGeneration > int64(len(roots)) || roots[int(baselineGeneration-1)] != baselineRoot {
 		return fmt.Errorf("baseline g%d changed while binding history", baselineGeneration)
 	}
-	baselineRecords, err := bindInspectionGenerations(roots, applied, int(baselineGeneration-1))
+	baselineRecords, err := bindInspectionGenerationsContext(ctx, roots, applied, int(baselineGeneration-1))
 	if err != nil {
 		return fmt.Errorf("bind committed generations to applied history: %w", err)
 	}
@@ -180,6 +189,9 @@ func verifyInspectionHistory(ctx context.Context, l worldfs.Layout, state worldf
 		return fmt.Errorf("authoritative state does not match applied history for g%d", state.Generation)
 	}
 	for _, recordIndex := range baselineRecords {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("validate baseline history binding: %w", err)
+		}
 		if applied[recordIndex].PlanDigest != state.PlanDigest {
 			return fmt.Errorf("baseline g%d may use a different plan; declared-locus attribution is unavailable", baselineGeneration)
 		}
@@ -194,6 +206,10 @@ func verifyInspectionHistory(ctx context.Context, l worldfs.Layout, state worldf
 // workspace root can make a baseline's exact record ambiguous; callers must
 // therefore validate every returned candidate before attributing a locus.
 func bindInspectionGenerations(roots []string, applied []history.Record, baseline int) ([]int, error) {
+	return bindInspectionGenerationsContext(context.Background(), roots, applied, baseline)
+}
+
+func bindInspectionGenerationsContext(ctx context.Context, roots []string, applied []history.Record, baseline int) ([]int, error) {
 	if len(roots) == 0 || baseline < 0 || baseline >= len(roots) {
 		return nil, fmt.Errorf("invalid generation range")
 	}
@@ -202,6 +218,9 @@ func bindInspectionGenerations(roots []string, applied []history.Record, baselin
 	}
 	baselineRecords := []int(nil)
 	for generation, record := 0, 0; generation < len(roots) || record < len(applied); {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if generation == len(roots) || record == len(applied) || roots[generation] != applied[record].WorkspaceDigest {
 			return nil, fmt.Errorf("unexplained generation gap at g%d or applied record %d", generation+1, record+1)
 		}
@@ -236,10 +255,14 @@ func bindInspectionGenerations(roots []string, applied []history.Record, baselin
 }
 
 func compareWorkspaceLoci(l worldfs.Layout, declared []string, before, after worldfs.DigestTree) ([]WorkspaceLocusInspection, error) {
-	if err := worldfs.ValidateDigestTree(before); err != nil {
+	return compareWorkspaceLociContext(context.Background(), l, declared, before, after)
+}
+
+func compareWorkspaceLociContext(ctx context.Context, l worldfs.Layout, declared []string, before, after worldfs.DigestTree) ([]WorkspaceLocusInspection, error) {
+	if err := worldfs.ValidateDigestTreeContext(ctx, before); err != nil {
 		return nil, fmt.Errorf("validate baseline workspace: %w", err)
 	}
-	if err := worldfs.ValidateDigestTree(after); err != nil {
+	if err := worldfs.ValidateDigestTreeContext(ctx, after); err != nil {
 		return nil, fmt.Errorf("validate current workspace: %w", err)
 	}
 	if before.Entries[0] != after.Entries[0] {
@@ -249,6 +272,9 @@ func compareWorkspaceLoci(l worldfs.Layout, declared []string, before, after wor
 	known := make(map[string]string, len(declared))
 	locusList := make([]locus, 0, len(declared))
 	for _, target := range declared {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		storage := filepath.Base(l.WorkspacePath(target))
 		if prior, exists := known[storage]; exists {
 			return nil, fmt.Errorf("declared loci %q and %q have the same storage identity", prior, target)
@@ -257,12 +283,18 @@ func compareWorkspaceLoci(l worldfs.Layout, declared []string, before, after wor
 		locusList = append(locusList, locus{target: target, storage: storage})
 	}
 	sort.Slice(locusList, func(i, j int) bool { return locusList[i].target < locusList[j].target })
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	byLocus := make(map[string]map[string][2]*worldfs.DigestEntry, len(declared))
 	for _, item := range locusList {
 		byLocus[item.target] = make(map[string][2]*worldfs.DigestEntry)
 	}
 	add := func(side int, entry worldfs.DigestEntry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if entry.Path == "" {
 			return nil
 		}
@@ -294,14 +326,23 @@ func compareWorkspaceLoci(l worldfs.Layout, declared []string, before, after wor
 
 	result := make([]WorkspaceLocusInspection, 0, len(locusList))
 	for _, item := range locusList {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		entries := byLocus[item.target]
 		paths := make([]string, 0, len(entries))
 		for rel := range entries {
 			paths = append(paths, rel)
 		}
 		sort.Strings(paths)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		changes := make([]WorkspaceChange, 0)
 		for _, rel := range paths {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			pair := entries[rel]
 			if pair[0] != nil && pair[1] != nil && *pair[0] == *pair[1] {
 				continue

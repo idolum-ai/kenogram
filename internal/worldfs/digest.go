@@ -29,12 +29,24 @@ type DigestTree struct {
 	Entries []DigestEntry `json:"entries"`
 }
 
+type DigestLimits struct {
+	MaxEntries       int
+	MaxMetadataBytes int64
+	MaxFileBytes     int64
+}
+
 func Digest(root string) (DigestTree, error) {
 	return DigestContext(context.Background(), root)
 }
 
 func DigestContext(ctx context.Context, root string) (DigestTree, error) {
-	return digestRetryContext(ctx, root, digestOnceContext)
+	return DigestContextWithLimits(ctx, root, DigestLimits{})
+}
+
+func DigestContextWithLimits(ctx context.Context, root string, limits DigestLimits) (DigestTree, error) {
+	return digestRetryContext(ctx, root, func(ctx context.Context, root string) (DigestTree, error) {
+		return digestOnceContextWithLimits(ctx, root, limits)
+	})
 }
 
 const digestAttempts = 8
@@ -102,70 +114,22 @@ func digestOnce(root string) (DigestTree, error) {
 }
 
 func digestOnceContext(ctx context.Context, root string) (DigestTree, error) {
-	entries := []DigestEntry{}
-	err := filepath.WalkDir(root, func(path string, item os.DirEntry, walkErr error) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if walkErr != nil {
-			if path != root && os.IsNotExist(walkErr) {
-				return &treeChangedError{path: path, cause: walkErr}
-			}
-			return walkErr
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if rel == "." {
-			rel = ""
-		}
-		info, err := item.Info()
-		if err != nil {
-			if path != root && os.IsNotExist(err) {
-				return &treeChangedError{path: path, cause: err}
-			}
-			return err
-		}
-		entry := DigestEntry{Path: rel, Mode: uint32(info.Mode().Perm()), Size: info.Size()}
-		switch {
-		case info.Mode().IsRegular():
-			entry.Type = "file"
-			sum, err := hashFileContext(ctx, path, info)
-			if err != nil {
-				return err
-			}
-			entry.SHA256 = sum
-		case info.IsDir():
-			entry.Type = "directory"
-			// Directory byte sizes are filesystem bookkeeping and do not
-			// describe the carried tree's semantic content.
-			entry.Size = 0
-		case info.Mode()&os.ModeSymlink != 0:
-			entry.Type = "symlink"
-			link, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			entry.Link = link
-		case info.Mode()&os.ModeSocket != 0:
-			entry.Type = "socket"
-		case info.Mode()&os.ModeNamedPipe != 0:
-			entry.Type = "fifo"
-		case info.Mode()&os.ModeDevice != 0:
-			entry.Type = "device"
-		default:
-			entry.Type = "special"
-		}
-		entries = append(entries, entry)
-		return nil
-	})
+	return digestOnceContextWithLimits(ctx, root, DigestLimits{})
+}
+
+func digestOnceContextWithLimits(ctx context.Context, rootPath string, limits DigestLimits) (DigestTree, error) {
+	entries, err := walkDigestRoot(ctx, rootPath, limits)
 	if err != nil {
 		return DigestTree{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return DigestTree{}, err
+	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	digestRoot, err := digestEntriesRoot(entries)
+	if err := ctx.Err(); err != nil {
+		return DigestTree{}, err
+	}
+	digestRoot, err := digestEntriesRootContext(ctx, entries)
 	if err != nil {
 		return DigestTree{}, err
 	}
@@ -181,6 +145,10 @@ func hashFileContext(ctx context.Context, path string, before os.FileInfo) (stri
 		return "", err
 	}
 	defer f.Close()
+	return hashOpenedFileContext(ctx, path, f, before)
+}
+
+func hashOpenedFileContext(ctx context.Context, path string, f *os.File, before os.FileInfo) (string, error) {
 	opened, err := f.Stat()
 	if err != nil {
 		return "", err
@@ -236,10 +204,10 @@ func (l Layout) ReadDigestContext(ctx context.Context, generation int64) (Digest
 	if err := decoder.Decode(&tree); err != nil {
 		return tree, err
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return DigestTree{}, fmt.Errorf("digest tree contains trailing JSON")
+	if err := requireDigestEOF(ctx, decoder); err != nil {
+		return DigestTree{}, err
 	}
-	if err := ValidateDigestTree(tree); err != nil {
+	if err := ValidateDigestTreeContext(ctx, tree); err != nil {
 		return DigestTree{}, fmt.Errorf("validate digest tree: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
@@ -248,14 +216,33 @@ func (l Layout) ReadDigestContext(ctx context.Context, generation int64) (Digest
 	return tree, nil
 }
 
+func requireDigestEOF(ctx context.Context, decoder *json.Decoder) error {
+	if err := decoder.Decode(&struct{}{}); err == nil {
+		return fmt.Errorf("digest tree contains trailing JSON")
+	} else if errors.Is(err, io.EOF) {
+		return nil
+	} else if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	} else {
+		return fmt.Errorf("decode trailing digest data: %w", err)
+	}
+}
+
 // ValidateDigestTree proves that durable workspace evidence has the canonical
 // shape and root hash emitted by Digest. Decodable JSON alone is not evidence.
 func ValidateDigestTree(tree DigestTree) error {
+	return ValidateDigestTreeContext(context.Background(), tree)
+}
+
+func ValidateDigestTreeContext(ctx context.Context, tree DigestTree) error {
 	if len(tree.Entries) == 0 {
 		return fmt.Errorf("entries are empty")
 	}
 	types := make(map[string]string, len(tree.Entries))
 	for i, entry := range tree.Entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if i == 0 {
 			if entry.Path != "" || entry.Type != "directory" {
 				return fmt.Errorf("first entry is not the workspace root directory")
@@ -302,7 +289,7 @@ func ValidateDigestTree(tree DigestTree) error {
 		}
 		types[entry.Path] = entry.Type
 	}
-	want, err := digestEntriesRoot(tree.Entries)
+	want, err := digestEntriesRootContext(ctx, tree.Entries)
 	if err != nil {
 		return err
 	}
@@ -313,12 +300,27 @@ func ValidateDigestTree(tree DigestTree) error {
 }
 
 func digestEntriesRoot(entries []DigestEntry) (string, error) {
-	raw, err := json.Marshal(entries)
-	if err != nil {
-		return "", err
+	return digestEntriesRootContext(context.Background(), entries)
+}
+
+func digestEntriesRootContext(ctx context.Context, entries []DigestEntry) (string, error) {
+	hash := sha256.New()
+	_, _ = io.WriteString(hash, "[")
+	for index, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if index > 0 {
+			_, _ = io.WriteString(hash, ",")
+		}
+		raw, err := json.Marshal(entry)
+		if err != nil {
+			return "", err
+		}
+		_, _ = hash.Write(raw)
 	}
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:]), nil
+	_, _ = io.WriteString(hash, "]")
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func isLowerSHA256(value string) bool {

@@ -95,7 +95,7 @@ func (a *App) digestContext(ctx context.Context, path string) (worldfs.DigestTre
 		}
 		return tree, nil
 	}
-	return worldfs.DigestContext(ctx, path)
+	return worldfs.DigestContextWithLimits(ctx, path, inspectionDigestLimits)
 }
 
 func (a *App) proxyIsReady(ctx context.Context, l worldfs.Layout) bool {

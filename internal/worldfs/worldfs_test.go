@@ -2,6 +2,7 @@ package worldfs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,27 @@ import (
 
 	"github.com/idolum-ai/kenogram/internal/plan"
 )
+
+type cancelAfterChecksContext struct {
+	remaining int
+	done      chan struct{}
+}
+
+func (c *cancelAfterChecksContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelAfterChecksContext) Done() <-chan struct{}       { return c.done }
+func (c *cancelAfterChecksContext) Value(any) any               { return nil }
+func (c *cancelAfterChecksContext) Err() error {
+	c.remaining--
+	if c.remaining > 0 {
+		return nil
+	}
+	select {
+	case <-c.done:
+	default:
+		close(c.done)
+	}
+	return context.Canceled
+}
 
 func TestHashFileRejectsRegularToSymlinkIdentitySwap(t *testing.T) {
 	workspace := t.TempDir()
@@ -48,6 +70,32 @@ func TestDigestContextHonorsCancellation(t *testing.T) {
 	cancel()
 	if _, err := DigestContext(ctx, t.TempDir()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled digest error = %v", err)
+	}
+}
+
+func TestDigestValidationCancelsDuringCanonicalRootEncoding(t *testing.T) {
+	workspace := t.TempDir()
+	for _, name := range []string{"first", "second", "third"} {
+		if err := os.WriteFile(filepath.Join(workspace, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tree, err := Digest(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &cancelAfterChecksContext{remaining: len(tree.Entries) + 2, done: make(chan struct{})}
+	if err := ValidateDigestTreeContext(ctx, tree); !errors.Is(err, context.Canceled) {
+		t.Fatalf("mid-validation cancellation error = %v", err)
+	}
+}
+
+func TestDigestTrailingCheckPreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	decoder := json.NewDecoder(contextReader{ctx: ctx, reader: strings.NewReader(" ")})
+	if err := requireDigestEOF(ctx, decoder); !errors.Is(err, context.Canceled) {
+		t.Fatalf("trailing cancellation error = %v", err)
 	}
 }
 

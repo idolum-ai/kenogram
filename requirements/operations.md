@@ -124,6 +124,16 @@ payloads; a limit too small for the zero-entry evidence envelope is an error.
 `--json` emits exactly one JSON document. Inspection is read-only: workspace
 reset and migration are not part of this command.
 
+Current-tree observation uses descriptor-relative, no-follow traversal rooted
+at the opened workspace, so an ancestor swapped to an external symbolic link
+cannot redirect hashing. It also fails before exceeding 100,000 entries, 32
+MiB of path-and-link metadata, 1 GiB of regular-file content hashed per complete
+observation, or 256 directory levels. These are work bounds, not output
+settings. Durable digest and history artifacts are host-authored authority:
+inspection validates them and is cooperatively cancellable while reading them,
+but their retention size is governed by the lifecycle and history contracts
+rather than these live-world caps.
+
 Parse, validation, or runtime failures use exit status 1. CLI usage or missing
 confirmation uses status 2.
 

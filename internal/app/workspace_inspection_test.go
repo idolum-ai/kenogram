@@ -45,6 +45,19 @@ func TestStableInspectionDigestRequiresConsecutiveCompleteObservations(t *testin
 	}
 }
 
+func TestStableInspectionDigestEnforcesLiveObservationLimits(t *testing.T) {
+	workspace := t.TempDir()
+	writeInspectionFile(t, filepath.Join(workspace, "first"), "first", 0o600)
+	writeInspectionFile(t, filepath.Join(workspace, "second"), "second", 0o600)
+	prior := inspectionDigestLimits
+	inspectionDigestLimits = worldfs.DigestLimits{MaxEntries: 2, MaxMetadataBytes: 1024, MaxFileBytes: 1024}
+	t.Cleanup(func() { inspectionDigestLimits = prior })
+	a := &App{}
+	if _, err := a.stableInspectionDigest(context.Background(), workspace); err == nil || !strings.Contains(err.Error(), "2 entries") {
+		t.Fatalf("observation limit error = %v", err)
+	}
+}
+
 func TestInspectWorkspaceCancellationReleasesSharedLock(t *testing.T) {
 	a, layout, prepared := inspectionFixture(t, []string{"/workspace"})
 	recordInspectionGeneration(t, layout, prepared, 1)
