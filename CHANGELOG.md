@@ -4,6 +4,10 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+- Add a proof-only semantic reference for transactional cutover readiness,
+  including bounded provider actions, rollback, pre-commit process death,
+  inherited egress, and acknowledgement-only compatibility without adding a
+  declaration or status surface.
 - Make repeated-plan comparisons insertion-aware while preserving order and
   redacting secret copy digests across insertion, removal, modification, and
   reorder evidence.

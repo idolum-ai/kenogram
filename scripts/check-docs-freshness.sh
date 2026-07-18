@@ -32,14 +32,17 @@ for evidence in \
   'make e2e-composition' \
   'make e2e-hermes' \
   'make e2e-hermes-composition' \
+  'make proof-readiness' \
   'v0.3.0' \
   '2026.6.11' \
   'v2026.7.7.2'; do
   rg -Fq "$evidence" requirements/INDEX.md
 done
-for guide in docs/compositions/README.md docs/compositions/ssh.md docs/compositions/engram.md docs/compositions/openclaw.md docs/compositions/hermes-agent.md; do
+for guide in docs/compositions/README.md docs/compositions/ssh.md docs/compositions/engram.md docs/compositions/openclaw.md docs/compositions/hermes-agent.md docs/compositions/readiness-wrapper.md; do
   test -s "${guide}"
 done
+rg -Fq 'proof-readiness:' Makefile
+rg -Fq 'does not add a' docs/compositions/readiness-wrapper.md
 e2e_count="$(awk '/^e2e:/ { print NF - 1; exit }' Makefile)"
 test "$e2e_count" -eq 6
 rg -Fq '`make e2e` runs all six' requirements/INDEX.md

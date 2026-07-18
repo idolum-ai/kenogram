@@ -13,11 +13,15 @@ endorsements or promises that only the tested versions work.
 | [Hermes Agent](hermes-agent.md) | v2026.7.7.2 (agent 0.18.2) | Native fake Telegram, TUI, isolation, replacement, absence |
 | Engram + OpenClaw | versions above | Fake Telegram → Engram → tmux → OpenClaw, including attachment ingestion |
 | Engram + Hermes | versions above | Fake Telegram → Engram → tmux → Hermes, including attachment ingestion |
+| [Readiness wrapper semantic reference](readiness-wrapper.md) | proof only | Delayed/failed action, rollback, pre-commit process death, bounded diagnostics, inherited egress |
 
 All automated Telegram services are deterministic local fixtures. They prove
 routing and isolation without sending a real message or exposing a credential.
 The separate `make e2e-telegram-canary` path is operator-assisted, protected by
 a GitHub environment, and currently covers OpenClaw through Engram.
+
+The readiness wrapper row is proposed design evidence rather than a supported
+composition surface. It deliberately precedes declaration and status design.
 
 ## Shared trust model
 

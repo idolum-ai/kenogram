@@ -9,7 +9,8 @@ required=(
   docs/apple-container-machine.md docs/release-strategy.md docs/world-pattern-proposal.md
   docs/compositions/README.md docs/compositions/engram.md
   docs/compositions/openclaw.md docs/compositions/hermes-agent.md
-  docs/compositions/ssh.md images/ssh-world/Containerfile images/ssh-world/README.md
+  docs/compositions/ssh.md docs/compositions/readiness-wrapper.md
+  images/ssh-world/Containerfile images/ssh-world/README.md
   images/reference-world/Containerfile images/reference-world/README.md
   scripts/prepare-first-world.sh requirements/INDEX.md
   requirements/declaration.md requirements/plan.md requirements/operations.md

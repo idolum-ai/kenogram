@@ -9,7 +9,7 @@ GOCACHE ?= /tmp/kenogram-go-build
 GOMODCACHE ?= /tmp/kenogram-go-mod
 GOVULNCHECK_VERSION := v1.6.0
 
-.PHONY: build release-dist release-smoke install install-release uninstall test test-evidence test-race integration e2e e2e-ssh e2e-release e2e-openclaw e2e-composition e2e-hermes e2e-hermes-composition e2e-telegram-canary vet vulncheck check architecture stdlib-only docs-freshness secrets workflow-sanity smoke fmt cross-apple-machine
+.PHONY: build release-dist release-smoke install install-release uninstall test test-evidence test-race integration proof-readiness e2e e2e-ssh e2e-release e2e-openclaw e2e-composition e2e-hermes e2e-hermes-composition e2e-telegram-canary vet vulncheck check architecture stdlib-only docs-freshness secrets workflow-sanity smoke fmt cross-apple-machine
 
 build:
 	mkdir -p bin
@@ -77,6 +77,9 @@ smoke: build
 
 integration:
 	KENOGRAM_INTEGRATION=1 GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/integration -count=1 -timeout=5m -v
+
+proof-readiness:
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) go test ./internal/app -run '^(TestReadinessWrapperSemanticReference|TestReadinessSuccessBeforeCommitRecoversThenExplicitlyReruns)$$' -count=1 -timeout=30s -v
 
 e2e: e2e-ssh e2e-release e2e-openclaw e2e-composition e2e-hermes e2e-hermes-composition
 
