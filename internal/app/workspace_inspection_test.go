@@ -12,8 +12,67 @@ import (
 	"time"
 
 	"github.com/idolum-ai/kenogram/internal/history"
+	"github.com/idolum-ai/kenogram/internal/lockfile"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
+
+func TestStableInspectionDigestRequiresConsecutiveCompleteObservations(t *testing.T) {
+	workspace := t.TempDir()
+	first := filepath.Join(workspace, "first")
+	second := filepath.Join(workspace, "second")
+	writeInspectionFile(t, first, "alpha", 0o600)
+	writeInspectionFile(t, second, "bravo", 0o600)
+	calls := 0
+	a := &App{digestWorkspaceContext: func(ctx context.Context, root string) (worldfs.DigestTree, error) {
+		calls++
+		switch calls {
+		case 2:
+			writeInspectionFile(t, first, "bravo", 0o600)
+			writeInspectionFile(t, second, "alpha", 0o600)
+		}
+		return worldfs.DigestContext(ctx, root)
+	}}
+	got, err := a.stableInspectionDigest(context.Background(), workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := worldfs.Digest(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 || got.Root != want.Root {
+		t.Fatalf("stable digest calls=%d root=%s want=%s", calls, got.Root, want.Root)
+	}
+}
+
+func TestInspectWorkspaceCancellationReleasesSharedLock(t *testing.T) {
+	a, layout, prepared := inspectionFixture(t, []string{"/workspace"})
+	recordInspectionGeneration(t, layout, prepared, 1)
+	started := make(chan struct{})
+	a.digestWorkspaceContext = func(ctx context.Context, _ string) (worldfs.DigestTree, error) {
+		close(started)
+		<-ctx.Done()
+		return worldfs.DigestTree{}, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := a.InspectWorkspaceContext(ctx, "w", 1)
+		result <- err
+	}()
+	<-started
+	cancel()
+	if err := <-result; err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("cancellation error = %v", err)
+	}
+	lock, err := lockfile.Acquire(layout.Lock)
+	if err != nil {
+		t.Fatalf("shared observation lock remained held: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestInspectWorkspaceAcceptsDeduplicatedAppliedGeneration(t *testing.T) {
 	base := t.TempDir()
@@ -190,6 +249,14 @@ func TestInspectWorkspaceFailsClosedOnEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, want: "read committed g2 digest"},
+		{name: "absurd authoritative generation", edit: func(t *testing.T, _ *App, layout worldfs.Layout, prepared Prepared) {
+			t.Helper()
+			const generation = int64(9223372036854775807)
+			state := worldfs.State{Name: "w", Generation: generation, Container: "kenogram-w-g9223372036854775807", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, Status: "down"}
+			if err := layout.WriteState(state); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "read committed g2 digest"},
 		{name: "unresolved transition", edit: func(t *testing.T, _ *App, layout worldfs.Layout, prepared Prepared) {
 			t.Helper()
 			rawPlan, err := encodeRecoveryPlan(prepared.Result)
@@ -288,6 +355,49 @@ func TestInspectWorkspaceRejectsAmbiguousDeduplicatedBaselinePlan(t *testing.T) 
 	}
 	if _, err := a.InspectWorkspace("w", 2); err == nil || !strings.Contains(err.Error(), "may use a different plan") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestBindInspectionGenerationsMatrix(t *testing.T) {
+	records := func(roots ...string) []history.Record {
+		result := make([]history.Record, len(roots))
+		for index, root := range roots {
+			result[index] = history.Record{WorkspaceDigest: root}
+		}
+		return result
+	}
+	tests := []struct {
+		name     string
+		roots    []string
+		records  []history.Record
+		baseline int
+		want     []int
+		wantErr  string
+	}{
+		{name: "one record covers repeated run", roots: []string{"a", "a", "a"}, records: records("a"), baseline: 1, want: []int{0}},
+		{name: "left edge is unambiguous", roots: []string{"a", "a", "a"}, records: records("a", "a"), baseline: 0, want: []int{0}},
+		{name: "middle exposes every candidate", roots: []string{"a", "a", "a"}, records: records("a", "a"), baseline: 1, want: []int{0, 1}},
+		{name: "right edge is unambiguous", roots: []string{"a", "a", "a"}, records: records("a", "a"), baseline: 2, want: []int{1}},
+		{name: "nonconsecutive roots stay ordered", roots: []string{"a", "b", "a"}, records: records("a", "b", "a"), baseline: 2, want: []int{2}},
+		{name: "unexplained gap", roots: []string{"a", "b", "c"}, records: records("a", "c"), baseline: 0, wantErr: "unexplained generation gap"},
+		{name: "excess records", roots: []string{"a"}, records: records("a", "a"), baseline: 0, wantErr: "applied records"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := bindInspectionGenerations(test.roots, test.records, test.baseline)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("err = %v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(test.want) {
+				t.Fatalf("candidates = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

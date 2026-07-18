@@ -1,14 +1,55 @@
 package worldfs
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/idolum-ai/kenogram/internal/plan"
 )
+
+func TestHashFileRejectsRegularToSymlinkIdentitySwap(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside")
+	inside := filepath.Join(workspace, "inside")
+	if err := os.WriteFile(inside, []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixed := time.Unix(1_700_000_000, 0)
+	for _, path := range []string{inside, outside} {
+		if err := os.Chtimes(path, fixed, fixed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.Stat(inside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(inside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, inside); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hashFile(inside, before); err == nil || !IsChanging(err) {
+		t.Fatalf("regular-to-symlink swap error = %v", err)
+	}
+}
+
+func TestDigestContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := DigestContext(ctx, t.TempDir()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled digest error = %v", err)
+	}
+}
 
 func TestBaseDirUsesExplicitStateOverride(t *testing.T) {
 	want := filepath.Join(t.TempDir(), "custom", "worlds")

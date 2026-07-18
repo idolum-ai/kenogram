@@ -87,7 +87,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "status":
 		return runStatus(ctx, args[1:], stdout, stderr)
 	case "inspect-workspace":
-		return runInspectWorkspace(args[1:], stdout, stderr)
+		return runInspectWorkspace(ctx, args[1:], stdout, stderr)
 	case "allow":
 		return runAllow(args[1:], stdout, stderr)
 	case "revoke":
@@ -138,7 +138,7 @@ type workspaceInspectionOutput struct {
 	Loci               []workspaceInspectionLocusOutput `json:"loci"`
 }
 
-func runInspectWorkspace(args []string, stdout, stderr io.Writer) int {
+func runInspectWorkspace(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	const usage = "usage: kenogram inspect-workspace --baseline g<N> [--max-entries N] [--max-bytes N] [--json] <world>"
 	if helpRequested(args) {
 		fmt.Fprintln(stdout, usage)
@@ -181,7 +181,7 @@ func runInspectWorkspace(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "inspect-workspace:", err)
 		return 1
 	}
-	inspection, err := a.InspectWorkspace(world, generation)
+	inspection, err := a.InspectWorkspaceContext(ctx, world, generation)
 	if err != nil {
 		fmt.Fprintln(stderr, "inspect-workspace:", err)
 		return 1

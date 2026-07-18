@@ -105,7 +105,7 @@ func TestInspectWorkspaceJSONIsOneBoundedMetadataOnlyDocument(t *testing.T) {
 	t.Cleanup(func() { newApp = previous })
 
 	var stdout, stderr bytes.Buffer
-	code := runInspectWorkspace([]string{"--baseline", "g1", "--json", "--max-entries", "1", "--max-bytes", "4096", "w"}, &stdout, &stderr)
+	code := runInspectWorkspace(context.Background(), []string{"--baseline", "g1", "--json", "--max-entries", "1", "--max-bytes", "4096", "w"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -127,6 +127,28 @@ func TestInspectWorkspaceJSONIsOneBoundedMetadataOnlyDocument(t *testing.T) {
 		if strings.Contains(stdout.String(), canary) || strings.Contains(stderr.String(), canary) {
 			t.Fatalf("content canary %q leaked", canary)
 		}
+	}
+}
+
+func TestInspectWorkspaceCancellationEmitsNoPartialJSON(t *testing.T) {
+	base, layout := inspectionCommandFixture(t)
+	baseline, err := worldfs.Digest(layout.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.WriteDigest(1, baseline); err != nil {
+		t.Fatal(err)
+	}
+	bindInspectionHistory(t, layout, baseline.Root)
+	previous := newApp
+	newApp = func(io.Writer) (*app.App, error) { return &app.App{BaseDir: base}, nil }
+	t.Cleanup(func() { newApp = previous })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	code := runInspectWorkspace(ctx, []string{"--baseline", "g1", "--json", "w"}, &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), context.Canceled.Error()) {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -163,7 +185,7 @@ func TestInspectWorkspaceRequiresCanonicalExplicitBaseline(t *testing.T) {
 		if baseline == "" {
 			args = []string{"w"}
 		}
-		if code := runInspectWorkspace(args, &stdout, &stderr); code != 2 {
+		if code := runInspectWorkspace(context.Background(), args, &stdout, &stderr); code != 2 {
 			t.Fatalf("baseline %q code = %d", baseline, code)
 		}
 	}

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path"
@@ -48,6 +49,10 @@ type WorkspaceInspection struct {
 // so its authority files cannot change during inspection. World processes are
 // outside that lock; Digest therefore fails if it cannot obtain a stable view.
 func (a *App) InspectWorkspace(world string, baselineGeneration int64) (WorkspaceInspection, error) {
+	return a.InspectWorkspaceContext(context.Background(), world, baselineGeneration)
+}
+
+func (a *App) InspectWorkspaceContext(ctx context.Context, world string, baselineGeneration int64) (WorkspaceInspection, error) {
 	if err := worldfs.ValidateName(world); err != nil {
 		return WorkspaceInspection{}, err
 	}
@@ -60,6 +65,9 @@ func (a *App) InspectWorkspace(world string, baselineGeneration int64) (Workspac
 		return WorkspaceInspection{}, err
 	}
 	defer lock.Release()
+	if err := ctx.Err(); err != nil {
+		return WorkspaceInspection{}, fmt.Errorf("inspect workspace: %w", err)
+	}
 
 	if _, err := l.ReadTransition(); err == nil {
 		return WorkspaceInspection{}, fmt.Errorf("world has an unresolved transition; recover it before inspection")
@@ -84,14 +92,14 @@ func (a *App) InspectWorkspace(world string, baselineGeneration int64) (Workspac
 	if err != nil {
 		return WorkspaceInspection{}, fmt.Errorf("load authoritative declaration: %w", err)
 	}
-	baseline, err := l.ReadDigest(baselineGeneration)
+	baseline, err := l.ReadDigestContext(ctx, baselineGeneration)
 	if err != nil {
 		return WorkspaceInspection{}, fmt.Errorf("read baseline g%d: %w", baselineGeneration, err)
 	}
-	if err := verifyInspectionHistory(l, state, baselineGeneration, baseline.Root); err != nil {
+	if err := verifyInspectionHistory(ctx, l, state, baselineGeneration, baseline.Root); err != nil {
 		return WorkspaceInspection{}, err
 	}
-	current, err := a.digest(l.Workspace)
+	current, err := a.stableInspectionDigest(ctx, l.Workspace)
 	if err != nil {
 		return WorkspaceInspection{}, fmt.Errorf("digest current workspace: %w", err)
 	}
@@ -105,8 +113,31 @@ func (a *App) InspectWorkspace(world string, baselineGeneration int64) (Workspac
 	}, nil
 }
 
-func verifyInspectionHistory(l worldfs.Layout, state worldfs.State, baselineGeneration int64, baselineRoot string) error {
-	records, err := history.Verify(l.History)
+const stableInspectionAttempts = 8
+
+func (a *App) stableInspectionDigest(ctx context.Context, workspace string) (worldfs.DigestTree, error) {
+	previous, err := a.digestContext(ctx, workspace)
+	if err != nil {
+		return worldfs.DigestTree{}, err
+	}
+	for attempt := 1; attempt < stableInspectionAttempts; attempt++ {
+		current, digestErr := a.digestContext(ctx, workspace)
+		if digestErr != nil {
+			return worldfs.DigestTree{}, digestErr
+		}
+		if current.Root == previous.Root {
+			return current, nil
+		}
+		previous = current
+	}
+	return worldfs.DigestTree{}, fmt.Errorf("workspace did not produce two consecutive complete observations after %d attempts: %w", stableInspectionAttempts, worldfs.ErrWorkspaceChanging)
+}
+
+func verifyInspectionHistory(ctx context.Context, l worldfs.Layout, state worldfs.State, baselineGeneration int64, baselineRoot string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("verify history: %w", err)
+	}
+	records, err := history.VerifyContext(ctx, l.History)
 	if err != nil {
 		return fmt.Errorf("verify history: %w", err)
 	}
@@ -119,15 +150,25 @@ func verifyInspectionHistory(l worldfs.Layout, state worldfs.State, baselineGene
 	if len(applied) == 0 {
 		return fmt.Errorf("history contains no applied generation evidence")
 	}
-	roots := make([]string, state.Generation)
-	for generation := int64(1); generation <= state.Generation; generation++ {
-		tree, readErr := l.ReadDigest(generation)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("verify history: %w", err)
+	}
+	roots := []string{}
+	for generation := int64(1); ; {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("bind committed generations: %w", err)
+		}
+		tree, readErr := l.ReadDigestContext(ctx, generation)
 		if readErr != nil {
 			return fmt.Errorf("read committed g%d digest: %w", generation, readErr)
 		}
-		roots[generation-1] = tree.Root
+		roots = append(roots, tree.Root)
+		if generation == state.Generation {
+			break
+		}
+		generation++
 	}
-	if roots[baselineGeneration-1] != baselineRoot {
+	if baselineGeneration > int64(len(roots)) || roots[int(baselineGeneration-1)] != baselineRoot {
 		return fmt.Errorf("baseline g%d changed while binding history", baselineGeneration)
 	}
 	baselineRecords, err := bindInspectionGenerations(roots, applied, int(baselineGeneration-1))

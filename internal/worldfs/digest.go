@@ -1,7 +1,7 @@
 package worldfs
 
 import (
-	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,7 +30,11 @@ type DigestTree struct {
 }
 
 func Digest(root string) (DigestTree, error) {
-	return digestRetry(root, digestOnce)
+	return DigestContext(context.Background(), root)
+}
+
+func DigestContext(ctx context.Context, root string) (DigestTree, error) {
+	return digestRetryContext(ctx, root, digestOnceContext)
 }
 
 const digestAttempts = 8
@@ -60,9 +64,18 @@ func (e *treeChangedError) Is(target error) bool { return target == ErrWorkspace
 func IsChanging(err error) bool { return errors.Is(err, ErrWorkspaceChanging) }
 
 func digestRetry(root string, digest func(string) (DigestTree, error)) (DigestTree, error) {
+	return digestRetryContext(context.Background(), root, func(_ context.Context, root string) (DigestTree, error) {
+		return digest(root)
+	})
+}
+
+func digestRetryContext(ctx context.Context, root string, digest func(context.Context, string) (DigestTree, error)) (DigestTree, error) {
 	var last error
 	for attempt := 0; attempt < digestAttempts; attempt++ {
-		tree, err := digest(root)
+		if err := ctx.Err(); err != nil {
+			return DigestTree{}, fmt.Errorf("digest workspace: %w", err)
+		}
+		tree, err := digest(ctx, root)
 		if err == nil {
 			return tree, nil
 		}
@@ -72,15 +85,28 @@ func digestRetry(root string, digest func(string) (DigestTree, error)) (DigestTr
 		}
 		last = err
 		if attempt+1 < digestAttempts {
-			time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+			timer := time.NewTimer(time.Duration(attempt+1) * 10 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return DigestTree{}, fmt.Errorf("digest workspace: %w", ctx.Err())
+			case <-timer.C:
+			}
 		}
 	}
 	return DigestTree{}, fmt.Errorf("digest workspace after %d attempts: %w", digestAttempts, last)
 }
 
 func digestOnce(root string) (DigestTree, error) {
+	return digestOnceContext(context.Background(), root)
+}
+
+func digestOnceContext(ctx context.Context, root string) (DigestTree, error) {
 	entries := []DigestEntry{}
 	err := filepath.WalkDir(root, func(path string, item os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			if path != root && os.IsNotExist(walkErr) {
 				return &treeChangedError{path: path, cause: walkErr}
@@ -106,7 +132,7 @@ func digestOnce(root string) (DigestTree, error) {
 		switch {
 		case info.Mode().IsRegular():
 			entry.Type = "file"
-			sum, err := hashFile(path, info)
+			sum, err := hashFileContext(ctx, path, info)
 			if err != nil {
 				return err
 			}
@@ -146,35 +172,66 @@ func digestOnce(root string) (DigestTree, error) {
 	return DigestTree{Root: digestRoot, Entries: entries}, nil
 }
 func hashFile(path string, before os.FileInfo) (string, error) {
+	return hashFileContext(context.Background(), path, before)
+}
+
+func hashFileContext(ctx context.Context, path string, before os.FileInfo) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return "", &treeChangedError{path: path}
+	}
 	hash := sha256.New()
-	if _, err := io.Copy(hash, f); err != nil {
+	if _, err := io.Copy(hash, contextReader{ctx: ctx, reader: f}); err != nil {
 		return "", err
 	}
 	after, err := f.Stat()
 	if err != nil {
 		return "", err
 	}
-	if before.Size() != after.Size() || before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) {
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) || before.Size() != after.Size() || before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) {
 		return "", &treeChangedError{path: path}
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
 }
 func (l Layout) WriteDigest(generation int64, tree DigestTree) (string, error) {
 	path := filepath.Join(l.Digests, fmt.Sprintf("g%d.json", generation))
 	return path, atomicJSON(path, tree, 0o600)
 }
 func (l Layout) ReadDigest(generation int64) (DigestTree, error) {
+	return l.ReadDigestContext(context.Background(), generation)
+}
+
+func (l Layout) ReadDigestContext(ctx context.Context, generation int64) (DigestTree, error) {
 	var tree DigestTree
-	raw, err := os.ReadFile(filepath.Join(l.Digests, fmt.Sprintf("g%d.json", generation)))
+	if err := ctx.Err(); err != nil {
+		return tree, err
+	}
+	f, err := os.Open(filepath.Join(l.Digests, fmt.Sprintf("g%d.json", generation)))
 	if err != nil {
 		return tree, err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+	defer f.Close()
+	decoder := json.NewDecoder(contextReader{ctx: ctx, reader: f})
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&tree); err != nil {
 		return tree, err
@@ -184,6 +241,9 @@ func (l Layout) ReadDigest(generation int64) (DigestTree, error) {
 	}
 	if err := ValidateDigestTree(tree); err != nil {
 		return DigestTree{}, fmt.Errorf("validate digest tree: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return DigestTree{}, err
 	}
 	return tree, nil
 }

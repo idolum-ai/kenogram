@@ -110,10 +110,11 @@ Results are grouped in lexical order by authoritative declared workspace locus,
 then by relative path. Nested container loci remain independent groups because
 each declaration locus has its own host-side storage identity. Changes are
 `added`, `removed`, `modified`, or `type-or-mode-changed`. Output contains paths,
-entry kinds, modes, regular-file sizes, and regular-file SHA-256 digests only;
-it never contains file bytes or symbolic-link targets. Entries outside every
-declared locus and changes to the global workspace root fail as inconsistent
-evidence rather than appearing in an invented group.
+entry kinds, ordinary permission bits, regular-file sizes, and regular-file
+SHA-256 digests only; it never contains ownership, setuid/setgid/sticky bits,
+file bytes, or symbolic-link targets. Entries outside every declared locus and
+changes to the global workspace root fail as inconsistent evidence rather than
+appearing in an invented group.
 
 `--max-entries` and `--max-bytes` independently bound output. Selection is a
 deterministic prefix of the ordered changes. Total, emitted, and omitted counts
