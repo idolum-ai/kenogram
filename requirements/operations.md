@@ -126,10 +126,11 @@ reset and migration are not part of this command.
 
 Current-tree observation uses descriptor-relative, no-follow traversal rooted
 at the opened workspace, so an ancestor swapped to an external symbolic link
-cannot redirect hashing. It also fails before exceeding 100,000 entries, 32
-MiB of path-and-link metadata, 1 GiB of regular-file content hashed per complete
-observation, or 256 directory levels. These are work bounds, not output
-settings. Durable digest and history artifacts are host-authored authority:
+cannot redirect hashing. Each traversal attempt fails before exceeding 100,000
+entries, 32 MiB of path-and-link metadata, 1 GiB of regular-file content hashed
+(plus one growth-probe byte per regular file), or 256 directory levels. File
+mutation retries and consecutive-observation attempts are each capped at eight.
+These are work bounds, not output settings. Durable digest and history artifacts are host-authored authority:
 inspection validates them and is cooperatively cancellable while reading them,
 but their retention size is governed by the lifecycle and history contracts
 rather than these live-world caps.

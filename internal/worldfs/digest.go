@@ -153,19 +153,54 @@ func hashOpenedFileContext(ctx context.Context, path string, f *os.File, before 
 	if err != nil {
 		return "", err
 	}
-	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) || before.Size() != opened.Size() || before.Mode() != opened.Mode() || !before.ModTime().Equal(opened.ModTime()) {
 		return "", &treeChangedError{path: path}
 	}
-	hash := sha256.New()
-	if _, err := io.Copy(hash, contextReader{ctx: ctx, reader: f}); err != nil {
+	sum, err := hashSizedReaderContext(ctx, path, f, opened.Size())
+	if err != nil {
 		return "", err
 	}
 	after, err := f.Stat()
 	if err != nil {
 		return "", err
 	}
-	if !after.Mode().IsRegular() || !os.SameFile(before, after) || before.Size() != after.Size() || before.Mode() != after.Mode() || !before.ModTime().Equal(after.ModTime()) {
+	if !after.Mode().IsRegular() || !os.SameFile(opened, after) || opened.Size() != after.Size() || opened.Mode() != after.Mode() || !opened.ModTime().Equal(after.ModTime()) {
 		return "", &treeChangedError{path: path}
+	}
+	return sum, nil
+}
+
+func hashSizedReaderContext(ctx context.Context, path string, reader io.Reader, size int64) (string, error) {
+	if size < 0 {
+		return "", fmt.Errorf("file %q has negative size", path)
+	}
+	hash := sha256.New()
+	written, err := io.CopyN(hash, contextReader{ctx: ctx, reader: reader}, size)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return "", &treeChangedError{path: path, cause: err}
+		}
+		return "", err
+	}
+	if written != size {
+		return "", &treeChangedError{path: path, cause: io.ErrUnexpectedEOF}
+	}
+	var probe [1]byte
+	read, probeErr := contextReader{ctx: ctx, reader: reader}.Read(probe[:])
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
+	}
+	if read > 0 {
+		return "", &treeChangedError{path: path}
+	}
+	if probeErr != nil && !errors.Is(probeErr, io.EOF) {
+		return "", probeErr
+	}
+	if probeErr == nil {
+		return "", &treeChangedError{path: path, cause: io.ErrNoProgress}
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }

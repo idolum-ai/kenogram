@@ -18,6 +18,16 @@ type cancelAfterChecksContext struct {
 	done      chan struct{}
 }
 
+type endlessCountingReader struct{ bytes int }
+
+func (r *endlessCountingReader) Read(buffer []byte) (int, error) {
+	for index := range buffer {
+		buffer[index] = 'x'
+	}
+	r.bytes += len(buffer)
+	return len(buffer), nil
+}
+
 func (c *cancelAfterChecksContext) Deadline() (time.Time, bool) { return time.Time{}, false }
 func (c *cancelAfterChecksContext) Done() <-chan struct{}       { return c.done }
 func (c *cancelAfterChecksContext) Value(any) any               { return nil }
@@ -62,6 +72,19 @@ func TestHashFileRejectsRegularToSymlinkIdentitySwap(t *testing.T) {
 	}
 	if _, err := hashFile(inside, before); err == nil || !IsChanging(err) {
 		t.Fatalf("regular-to-symlink swap error = %v", err)
+	}
+}
+
+func TestSizedHashReadsOnlyObservedBytesAndOneGrowthProbe(t *testing.T) {
+	reader := &endlessCountingReader{}
+	if _, err := hashSizedReaderContext(context.Background(), "growing", reader, 4); err == nil || !IsChanging(err) {
+		t.Fatalf("growing file error = %v", err)
+	}
+	if reader.bytes != 5 {
+		t.Fatalf("growing file bytes read = %d, want 5", reader.bytes)
+	}
+	if _, err := hashSizedReaderContext(context.Background(), "truncated", strings.NewReader("abc"), 4); err == nil || !IsChanging(err) {
+		t.Fatalf("truncated file error = %v", err)
 	}
 }
 
