@@ -4,6 +4,10 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+- Add a proof-only semantic reference for transactional cutover readiness,
+  including bounded provider actions, rollback, pre-commit process death,
+  inherited egress, and acknowledgement-only compatibility without adding a
+  declaration or status surface.
 - Add an explicitly invoked, complete-output-bounded current-generation
   network diagnostic that distinguishes exact-policy refusal from admitted
   dial failure without retaining traffic content or granting authority.

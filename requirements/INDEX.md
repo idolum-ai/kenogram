@@ -38,6 +38,12 @@ evaluation but outside the supported Linux runtime promise.
 | History | Tamper/truncated-tail unit tests plus E2E tombstone outcomes | Power-loss testing on multiple filesystems | Before stable |
 | Experimental Apple transport | Canonical shell-inert argv envelope, explicit stdin/TTY flags, remote exit-status preservation, graceful signal forwarding, Darwin/arm64 cross-build, and native macOS launcher smoke test | Real Apple machine argv/TTY/signal proof, nested rootless Podman, and the full lifecycle/network matrix | Experimental |
 
+### Design evidence outside the binding contract
+
+| Question | Executable semantic evidence | Deliberately not implemented |
+|---|---|---|
+| Transactional cutover readiness | `make proof-readiness` inserts a polling action with bounded time, attempts, cadence, and retained diagnostic text at the real `services-started` lifecycle checkpoint; deadline/cancellation wins over simultaneous success, and the proof exercises delayed success before successor verification and commit, a negative-result placement followed by ordinary rollback cleanup and proxy-door restoration, pre-commit SIGKILL recovery and explicit rerun, a declaration-derived policy analogue, and acknowledgement-only compatibility | Inter-service startup gating, real-proxy traffic in the readiness fixture (covered separately by network integration), production process-tree termination and bounded stream ingestion, production wiring from a negative action result to `App.Up`, declaration schema, durable readiness fields, status presentation, production bounds, and continuous health |
+
 ## Executable checks
 
 - `make test` runs unit, contract, and parser fuzz-seed tests.
@@ -49,6 +55,9 @@ evaluation but outside the supported Linux runtime promise.
   and workflow gates without replaying unchanged runtime evidence. That
   classification is authoritative only in the organization-ruleset workflow,
   whose policy comes from its protected workflow revision.
+- `make proof-readiness` runs proposed semantic evidence for issue #26 through
+  the existing lifecycle fixture. It is not evidence that declarations
+  currently accept readiness fields.
 - `make e2e-ssh` proves a key-authenticated SSH stream to a declared world-
   loopback interface without a published host port.
 - `make e2e-release` proves the checksum-pinned Engram `v0.3.0` lifecycle.
