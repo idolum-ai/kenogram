@@ -100,14 +100,16 @@ history, generated files, composition channels, or declarations, and it never
 grants access. It records no payloads, headers, credentials, URL paths, query
 strings, or environment values.
 
-Hosts and outcomes are untrusted world-authored request metadata and form a
-bounded world-to-operator prose channel. They must not be interpreted as
-authority or supplied unsanitized to automation or AI. The JSON envelope labels
-that trust explicitly; text output ASCII-quotes destinations so Unicode cannot
-reorder the terminal presentation. A world that declares no destinations has no
-diagnostic view and reports that expected absence explicitly. A declaration
-that requires a proxy but has no responsive door reports infrastructure failure
-instead.
+Host is untrusted world-authored request metadata and forms a bounded
+world-to-operator prose channel. It must not be interpreted as authority or
+supplied unsanitized to automation or AI. Outcome is a Kenogram-derived bounded
+classification influenced by the attempted request and observed dial; it is
+evidence for this diagnostic distinction, but not authority. The JSON envelope
+labels each provenance separately; text output ASCII-quotes destinations so
+Unicode cannot reorder the terminal presentation. A world that declares no
+destinations has no diagnostic view and reports that expected absence
+explicitly. A declaration that requires a proxy but has no responsive door
+reports infrastructure failure instead.
 
 The proxy retains at most 256 observations and 64 KiB in memory for its own
 process lifetime. The command defaults to 64 observations and a 16 KiB output;

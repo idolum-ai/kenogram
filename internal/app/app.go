@@ -47,7 +47,7 @@ type App struct {
 	proxyReady func(worldfs.Layout) bool
 	// proxyDiagnosticsReady is replaceable only by lifecycle tests that model a
 	// legacy proxy process without implementing its control protocol.
-	proxyDiagnosticsReady func(context.Context, worldfs.Layout, int64) bool
+	proxyDiagnosticsReady func(context.Context, worldfs.Layout, int64) (bool, error)
 	// digestWorkspace is nil in production. Tests use it to prove that a live
 	// predecessor is not required to produce a stable tree before cutover.
 	digestWorkspace func(string) (worldfs.DigestTree, error)
@@ -113,17 +113,23 @@ func (a *App) proxyIsReady(ctx context.Context, l worldfs.Layout) bool {
 	return proxy.SendControlContext(probeCtx, l.ProxySocket, proxy.ControlRequest{Operation: "ping"}) == nil
 }
 
-func (a *App) proxySupportsDiagnostics(ctx context.Context, l worldfs.Layout, generation int64) bool {
+func (a *App) proxySupportsDiagnostics(ctx context.Context, l worldfs.Layout, generation int64) (bool, error) {
 	if a.proxyDiagnosticsReady != nil {
 		return a.proxyDiagnosticsReady(ctx, l, generation)
 	}
 	if !a.proxyAlive(l) {
-		return false
+		return false, nil
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 	snapshot, err := proxy.QueryDiagnosticsContext(probeCtx, l.ProxySocket, 1, 1)
-	return err == nil && snapshot.Generation == generation
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	if err != nil || snapshot.Generation != generation {
+		return false, nil
+	}
+	return true, nil
 }
 
 type Prepared struct {
@@ -177,7 +183,12 @@ type NetworkDiagnosticsResult struct {
 	Omitted       uint64                    `json:"omitted"`
 	EncodedBytes  int                       `json:"encoded_bytes"`
 	SensitiveData string                    `json:"sensitive_metadata"`
-	Trust         string                    `json:"trust"`
+	Trust         NetworkDiagnosticsTrust   `json:"trust"`
+}
+
+type NetworkDiagnosticsTrust struct {
+	Host    string `json:"host"`
+	Outcome string `json:"outcome"`
 }
 
 func Prepare(path string) (Prepared, error) {
@@ -990,16 +1001,32 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 	}
 	proxyPID := state.ProxyPID
 	if len(prepared.Result.Plan.NetworkAllow) > 0 {
-		compatible := a.proxySupportsDiagnostics(ctx, l, state.Generation)
+		compatible, compatibilityErr := a.proxySupportsDiagnostics(ctx, l, state.Generation)
+		if compatibilityErr != nil {
+			return false, compatibilityErr
+		}
 		if compatible {
 			destinations := make([]proxy.Destination, 0, len(prepared.Result.Plan.NetworkAllow))
 			for _, allowed := range prepared.Result.Plan.NetworkAllow {
 				destinations = append(destinations, proxy.Destination{Host: allowed.Host, Port: int(allowed.Port)})
 			}
-			err = proxy.SendControlContext(ctx, l.ProxySocket, proxy.ControlRequest{Operation: "reconcile", Destinations: destinations})
+			reconcileCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err = proxy.SendControlContext(reconcileCtx, l.ProxySocket, proxy.ControlRequest{Operation: "reconcile", Destinations: destinations})
+			cancel()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return false, ctxErr
+			}
 		}
 		if !compatible || err != nil {
-			proxyPID, err = a.startProxy(ctx, l, evidence.PID, state.Generation, prepared.Result.Plan.NetworkAllow)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return false, ctxErr
+			}
+			// Once replacement is chosen, finish it as one bounded lifecycle
+			// operation. Passing a newly canceled caller through startProxy could
+			// stop the healthy old door and then abort its replacement.
+			replacementCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			proxyPID, err = a.startProxy(replacementCtx, l, evidence.PID, state.Generation, prepared.Result.Plan.NetworkAllow)
+			cancel()
 			if err != nil {
 				return false, err
 			}
@@ -2075,7 +2102,10 @@ func (a *App) NetworkDiagnostics(ctx context.Context, name string, limit, maxByt
 		Omitted:       snapshot.Omitted,
 		EncodedBytes:  snapshot.EncodedBytes,
 		SensitiveData: "destination host and port",
-		Trust:         "untrusted-world-authored-request-metadata",
+		Trust: NetworkDiagnosticsTrust{
+			Host:    "untrusted-world-authored-request-metadata",
+			Outcome: "kenogram-derived-bounded-observation",
+		},
 	}, nil
 }
 

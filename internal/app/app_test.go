@@ -1861,7 +1861,7 @@ func TestUpReplacesLegacyProxyDuringAdoption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.proxyDiagnosticsReady = func(context.Context, worldfs.Layout, int64) bool { return false }
+	a.proxyDiagnosticsReady = func(context.Context, worldfs.Layout, int64) (bool, error) { return false, nil }
 	if err := a.Up(context.Background(), prepared); err != nil {
 		t.Fatal(err)
 	}
@@ -1871,6 +1871,46 @@ func TestUpReplacesLegacyProxyDuringAdoption(t *testing.T) {
 	}
 	if before.ProxyPID <= 1 || after.ProxyPID <= 1 || before.ProxyPID == after.ProxyPID {
 		t.Fatalf("legacy proxy was not replaced: before=%d after=%d", before.ProxyPID, after.ProxyPID)
+	}
+}
+
+func TestUpCancellationDuringCompatibilityProbePreservesProxy(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	before, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.proxyDiagnosticsReady = func(context.Context, worldfs.Layout, int64) (bool, error) {
+		return false, context.Canceled
+	}
+	if err := a.Up(context.Background(), prepared); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled adoption error = %v", err)
+	}
+	after, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ProxyPID != before.ProxyPID || !a.proxyAlive(layout) {
+		t.Fatalf("canceled probe changed healthy proxy: before=%d after=%d alive=%t", before.ProxyPID, after.ProxyPID, a.proxyAlive(layout))
 	}
 }
 

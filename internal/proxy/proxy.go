@@ -139,7 +139,7 @@ func (p *Proxy) handle(client net.Conn) {
 	bounded := &headerReader{reader: client, remaining: 64 << 10}
 	reader := bufio.NewReader(bounded)
 	header, err := readProxyHeader(reader)
-	if err != nil || !utf8.Valid(header) {
+	if err != nil || !requestTargetValidUTF8(header) {
 		writeError(client, http.StatusBadRequest)
 		return
 	}
@@ -212,6 +212,24 @@ func readProxyHeader(reader *bufio.Reader) ([]byte, error) {
 			return header.Bytes(), nil
 		}
 	}
+}
+
+func requestTargetValidUTF8(header []byte) bool {
+	lineEnd := bytes.IndexByte(header, '\n')
+	if lineEnd < 0 {
+		return true
+	}
+	line := bytes.TrimSuffix(header[:lineEnd], []byte{'\r'})
+	firstSpace := bytes.IndexByte(line, ' ')
+	if firstSpace < 0 {
+		return true
+	}
+	remainder := line[firstSpace+1:]
+	secondSpace := bytes.IndexByte(remainder, ' ')
+	if secondSpace < 0 {
+		return true
+	}
+	return utf8.Valid(remainder[:secondSpace])
 }
 
 func (p *Proxy) logf(format string, arguments ...any) {

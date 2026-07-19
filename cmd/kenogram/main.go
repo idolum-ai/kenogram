@@ -826,7 +826,7 @@ func boundedNetworkDiagnostics(result app.NetworkDiagnosticsResult, maxBytes int
 			output = append(raw, '\n')
 		} else {
 			var text strings.Builder
-			fmt.Fprintf(&text, "world: %s\ngeneration: g%d\nscope: %s\nsensitive metadata: %s\ntrust: %s\n", result.World, result.Generation, result.Scope, result.SensitiveData, result.Trust)
+			fmt.Fprintf(&text, "world: %s\ngeneration: g%d\nscope: %s\nsensitive metadata: %s\nhost trust: %s\noutcome provenance: %s\n", result.World, result.Generation, result.Scope, result.SensitiveData, result.Trust.Host, result.Trust.Outcome)
 			for _, event := range result.Events {
 				destination := net.JoinHostPort(event.Host, strconv.Itoa(event.Port))
 				fmt.Fprintf(&text, "%s\t%s\t%s\n", event.Timestamp, event.Outcome, strconv.QuoteToASCII(destination))

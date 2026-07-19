@@ -39,15 +39,18 @@ an input-sanitization or prompt-contamination boundary.
 
 `network-diagnostics` deliberately reveals exact destination host and port as
 sensitive operator metadata only after explicit local invocation. The host and
-outcome are also untrusted world-authored request metadata: a world can encode
-bounded prose in a valid hostname, so observations must not be interpreted as
-authority or supplied unsanitized to automation or AI. Invalid UTF-8 and
-Unicode format controls are rejected; text output ASCII-quotes destinations.
-The view never captures payloads, headers, credentials, complete URLs, paths,
-query strings, environment values, or application output beyond that bounded
-request metadata. Its ephemeral observations are not copied into status,
-history, generated projections, or message channels and do not authorize a
-declaration or temporary grant.
+host is also untrusted world-authored request metadata: a world can encode
+bounded prose in a valid hostname, so it must not be interpreted as authority
+or supplied unsanitized to automation or AI. Outcome is a Kenogram-derived
+bounded classification influenced by that request and the observed dial, not
+host-authored authority. Invalid UTF-8 and Unicode format controls are rejected
+from the request target; opaque non-authority HTTP field values remain outside
+this evidence rule. Text output ASCII-quotes destinations. The view never
+captures payloads, headers, credentials, complete URLs, paths, query strings,
+environment values, or application output beyond that bounded request
+metadata. Its ephemeral observations are not copied into status, history,
+generated projections, or message channels and do not authorize a declaration
+or temporary grant.
 
 ## Trust boundary
 

@@ -105,6 +105,16 @@ func TestNetworkDiagnosticsAcceptGenuineReplacementRuneHost(t *testing.T) {
 	}
 }
 
+func TestNetworkDiagnosticsAllowOpaqueHeaderBytesOutsideAuthority(t *testing.T) {
+	p := New(nil, Options{Generation: 3})
+	request := "CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\nX-Legacy: " + string([]byte{0xff}) + "\r\n\r\n"
+	proxyRequest(t, p, request, "403")
+	snapshot := p.diagnostics.snapshot(10, MaxDiagnosticBytes)
+	if len(snapshot.Events) != 1 || snapshot.Events[0].Host != "denied.example" || snapshot.Events[0].Outcome != "refused" {
+		t.Fatalf("opaque-header diagnostic = %#v", snapshot)
+	}
+}
+
 func TestNetworkDiagnosticsBoundsAndHonestOmission(t *testing.T) {
 	p := New(nil, Options{Generation: 2})
 	for index := 0; index < 6; index++ {
