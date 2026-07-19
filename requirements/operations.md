@@ -17,6 +17,7 @@ also reports the byte-sensitive declaration digest.
 | `connect <world> <interface>` | relay stdin/stdout to one declared loopback stream | world processes may |
 | `status <world>` / `worlds` | report recorded and observed state | no |
 | `network-diagnostics … <world>` | inspect recent current-generation proxy refusals and upstream dial failures | no |
+| `inspect-workspace --baseline g<N> … <world>` | report bounded metadata-only carried-state drift | no |
 | `allow … --for <duration>` | grant temporary destination access | yes |
 | `revoke <world> <destination>` | remove access and close admitted connections | yes |
 | `repair-history --yes <world>` | remove one proven truncated final fragment | yes |
@@ -109,6 +110,53 @@ newest fitting observations are returned in chronological order. Collection is
 drop-on-contention so it cannot wait behind a diagnostic reader; overload is
 reported as omitted. There are no cursors, retention guarantees, durable or
 cross-generation continuity, service/lifecycle events, or automatic actions.
+
+`inspect-workspace` requires an explicit canonical `g<N>` baseline and compares
+that committed canonical digest with one stable observation of the current
+carried tree. It holds the world mutation lock while reading authority, rejects
+any unresolved or malformed transition instead of recovering it, and fails on
+missing, corrupt, changing, or internally inconsistent state, plan, history, or
+digest evidence. Committed `g<N>` digests are bound in order to `up`/`applied`
+history. This binding accepts the run-length form produced when recovery-safe
+history deduplication omits an immediately repeated semantic record, while
+rejecting missing digests, unexplained gaps, excess records, and ambiguous
+baseline plans. Because v0.x does not retain every generation's resolved plan
+body, a historical baseline is inspectable only when every history record it
+could represent has the authoritative plan digest; otherwise
+declared-locus attribution is unavailable and inspection fails explicitly. The
+same retention limit applies after a declaration removes a workspace locus:
+carried storage for that old locus remains by design, but its target mapping is
+no longer available from the authoritative plan, so even a current-generation
+baseline fails attribution until per-generation locus evidence exists.
+
+Results are grouped in lexical order by authoritative declared workspace locus,
+then by relative path. Nested container loci remain independent groups because
+each declaration locus has its own host-side storage identity. Changes are
+`added`, `removed`, `modified`, or `type-or-mode-changed`. Output contains paths,
+entry kinds, ordinary permission bits, regular-file sizes, and regular-file
+SHA-256 digests only; it never contains ownership, setuid/setgid/sticky bits,
+file bytes, or symbolic-link targets. Entries outside every declared locus and
+changes to the global workspace root fail as inconsistent evidence rather than
+appearing in an invented group.
+
+`--max-entries` and `--max-bytes` independently bound output. Selection is a
+deterministic prefix of the ordered changes. Total, emitted, and omitted counts
+are reported both globally and per locus, including when either limit omits all
+changes. The byte limit covers the entire serialized document, not only entry
+payloads; a limit too small for the zero-entry evidence envelope is an error.
+`--json` emits exactly one JSON document. Inspection is read-only: workspace
+reset and migration are not part of this command.
+
+Current-tree observation uses descriptor-relative, no-follow traversal rooted
+at the opened workspace, so an ancestor swapped to an external symbolic link
+cannot redirect hashing. Each traversal attempt fails before exceeding 100,000
+entries, 32 MiB of path-and-link metadata, 1 GiB of regular-file content hashed
+(plus one growth-probe byte per regular file), or 256 directory levels. File
+mutation retries and consecutive-observation attempts are each capped at eight.
+These are work bounds, not output settings. Durable digest and history artifacts are host-authored authority:
+inspection validates them and is cooperatively cancellable while reading them,
+but their retention size is governed by the lifecycle and history contracts
+rather than these live-world caps.
 
 Parse, validation, or runtime failures use exit status 1. CLI usage or missing
 confirmation uses status 2.

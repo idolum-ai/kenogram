@@ -78,6 +78,17 @@ destination was admitted but the upstream connection failed. The output
 contains sensitive destination hostnames and ports. It is ephemeral,
 count/byte bounded, contains no traffic content, and never changes authority.
 
+To inspect metadata-only carried-state drift from the first committed
+generation without emitting file contents:
+
+```sh
+kenogram inspect-workspace --baseline g1 --json first
+```
+
+Paths and file hashes are still sensitive operator metadata. Its output is
+bounded and the command is read-only; it does not reset or migrate the
+workspace.
+
 ## Restart and remove it
 
 ```sh

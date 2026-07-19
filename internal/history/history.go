@@ -3,6 +3,7 @@ package history
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -91,6 +92,13 @@ func AppendOnce(path string, record Record, now time.Time) (Record, error) {
 	return Append(path, record, now)
 }
 func Verify(path string) ([]Record, error) {
+	return VerifyContext(context.Background(), path)
+}
+
+func VerifyContext(ctx context.Context, path string) ([]Record, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -115,6 +123,9 @@ func Verify(path string) ([]Record, error) {
 	previous := ""
 	line := 0
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		line++
 		var r Record
 		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
@@ -134,6 +145,9 @@ func Verify(path string) ([]Record, error) {
 		previous = r.Hash
 	}
 	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return records, nil

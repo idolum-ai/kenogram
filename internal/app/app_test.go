@@ -308,6 +308,37 @@ func TestUpRecordsAppliedOnlyAfterEvidence(t *testing.T) {
 	}
 }
 
+func TestUpRejectsInvalidUTF8WorkspaceBeforeWritingAuthority(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := layout.EnsureWorkspace("/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, string([]byte{0xff})), []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeRunner{}
+	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}
+	err = a.Up(context.Background(), preparedFixture())
+	if err == nil || !strings.Contains(err.Error(), "not valid UTF-8") {
+		t.Fatalf("up error = %v", err)
+	}
+	for _, artifact := range []string{layout.Transition, filepath.Join(layout.Digests, "g1.json"), layout.State, layout.History} {
+		if _, statErr := os.Stat(artifact); !os.IsNotExist(statErr) {
+			t.Fatalf("authority artifact %s exists after rejected workspace: %v", artifact, statErr)
+		}
+	}
+	for _, call := range runner.calls {
+		if strings.HasPrefix(call, "create ") {
+			t.Fatalf("runtime creation preceded workspace rejection: %v", runner.calls)
+		}
+	}
+}
+
 func TestUpReviewedRejectsEvidenceChangedAfterReview(t *testing.T) {
 	base := t.TempDir()
 	runner := &runtimeRunner{}

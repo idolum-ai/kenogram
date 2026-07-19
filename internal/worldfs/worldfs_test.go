@@ -1,14 +1,126 @@
 package worldfs
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/idolum-ai/kenogram/internal/plan"
 )
+
+type cancelAfterChecksContext struct {
+	remaining int
+	done      chan struct{}
+}
+
+type endlessCountingReader struct{ bytes int }
+
+func (r *endlessCountingReader) Read(buffer []byte) (int, error) {
+	for index := range buffer {
+		buffer[index] = 'x'
+	}
+	r.bytes += len(buffer)
+	return len(buffer), nil
+}
+
+func (c *cancelAfterChecksContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelAfterChecksContext) Done() <-chan struct{}       { return c.done }
+func (c *cancelAfterChecksContext) Value(any) any               { return nil }
+func (c *cancelAfterChecksContext) Err() error {
+	c.remaining--
+	if c.remaining > 0 {
+		return nil
+	}
+	select {
+	case <-c.done:
+	default:
+		close(c.done)
+	}
+	return context.Canceled
+}
+
+func TestHashFileRejectsRegularToSymlinkIdentitySwap(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside")
+	inside := filepath.Join(workspace, "inside")
+	if err := os.WriteFile(inside, []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixed := time.Unix(1_700_000_000, 0)
+	for _, path := range []string{inside, outside} {
+		if err := os.Chtimes(path, fixed, fixed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.Stat(inside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(inside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, inside); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hashFile(inside, before); err == nil || !IsChanging(err) {
+		t.Fatalf("regular-to-symlink swap error = %v", err)
+	}
+}
+
+func TestSizedHashReadsOnlyObservedBytesAndOneGrowthProbe(t *testing.T) {
+	reader := &endlessCountingReader{}
+	if _, err := hashSizedReaderContext(context.Background(), "growing", reader, 4); err == nil || !IsChanging(err) {
+		t.Fatalf("growing file error = %v", err)
+	}
+	if reader.bytes != 5 {
+		t.Fatalf("growing file bytes read = %d, want 5", reader.bytes)
+	}
+	if _, err := hashSizedReaderContext(context.Background(), "truncated", strings.NewReader("abc"), 4); err == nil || !IsChanging(err) {
+		t.Fatalf("truncated file error = %v", err)
+	}
+}
+
+func TestDigestContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := DigestContext(ctx, t.TempDir()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled digest error = %v", err)
+	}
+}
+
+func TestDigestValidationCancelsDuringCanonicalRootEncoding(t *testing.T) {
+	workspace := t.TempDir()
+	for _, name := range []string{"first", "second", "third"} {
+		if err := os.WriteFile(filepath.Join(workspace, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tree, err := Digest(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &cancelAfterChecksContext{remaining: len(tree.Entries) + 2, done: make(chan struct{})}
+	if err := ValidateDigestTreeContext(ctx, tree); !errors.Is(err, context.Canceled) {
+		t.Fatalf("mid-validation cancellation error = %v", err)
+	}
+}
+
+func TestDigestTrailingCheckPreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	decoder := json.NewDecoder(contextReader{ctx: ctx, reader: strings.NewReader(" ")})
+	if err := requireDigestEOF(ctx, decoder); !errors.Is(err, context.Canceled) {
+		t.Fatalf("trailing cancellation error = %v", err)
+	}
+}
 
 func TestBaseDirUsesExplicitStateOverride(t *testing.T) {
 	want := filepath.Join(t.TempDir(), "custom", "worlds")
@@ -104,13 +216,72 @@ func TestReadDigestRejectsNoncanonicalEvidence(t *testing.T) {
 			if err := layout.Ensure(); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := layout.WriteDigest(1, test.tree); err != nil {
+			raw, err := json.MarshalIndent(test.tree, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(layout.Digests, "g1.json"), append(raw, '\n'), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := layout.ReadDigest(1); err == nil {
 				t.Fatalf("accepted digest tree %#v", test.tree)
 			}
 		})
+	}
+}
+
+func TestValidateDigestTreeRejectsInvalidUTF8PathAndLink(t *testing.T) {
+	root := DigestEntry{Path: "", Type: "directory", Mode: 0o700}
+	tests := []struct {
+		name  string
+		entry DigestEntry
+	}{
+		{name: "path", entry: DigestEntry{Path: string([]byte{0xff}), Type: "directory", Mode: 0o700}},
+		{name: "link", entry: DigestEntry{Path: "link", Type: "symlink", Mode: 0o777, Link: string([]byte{0xff})}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tree := DigestTree{Root: strings.Repeat("0", 64), Entries: []DigestEntry{root, test.entry}}
+			if err := ValidateDigestTree(tree); err == nil || !strings.Contains(err.Error(), "not valid UTF-8") {
+				t.Fatalf("validation error = %v", err)
+			}
+		})
+	}
+}
+
+func TestWriteDigestRejectsInvalidUTF8WithoutArtifact(t *testing.T) {
+	layout := For(t.TempDir(), "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	tree := DigestTree{Root: strings.Repeat("0", 64), Entries: []DigestEntry{
+		{Path: "", Type: "directory", Mode: 0o700},
+		{Path: string([]byte{0xff}), Type: "directory", Mode: 0o700},
+	}}
+	path, err := layout.WriteDigest(1, tree)
+	if err == nil || !strings.Contains(err.Error(), "not valid UTF-8") {
+		t.Fatalf("write error = %v", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid digest artifact exists: %v", statErr)
+	}
+}
+
+func TestWriteTransitionRejectsInvalidUTF8WorkspaceWithoutArtifact(t *testing.T) {
+	layout := For(t.TempDir(), "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	tree := DigestTree{Root: strings.Repeat("0", 64), Entries: []DigestEntry{
+		{Path: "", Type: "directory", Mode: 0o700},
+		{Path: "link", Type: "symlink", Mode: 0o777, Link: string([]byte{0xff})},
+	}}
+	err := layout.WriteTransition(Transition{Version: 1, Phase: "commit", Workspace: tree})
+	if err == nil || !strings.Contains(err.Error(), "not valid UTF-8") {
+		t.Fatalf("write error = %v", err)
+	}
+	if _, statErr := os.Stat(layout.Transition); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid transition artifact exists: %v", statErr)
 	}
 }
 
