@@ -64,6 +64,17 @@ kenogram enter first
 Detach from tmux with `Ctrl-b d`. The workspace remains on the host under
 Kenogram's state directory.
 
+To inspect metadata-only carried-state drift from the first committed
+generation without emitting file contents:
+
+```sh
+kenogram inspect-workspace --baseline g1 --json first
+```
+
+Paths and file hashes are still sensitive operator metadata. Its output is
+bounded and the command is read-only; it does not reset or migrate the
+workspace.
+
 ## Restart and remove it
 
 ```sh

@@ -48,6 +48,9 @@ type App struct {
 	// digestWorkspace is nil in production. Tests use it to prove that a live
 	// predecessor is not required to produce a stable tree before cutover.
 	digestWorkspace func(string) (worldfs.DigestTree, error)
+	// digestWorkspaceContext is replaceable only by package tests that need to
+	// coordinate cancellation or complete-observation stability.
+	digestWorkspaceContext func(context.Context, string) (worldfs.DigestTree, error)
 }
 
 func New() (*App, error) {
@@ -73,6 +76,26 @@ func (a *App) digest(path string) (worldfs.DigestTree, error) {
 		return a.digestWorkspace(path)
 	}
 	return worldfs.Digest(path)
+}
+
+func (a *App) digestContext(ctx context.Context, path string) (worldfs.DigestTree, error) {
+	if err := ctx.Err(); err != nil {
+		return worldfs.DigestTree{}, err
+	}
+	if a.digestWorkspaceContext != nil {
+		return a.digestWorkspaceContext(ctx, path)
+	}
+	if a.digestWorkspace != nil {
+		tree, err := a.digestWorkspace(path)
+		if err != nil {
+			return worldfs.DigestTree{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return worldfs.DigestTree{}, err
+		}
+		return tree, nil
+	}
+	return worldfs.DigestContextWithLimits(ctx, path, inspectionDigestLimits)
 }
 
 func (a *App) proxyIsReady(ctx context.Context, l worldfs.Layout) bool {

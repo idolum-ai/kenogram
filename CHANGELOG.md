@@ -4,6 +4,9 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+- Add explicit-generation, fail-closed workspace inspection with deterministic
+  metadata-only locus grouping, independent entry and whole-document byte
+  bounds, honest omission counts, and one-document JSON output.
 - Make repeated-plan comparisons insertion-aware while preserving order and
   redacting secret copy digests across insertion, removal, modification, and
   reorder evidence.

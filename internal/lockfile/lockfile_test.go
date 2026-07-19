@@ -42,6 +42,34 @@ func TestAcquireReclaimsStaleLock(t *testing.T) {
 	defer lock.Release()
 }
 
+func TestAcquireSharedDoesNotRewriteMetadataAndExcludesMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "world.lock")
+	want := []byte("retained lock metadata\n")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := AcquireShared(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release()
+	second, err := AcquireShared(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	if _, err := Acquire(path); err == nil {
+		t.Fatal("exclusive mutation lock overlapped observations")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("shared lock rewrote metadata: %q", got)
+	}
+}
+
 func TestProcessStartTreatsZombieAsDead(t *testing.T) {
 	fields := "Z 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 4242"
 	if got := ProcessStartFromStat("99 (proxy worker) " + fields); got != "" {
