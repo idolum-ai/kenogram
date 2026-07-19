@@ -100,16 +100,23 @@ history, generated files, composition channels, or declarations, and it never
 grants access. It records no payloads, headers, credentials, URL paths, query
 strings, or environment values.
 
-Host is untrusted world-authored request metadata and forms a bounded
-world-to-operator prose channel. It must not be interpreted as authority or
-supplied unsanitized to automation or AI. Outcome is a Kenogram-derived bounded
+Host and port are untrusted world-authored request metadata and form a bounded
+world-to-operator prose channel. The destination must not be interpreted as
+authority or supplied unsanitized to automation or AI. Outcome is a Kenogram-derived bounded
 classification influenced by the attempted request and observed dial; it is
 evidence for this diagnostic distinction, but not authority. The JSON envelope
-labels each provenance separately; text output ASCII-quotes destinations so
+labels destination trust separately from outcome provenance; text output ASCII-quotes destinations so
 Unicode cannot reorder the terminal presentation. A world that declares no
 destinations has no diagnostic view and reports that expected absence
 explicitly. A declaration that requires a proxy but has no responsive door
 reports infrastructure failure instead.
+
+Applying an unchanged declaration reconciles policy only through a responsive
+current-generation diagnostic-capable door. Kenogram does not destructively
+replace a responsive legacy door during adoption: it leaves that door and
+settled authority intact and asks the operator to run `down` before reapplying
+the declaration. A missing door may be recreated because there is no healthy
+network boundary to preserve.
 
 The proxy retains at most 256 observations and 64 KiB in memory for its own
 process lifetime. The command defaults to 64 observations and a 16 KiB output;

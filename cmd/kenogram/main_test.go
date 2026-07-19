@@ -29,7 +29,7 @@ func TestNetworkDiagnosticsOutputBoundsCompleteDocument(t *testing.T) {
 		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
 		SensitiveData: "destination host and port",
 		Trust: app.NetworkDiagnosticsTrust{
-			Host: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
+			Destination: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
 		},
 	}
 	for index := 0; index < 8; index++ {
@@ -58,6 +58,9 @@ func TestNetworkDiagnosticsOutputBoundsCompleteDocument(t *testing.T) {
 			if !bounded.Truncated || bounded.Omitted == 0 {
 				t.Fatalf("bounded result is dishonest: %#v", bounded)
 			}
+			if bounded.Trust.Destination != "untrusted-world-authored-request-metadata" || bounded.Trust.Outcome != "kenogram-derived-bounded-observation" {
+				t.Fatalf("incomplete provenance envelope: %#v", bounded.Trust)
+			}
 		}
 	}
 }
@@ -67,7 +70,7 @@ func TestNetworkDiagnosticsTextIsDeterministic(t *testing.T) {
 		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
 		SensitiveData: "destination host and port",
 		Trust: app.NetworkDiagnosticsTrust{
-			Host: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
+			Destination: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
 		},
 		Events: []proxy.NetworkDiagnostic{{Timestamp: "2026-07-18T00:00:00Z", Generation: 4, Outcome: "refused", Host: "2001:db8::1", Port: 443}},
 	}
@@ -76,7 +79,7 @@ func TestNetworkDiagnosticsTextIsDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "world: w\ngeneration: g4\nscope: current-generation-ephemeral\nsensitive metadata: destination host and port\n" +
-		"host trust: untrusted-world-authored-request-metadata\n" +
+		"destination trust: untrusted-world-authored-request-metadata\n" +
 		"outcome provenance: kenogram-derived-bounded-observation\n" +
 		"2026-07-18T00:00:00Z\trefused\t\"[2001:db8::1]:443\"\ntruncated: false\nomitted: 0\nencoded event bytes: 103\n"
 	if string(output) != want {
@@ -89,7 +92,7 @@ func TestNetworkDiagnosticsTextEscapesFormatControls(t *testing.T) {
 		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
 		SensitiveData: "destination host and port",
 		Trust: app.NetworkDiagnosticsTrust{
-			Host: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
+			Destination: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
 		},
 		Events: []proxy.NetworkDiagnostic{{Timestamp: "2026-07-18T00:00:00Z", Generation: 4, Outcome: "refused", Host: "safe\u202eevil.example", Port: 443}},
 	}

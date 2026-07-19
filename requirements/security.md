@@ -38,10 +38,10 @@ interpret relayed bytes; the composed protocol must do so. An interface is not
 an input-sanitization or prompt-contamination boundary.
 
 `network-diagnostics` deliberately reveals exact destination host and port as
-sensitive operator metadata only after explicit local invocation. The host and
-host is also untrusted world-authored request metadata: a world can encode
-bounded prose in a valid hostname, so it must not be interpreted as authority
-or supplied unsanitized to automation or AI. Outcome is a Kenogram-derived
+sensitive operator metadata only after explicit local invocation. Both fields
+are untrusted world-authored request metadata: a world can choose the port and
+encode bounded prose in a valid hostname, so the destination must not be
+interpreted as authority or supplied unsanitized to automation or AI. Outcome is a Kenogram-derived
 bounded classification influenced by that request and the observed dial, not
 host-authored authority. Invalid UTF-8 and Unicode format controls are rejected
 from the request target; opaque non-authority HTTP field values remain outside

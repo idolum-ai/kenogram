@@ -43,8 +43,8 @@ generation, outcome, host, and port. Destination metadata is sensitive. No
 traffic content enters the view, and observation cannot alter policy. Both the
 diagnostic recorder and the non-authoritative compatibility log use bounded
 drop-on-pressure delivery so unavailable readers or storage cannot delay proxy
-traffic; diagnostic loss is reported honestly by the command. Host is untrusted
-world-authored request metadata. Outcome is a Kenogram-derived bounded
+traffic; diagnostic loss is reported honestly by the command. Host and port are
+untrusted world-authored request metadata. Outcome is a Kenogram-derived bounded
 classification influenced by the attempted request and observed dial, but is
 not authority. Invalid UTF-8 and Unicode format controls are rejected from the
 request target before policy lookup or observation.

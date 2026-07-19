@@ -48,6 +48,9 @@ type App struct {
 	// proxyDiagnosticsReady is replaceable only by lifecycle tests that model a
 	// legacy proxy process without implementing its control protocol.
 	proxyDiagnosticsReady func(context.Context, worldfs.Layout, int64) (bool, error)
+	// sendProxyControl is replaceable only by package tests that coordinate a
+	// blocked control exchange. Production uses the bounded Unix-socket client.
+	sendProxyControl func(context.Context, string, proxy.ControlRequest) error
 	// digestWorkspace is nil in production. Tests use it to prove that a live
 	// predecessor is not required to produce a stable tree before cutover.
 	digestWorkspace func(string) (worldfs.DigestTree, error)
@@ -110,7 +113,14 @@ func (a *App) proxyIsReady(ctx context.Context, l worldfs.Layout) bool {
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	return proxy.SendControlContext(probeCtx, l.ProxySocket, proxy.ControlRequest{Operation: "ping"}) == nil
+	return a.sendControl(probeCtx, l.ProxySocket, proxy.ControlRequest{Operation: "ping"}) == nil
+}
+
+func (a *App) sendControl(ctx context.Context, socket string, request proxy.ControlRequest) error {
+	if a.sendProxyControl != nil {
+		return a.sendProxyControl(ctx, socket, request)
+	}
+	return proxy.SendControlContext(ctx, socket, request)
 }
 
 func (a *App) proxySupportsDiagnostics(ctx context.Context, l worldfs.Layout, generation int64) (bool, error) {
@@ -187,8 +197,8 @@ type NetworkDiagnosticsResult struct {
 }
 
 type NetworkDiagnosticsTrust struct {
-	Host    string `json:"host"`
-	Outcome string `json:"outcome"`
+	Destination string `json:"destination"`
+	Outcome     string `json:"outcome"`
 }
 
 func Prepare(path string) (Prepared, error) {
@@ -1001,32 +1011,29 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 	}
 	proxyPID := state.ProxyPID
 	if len(prepared.Result.Plan.NetworkAllow) > 0 {
-		compatible, compatibilityErr := a.proxySupportsDiagnostics(ctx, l, state.Generation)
-		if compatibilityErr != nil {
-			return false, compatibilityErr
-		}
-		if compatible {
+		if a.proxyAlive(l) {
+			compatible, compatibilityErr := a.proxySupportsDiagnostics(ctx, l, state.Generation)
+			if compatibilityErr != nil {
+				return false, compatibilityErr
+			}
+			if !compatible {
+				return false, fmt.Errorf("running network door lacks current diagnostic capability; existing door left running; run kenogram down %s before reapplying the declaration", state.Name)
+			}
 			destinations := make([]proxy.Destination, 0, len(prepared.Result.Plan.NetworkAllow))
 			for _, allowed := range prepared.Result.Plan.NetworkAllow {
 				destinations = append(destinations, proxy.Destination{Host: allowed.Host, Port: int(allowed.Port)})
 			}
 			reconcileCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			err = proxy.SendControlContext(reconcileCtx, l.ProxySocket, proxy.ControlRequest{Operation: "reconcile", Destinations: destinations})
+			err = a.sendControl(reconcileCtx, l.ProxySocket, proxy.ControlRequest{Operation: "reconcile", Destinations: destinations})
 			cancel()
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return false, ctxErr
 			}
-		}
-		if !compatible || err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return false, ctxErr
+			if err != nil {
+				return false, fmt.Errorf("reconcile running network door; existing door left running: %w", err)
 			}
-			// Once replacement is chosen, finish it as one bounded lifecycle
-			// operation. Passing a newly canceled caller through startProxy could
-			// stop the healthy old door and then abort its replacement.
-			replacementCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			proxyPID, err = a.startProxy(replacementCtx, l, evidence.PID, state.Generation, prepared.Result.Plan.NetworkAllow)
-			cancel()
+		} else {
+			proxyPID, err = a.startProxy(ctx, l, evidence.PID, state.Generation, prepared.Result.Plan.NetworkAllow)
 			if err != nil {
 				return false, err
 			}
@@ -2103,8 +2110,8 @@ func (a *App) NetworkDiagnostics(ctx context.Context, name string, limit, maxByt
 		EncodedBytes:  snapshot.EncodedBytes,
 		SensitiveData: "destination host and port",
 		Trust: NetworkDiagnosticsTrust{
-			Host:    "untrusted-world-authored-request-metadata",
-			Outcome: "kenogram-derived-bounded-observation",
+			Destination: "untrusted-world-authored-request-metadata",
+			Outcome:     "kenogram-derived-bounded-observation",
 		},
 	}, nil
 }

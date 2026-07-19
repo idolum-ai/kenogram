@@ -21,6 +21,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/history"
 	"github.com/idolum-ai/kenogram/internal/lockfile"
 	"github.com/idolum-ai/kenogram/internal/plan"
+	"github.com/idolum-ai/kenogram/internal/proxy"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
 
@@ -1836,7 +1837,7 @@ func TestUpAdoptsVerifiedMatchingGeneration(t *testing.T) {
 	}
 }
 
-func TestUpReplacesLegacyProxyDuringAdoption(t *testing.T) {
+func TestUpRejectsLegacyProxyDuringAdoptionWithoutStoppingIt(t *testing.T) {
 	base := t.TempDir()
 	runner := &runtimeRunner{}
 	prepared := preparedFixture()
@@ -1862,15 +1863,18 @@ func TestUpReplacesLegacyProxyDuringAdoption(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.proxyDiagnosticsReady = func(context.Context, worldfs.Layout, int64) (bool, error) { return false, nil }
-	if err := a.Up(context.Background(), prepared); err != nil {
-		t.Fatal(err)
+	// A broken replacement executable proves that adoption never attempts the
+	// destructive stop-and-start path after discovering a legacy live door.
+	a.Executable = filepath.Join(base, "missing-kenogram")
+	if err := a.Up(context.Background(), prepared); err == nil || !strings.Contains(err.Error(), "existing door left running") {
+		t.Fatalf("legacy adoption error = %v", err)
 	}
 	after, err := layout.ReadState()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.ProxyPID <= 1 || after.ProxyPID <= 1 || before.ProxyPID == after.ProxyPID {
-		t.Fatalf("legacy proxy was not replaced: before=%d after=%d", before.ProxyPID, after.ProxyPID)
+	if before.ProxyPID <= 1 || after.ProxyPID != before.ProxyPID || !a.proxyAlive(layout) {
+		t.Fatalf("legacy proxy was disturbed: before=%d after=%d alive=%t", before.ProxyPID, after.ProxyPID, a.proxyAlive(layout))
 	}
 }
 
@@ -1899,10 +1903,18 @@ func TestUpCancellationDuringCompatibilityProbePreservesProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.proxyDiagnosticsReady = func(context.Context, worldfs.Layout, int64) (bool, error) {
-		return false, context.Canceled
+	ctx, cancel := context.WithCancel(context.Background())
+	probeEntered := make(chan struct{})
+	a.proxyDiagnosticsReady = func(probeCtx context.Context, _ worldfs.Layout, _ int64) (bool, error) {
+		close(probeEntered)
+		<-probeCtx.Done()
+		return false, probeCtx.Err()
 	}
-	if err := a.Up(context.Background(), prepared); !errors.Is(err, context.Canceled) {
+	go func() {
+		<-probeEntered
+		cancel()
+	}()
+	if err := a.Up(ctx, prepared); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled adoption error = %v", err)
 	}
 	after, err := layout.ReadState()
@@ -1911,6 +1923,58 @@ func TestUpCancellationDuringCompatibilityProbePreservesProxy(t *testing.T) {
 	}
 	if after.ProxyPID != before.ProxyPID || !a.proxyAlive(layout) {
 		t.Fatalf("canceled probe changed healthy proxy: before=%d after=%d alive=%t", before.ProxyPID, after.ProxyPID, a.proxyAlive(layout))
+	}
+}
+
+func TestUpCancellationDuringReconcilePreservesProxy(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	before, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.proxyDiagnosticsReady = func(context.Context, worldfs.Layout, int64) (bool, error) { return true, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	reconcileEntered := make(chan struct{})
+	a.sendProxyControl = func(controlCtx context.Context, _ string, request proxy.ControlRequest) error {
+		if request.Operation != "reconcile" {
+			return nil
+		}
+		close(reconcileEntered)
+		<-controlCtx.Done()
+		return controlCtx.Err()
+	}
+	go func() {
+		<-reconcileEntered
+		cancel()
+	}()
+	if err := a.Up(ctx, prepared); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled reconciliation error = %v", err)
+	}
+	after, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ProxyPID != before.ProxyPID || !a.proxyAlive(layout) {
+		t.Fatalf("canceled reconciliation changed healthy proxy: before=%d after=%d alive=%t", before.ProxyPID, after.ProxyPID, a.proxyAlive(layout))
 	}
 }
 
