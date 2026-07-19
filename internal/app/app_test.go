@@ -19,6 +19,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/decl"
 	"github.com/idolum-ai/kenogram/internal/history"
+	"github.com/idolum-ai/kenogram/internal/lockfile"
 	"github.com/idolum-ai/kenogram/internal/plan"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
@@ -1392,16 +1393,64 @@ func TestNetworkDiagnosticsRejectDanglingTransitionEntry(t *testing.T) {
 	}
 }
 
-func writeNetworkDiagnosticsAuthority(t *testing.T, base string) (worldfs.Layout, worldfs.State) {
+func TestNetworkDiagnosticsCancellationReleasesObservationLock(t *testing.T) {
+	base := t.TempDir()
+	layout, _ := writeNetworkDiagnosticsAuthority(t, base)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a := &App{Backend: testBackend(&runtimeRunner{}), BaseDir: base}
+	if _, err := a.NetworkDiagnostics(ctx, "w", 1, 512); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v", err)
+	}
+	lock, err := lockfile.Acquire(layout.Lock)
+	if err != nil {
+		t.Fatalf("exclusive lock remained blocked after cancellation: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNetworkDiagnosticsDistinguishesAbsentFromFailedDoor(t *testing.T) {
+	t.Run("no declared destinations", func(t *testing.T) {
+		base := t.TempDir()
+		layout, state := writeNetworkDiagnosticsAuthority(t, base)
+		runner := &runtimeRunner{mountSource: layout.WorkspacePath("/workspace"), planDigest: state.PlanDigest, declDigest: state.DeclarationDigest}
+		a := &App{Backend: testBackend(runner), BaseDir: base}
+		if _, err := a.NetworkDiagnostics(context.Background(), "w", 1, 512); err == nil || !strings.Contains(err.Error(), "declares no network destinations") {
+			t.Fatalf("absence error = %v", err)
+		}
+	})
+	t.Run("declared door failed", func(t *testing.T) {
+		base := t.TempDir()
+		prepared := preparedFixture()
+		prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+		refreshPreparedPlanDigest(&prepared)
+		layout, state := writeNetworkDiagnosticsAuthority(t, base, prepared)
+		runner := &runtimeRunner{mountSource: layout.WorkspacePath("/workspace"), planDigest: state.PlanDigest, declDigest: state.DeclarationDigest}
+		a := &App{Backend: testBackend(runner), BaseDir: base}
+		if _, err := a.NetworkDiagnostics(context.Background(), "w", 1, 512); err == nil || !strings.Contains(err.Error(), "declared network door is not responsive") {
+			t.Fatalf("failed-door error = %v", err)
+		}
+	})
+}
+
+func writeNetworkDiagnosticsAuthority(t *testing.T, base string, candidates ...Prepared) (worldfs.Layout, worldfs.State) {
 	t.Helper()
 	layout := worldfs.For(base, "w")
 	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.Lock, []byte("fixture\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := layout.EnsureWorkspace("/workspace"); err != nil {
 		t.Fatal(err)
 	}
 	prepared := preparedFixture()
+	if len(candidates) > 0 {
+		prepared = candidates[0]
+	}
 	rawPlan, err := encodeRecoveryPlan(prepared.Result)
 	if err != nil {
 		t.Fatal(err)
@@ -1784,6 +1833,44 @@ func TestUpAdoptsVerifiedMatchingGeneration(t *testing.T) {
 	after := countCalls(runner.calls, "create ")
 	if before != 1 || after != 1 {
 		t.Fatalf("create calls before=%d after=%d: %v", before, after, runner.calls)
+	}
+}
+
+func TestUpReplacesLegacyProxyDuringAdoption(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	before, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.proxyDiagnosticsReady = func(context.Context, worldfs.Layout, int64) bool { return false }
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	after, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ProxyPID <= 1 || after.ProxyPID <= 1 || before.ProxyPID == after.ProxyPID {
+		t.Fatalf("legacy proxy was not replaced: before=%d after=%d", before.ProxyPID, after.ProxyPID)
 	}
 }
 

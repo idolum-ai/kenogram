@@ -45,6 +45,9 @@ type App struct {
 	// proxyReady is nil in production. Lifecycle crash tests replace the real
 	// control round trip because their proxy process is a persistence fixture.
 	proxyReady func(worldfs.Layout) bool
+	// proxyDiagnosticsReady is replaceable only by lifecycle tests that model a
+	// legacy proxy process without implementing its control protocol.
+	proxyDiagnosticsReady func(context.Context, worldfs.Layout, int64) bool
 	// digestWorkspace is nil in production. Tests use it to prove that a live
 	// predecessor is not required to produce a stable tree before cutover.
 	digestWorkspace func(string) (worldfs.DigestTree, error)
@@ -110,6 +113,19 @@ func (a *App) proxyIsReady(ctx context.Context, l worldfs.Layout) bool {
 	return proxy.SendControlContext(probeCtx, l.ProxySocket, proxy.ControlRequest{Operation: "ping"}) == nil
 }
 
+func (a *App) proxySupportsDiagnostics(ctx context.Context, l worldfs.Layout, generation int64) bool {
+	if a.proxyDiagnosticsReady != nil {
+		return a.proxyDiagnosticsReady(ctx, l, generation)
+	}
+	if !a.proxyAlive(l) {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	snapshot, err := proxy.QueryDiagnosticsContext(probeCtx, l.ProxySocket, 1, 1)
+	return err == nil && snapshot.Generation == generation
+}
+
 type Prepared struct {
 	Raw         []byte
 	Declaration decl.Declaration
@@ -161,6 +177,7 @@ type NetworkDiagnosticsResult struct {
 	Omitted       uint64                    `json:"omitted"`
 	EncodedBytes  int                       `json:"encoded_bytes"`
 	SensitiveData string                    `json:"sensitive_metadata"`
+	Trust         string                    `json:"trust"`
 }
 
 func Prepare(path string) (Prepared, error) {
@@ -973,14 +990,15 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 	}
 	proxyPID := state.ProxyPID
 	if len(prepared.Result.Plan.NetworkAllow) > 0 {
-		if a.proxyAlive(l) {
+		compatible := a.proxySupportsDiagnostics(ctx, l, state.Generation)
+		if compatible {
 			destinations := make([]proxy.Destination, 0, len(prepared.Result.Plan.NetworkAllow))
 			for _, allowed := range prepared.Result.Plan.NetworkAllow {
 				destinations = append(destinations, proxy.Destination{Host: allowed.Host, Port: int(allowed.Port)})
 			}
 			err = proxy.SendControlContext(ctx, l.ProxySocket, proxy.ControlRequest{Operation: "reconcile", Destinations: destinations})
 		}
-		if !a.proxyAlive(l) || err != nil {
+		if !compatible || err != nil {
 			proxyPID, err = a.startProxy(ctx, l, evidence.PID, state.Generation, prepared.Result.Plan.NetworkAllow)
 			if err != nil {
 				return false, err
@@ -2002,7 +2020,7 @@ func (a *App) NetworkDiagnostics(ctx context.Context, name string, limit, maxByt
 	} else if !os.IsNotExist(err) {
 		return NetworkDiagnosticsResult{}, fmt.Errorf("inspect transition before network diagnostics: %w", err)
 	}
-	if _, err := history.Verify(l.History); err != nil {
+	if _, err := history.VerifyContext(ctx, l.History); err != nil {
 		return NetworkDiagnosticsResult{}, fmt.Errorf("verify history before network diagnostics: %w", err)
 	}
 	state, err := l.ReadState()
@@ -2023,8 +2041,11 @@ func (a *App) NetworkDiagnostics(ctx context.Context, name string, limit, maxByt
 	if !active {
 		return NetworkDiagnosticsResult{}, fmt.Errorf("authoritative generation g%d is not active", state.Generation)
 	}
+	if len(prepared.Result.Plan.NetworkAllow) == 0 {
+		return NetworkDiagnosticsResult{}, fmt.Errorf("world declares no network destinations; no network diagnostic view exists")
+	}
 	if state.ProxyPID <= 1 || !a.proxyAlive(l) {
-		return NetworkDiagnosticsResult{}, fmt.Errorf("current generation has no responsive network door")
+		return NetworkDiagnosticsResult{}, fmt.Errorf("declared network door is not responsive")
 	}
 	identity, err := os.ReadFile(l.ProxyPID)
 	if err != nil {
@@ -2040,7 +2061,7 @@ func (a *App) NetworkDiagnostics(ctx context.Context, name string, limit, maxByt
 	}
 	snapshot, err := proxy.QueryDiagnosticsContext(ctx, l.ProxySocket, limit, maxBytes)
 	if err != nil {
-		return NetworkDiagnosticsResult{}, err
+		return NetworkDiagnosticsResult{}, fmt.Errorf("query current-generation network door: %w", err)
 	}
 	if snapshot.Generation != state.Generation {
 		return NetworkDiagnosticsResult{}, fmt.Errorf("proxy generation g%d does not match authoritative generation g%d", snapshot.Generation, state.Generation)
@@ -2054,6 +2075,7 @@ func (a *App) NetworkDiagnostics(ctx context.Context, name string, limit, maxByt
 		Omitted:       snapshot.Omitted,
 		EncodedBytes:  snapshot.EncodedBytes,
 		SensitiveData: "destination host and port",
+		Trust:         "untrusted-world-authored-request-metadata",
 	}, nil
 }
 

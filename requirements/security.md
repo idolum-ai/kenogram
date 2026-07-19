@@ -38,11 +38,16 @@ interpret relayed bytes; the composed protocol must do so. An interface is not
 an input-sanitization or prompt-contamination boundary.
 
 `network-diagnostics` deliberately reveals exact destination host and port as
-sensitive operator metadata only after explicit local invocation. It never
-captures or emits payloads, headers, credentials, complete URLs, paths, query
-strings, environment values, or arbitrary application output. Its ephemeral
-observations are not copied into status, history, generated projections, or
-message channels and do not authorize a declaration or temporary grant.
+sensitive operator metadata only after explicit local invocation. The host and
+outcome are also untrusted world-authored request metadata: a world can encode
+bounded prose in a valid hostname, so observations must not be interpreted as
+authority or supplied unsanitized to automation or AI. Invalid UTF-8 and
+Unicode format controls are rejected; text output ASCII-quotes destinations.
+The view never captures payloads, headers, credentials, complete URLs, paths,
+query strings, environment values, or application output beyond that bounded
+request metadata. Its ephemeral observations are not copied into status,
+history, generated projections, or message channels and do not authorize a
+declaration or temporary grant.
 
 ## Trust boundary
 

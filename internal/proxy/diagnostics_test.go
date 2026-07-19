@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -81,6 +82,29 @@ func TestNetworkDiagnosticsPrivacyCanary(t *testing.T) {
 	}
 }
 
+func TestNetworkDiagnosticsRejectInvalidUTF8AuthoritiesBeforeRecording(t *testing.T) {
+	for _, value := range []byte{0xff, 0xfe} {
+		p := New(nil, Options{Generation: 3})
+		host := string([]byte{value}) + ".example"
+		request := "CONNECT " + host + ":443 HTTP/1.1\r\nHost: " + host + ":443\r\n\r\n"
+		proxyRequest(t, p, request, "400")
+		if snapshot := p.diagnostics.snapshot(10, MaxDiagnosticBytes); len(snapshot.Events) != 0 {
+			t.Fatalf("invalid byte %x produced evidence: %#v", value, snapshot)
+		}
+	}
+}
+
+func TestNetworkDiagnosticsAcceptGenuineReplacementRuneHost(t *testing.T) {
+	p := New(nil, Options{Generation: 3})
+	host := "\uFFFD.example"
+	request := "CONNECT " + host + ":443 HTTP/1.1\r\nHost: " + host + ":443\r\n\r\n"
+	proxyRequest(t, p, request, "403")
+	snapshot := p.diagnostics.snapshot(10, MaxDiagnosticBytes)
+	if len(snapshot.Events) != 1 || snapshot.Events[0].Host != host {
+		t.Fatalf("replacement-rune evidence = %#v", snapshot)
+	}
+}
+
 func TestNetworkDiagnosticsBoundsAndHonestOmission(t *testing.T) {
 	p := New(nil, Options{Generation: 2})
 	for index := 0; index < 6; index++ {
@@ -143,6 +167,23 @@ func TestMetadataLogBackpressureNeverBlocksProxy(t *testing.T) {
 		t.Fatal("proxy blocked behind metadata log writer")
 	}
 	close(release)
+}
+
+type formattingCanary struct{ calls atomic.Int32 }
+
+func (c *formattingCanary) String() string {
+	c.calls.Add(1)
+	return "formatted"
+}
+
+func TestDroppedMetadataLogDoesNotFormat(t *testing.T) {
+	p := &Proxy{logMessages: make(chan logMessage, 1)}
+	p.logMessages <- logMessage{format: "occupied"}
+	canary := &formattingCanary{}
+	p.logf("%s", canary)
+	if got := canary.calls.Load(); got != 0 {
+		t.Fatalf("dropped log formatted %d times", got)
+	}
 }
 
 func TestDiagnosticControlResponseIsOneSnapshot(t *testing.T) {

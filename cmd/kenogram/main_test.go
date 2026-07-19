@@ -28,6 +28,7 @@ func TestNetworkDiagnosticsOutputBoundsCompleteDocument(t *testing.T) {
 	result := app.NetworkDiagnosticsResult{
 		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
 		SensitiveData: "destination host and port",
+		Trust:         "untrusted-world-authored-request-metadata",
 	}
 	for index := 0; index < 8; index++ {
 		result.Events = append(result.Events, proxy.NetworkDiagnostic{
@@ -63,6 +64,7 @@ func TestNetworkDiagnosticsTextIsDeterministic(t *testing.T) {
 	result := app.NetworkDiagnosticsResult{
 		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
 		SensitiveData: "destination host and port",
+		Trust:         "untrusted-world-authored-request-metadata",
 		Events:        []proxy.NetworkDiagnostic{{Timestamp: "2026-07-18T00:00:00Z", Generation: 4, Outcome: "refused", Host: "2001:db8::1", Port: 443}},
 	}
 	output, err := boundedNetworkDiagnostics(result, proxy.MaxDiagnosticBytes, false)
@@ -70,9 +72,26 @@ func TestNetworkDiagnosticsTextIsDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "world: w\ngeneration: g4\nscope: current-generation-ephemeral\nsensitive metadata: destination host and port\n" +
-		"2026-07-18T00:00:00Z\trefused\t[2001:db8::1]:443\ntruncated: false\nomitted: 0\nencoded event bytes: 103\n"
+		"trust: untrusted-world-authored-request-metadata\n" +
+		"2026-07-18T00:00:00Z\trefused\t\"[2001:db8::1]:443\"\ntruncated: false\nomitted: 0\nencoded event bytes: 103\n"
 	if string(output) != want {
 		t.Fatalf("text output = %q; want %q", output, want)
+	}
+}
+
+func TestNetworkDiagnosticsTextEscapesFormatControls(t *testing.T) {
+	result := app.NetworkDiagnosticsResult{
+		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
+		SensitiveData: "destination host and port",
+		Trust:         "untrusted-world-authored-request-metadata",
+		Events:        []proxy.NetworkDiagnostic{{Timestamp: "2026-07-18T00:00:00Z", Generation: 4, Outcome: "refused", Host: "safe\u202eevil.example", Port: 443}},
+	}
+	output, err := boundedNetworkDiagnostics(result, proxy.MaxDiagnosticBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.ContainsRune(output, '\u202e') || !bytes.Contains(output, []byte(`\u202e`)) {
+		t.Fatalf("format control was not ASCII-escaped: %q", output)
 	}
 }
 

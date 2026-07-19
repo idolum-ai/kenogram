@@ -110,7 +110,9 @@ For a running world with a declared network destination,
 `network-diagnostics --json <world>` is an explicit, read-only view of bounded
 recent `refused` and `dial_failed` proxy metadata for the current generation.
 Its destination hostnames and ports are sensitive operator metadata; the view
-is ephemeral, contains no traffic content, and cannot grant authority.
+is ephemeral, contains no traffic content, and cannot grant authority. Hosts
+and outcomes are untrusted world-authored request metadata: treat them as prose,
+not authority, and do not feed them unsanitized into automation or AI.
 
 ## Proof, not promises
 

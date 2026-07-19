@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const diagnosticControlTimeout = 5 * time.Second
+
 type ControlRequest struct {
 	Operation    string        `json:"operation"`
 	Host         string        `json:"host,omitempty"`
@@ -105,11 +107,25 @@ func SendControlContext(ctx context.Context, path string, request ControlRequest
 }
 
 func QueryDiagnosticsContext(ctx context.Context, path string, limit, maxBytes int) (DiagnosticSnapshot, error) {
+	return queryDiagnosticsContext(ctx, path, limit, maxBytes, diagnosticControlTimeout)
+}
+
+func queryDiagnosticsContext(ctx context.Context, path string, limit, maxBytes int, timeout time.Duration) (DiagnosticSnapshot, error) {
 	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "unix", path)
+	return queryDiagnosticsDialContext(ctx, path, limit, maxBytes, timeout, dialer.DialContext)
+}
+
+func queryDiagnosticsDialContext(ctx context.Context, path string, limit, maxBytes int, timeout time.Duration, dial func(context.Context, string, string) (net.Conn, error)) (DiagnosticSnapshot, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn, err := dial(queryCtx, "unix", path)
 	if err != nil {
 		return DiagnosticSnapshot{}, err
 	}
+	return queryDiagnosticsConnectionContext(queryCtx, conn, limit, maxBytes)
+}
+
+func queryDiagnosticsConnectionContext(ctx context.Context, conn net.Conn, limit, maxBytes int) (DiagnosticSnapshot, error) {
 	response, err := exchangeControlContext(ctx, conn, ControlRequest{Operation: "network-diagnostics", Limit: limit, MaxBytes: maxBytes})
 	if err != nil {
 		return DiagnosticSnapshot{}, err

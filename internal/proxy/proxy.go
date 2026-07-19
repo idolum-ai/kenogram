@@ -3,6 +3,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/idolum-ai/kenogram/internal/naming"
 )
@@ -51,6 +53,10 @@ type tracked struct {
 	conn      net.Conn
 	admission string
 }
+type logMessage struct {
+	format    string
+	arguments []any
+}
 type Proxy struct {
 	mu          sync.Mutex
 	durable     map[string]string
@@ -64,7 +70,7 @@ type Proxy struct {
 	rateCount   int
 	admission   uint64
 	diagnostics *diagnosticBuffer
-	logMessages chan string
+	logMessages chan logMessage
 }
 
 func New(destinations []Destination, opts Options) *Proxy {
@@ -82,10 +88,10 @@ func New(destinations []Destination, opts Options) *Proxy {
 	}
 	p := &Proxy{durable: map[string]string{}, grants: map[string]grant{}, active: map[uint64]tracked{}, opts: opts, sem: make(chan struct{}, opts.MaxConnections), diagnostics: newDiagnosticBuffer(opts.Generation, opts.Now)}
 	if opts.Logger != nil {
-		p.logMessages = make(chan string, MaxDiagnosticLimit)
+		p.logMessages = make(chan logMessage, MaxDiagnosticLimit)
 		go func() {
 			for message := range p.logMessages {
-				opts.Logger.Print(message)
+				opts.Logger.Printf(message.format, message.arguments...)
 			}
 		}()
 	}
@@ -132,7 +138,13 @@ func (p *Proxy) handle(client net.Conn) {
 	_ = client.SetReadDeadline(time.Now().Add(30 * time.Second))
 	bounded := &headerReader{reader: client, remaining: 64 << 10}
 	reader := bufio.NewReader(bounded)
-	request, err := http.ReadRequest(reader)
+	header, err := readProxyHeader(reader)
+	if err != nil || !utf8.Valid(header) {
+		writeError(client, http.StatusBadRequest)
+		return
+	}
+	requestReader := bufio.NewReader(io.MultiReader(bytes.NewReader(header), reader))
+	request, err := http.ReadRequest(requestReader)
 	if err != nil {
 		writeError(client, http.StatusBadRequest)
 		return
@@ -173,7 +185,7 @@ func (p *Proxy) handle(client net.Conn) {
 		if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 			return
 		}
-		relay(&bufferedConn{Conn: client, reader: reader}, outbound)
+		relay(&bufferedConn{Conn: client, reader: requestReader}, outbound)
 		return
 	}
 	request.RequestURI = ""
@@ -188,12 +200,26 @@ func (p *Proxy) handle(client net.Conn) {
 	relay(client, outbound)
 }
 
+func readProxyHeader(reader *bufio.Reader) ([]byte, error) {
+	var header bytes.Buffer
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		_, _ = header.WriteString(line)
+		if line == "\r\n" || line == "\n" {
+			return header.Bytes(), nil
+		}
+	}
+}
+
 func (p *Proxy) logf(format string, arguments ...any) {
 	if p.logMessages == nil {
 		return
 	}
 	select {
-	case p.logMessages <- fmt.Sprintf(format, arguments...):
+	case p.logMessages <- logMessage{format: format, arguments: arguments}:
 	default:
 	}
 }

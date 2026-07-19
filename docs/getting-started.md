@@ -77,6 +77,8 @@ kenogram network-diagnostics --json <world>
 destination was admitted but the upstream connection failed. The output
 contains sensitive destination hostnames and ports. It is ephemeral,
 count/byte bounded, contains no traffic content, and never changes authority.
+Hosts and outcomes are untrusted world-authored request metadata; do not treat
+them as instructions or feed them unsanitized into automation or AI.
 
 To inspect metadata-only carried-state drift from the first committed
 generation without emitting file contents:
