@@ -76,6 +76,9 @@ func walkDigestDirectory(ctx context.Context, directory *os.File, prefix string,
 			if prefix != "" {
 				rel = path.Join(prefix, name)
 			}
+			if err := validateDigestEntryUTF8(DigestEntry{Path: rel}); err != nil {
+				return err
+			}
 			switch {
 			case observed.Mode().IsRegular():
 				if err := walkDigestRegular(ctx, directory, name, rel, observed, state); err != nil {
@@ -195,6 +198,9 @@ func digestSpecialType(mode os.FileMode) string {
 }
 
 func (s *digestWalkState) appendMetadata(entry DigestEntry) error {
+	if err := validateDigestEntryUTF8(entry); err != nil {
+		return err
+	}
 	if s.limits.MaxEntries > 0 && len(s.entries) >= s.limits.MaxEntries {
 		return fmt.Errorf("workspace observation exceeds %d entries", s.limits.MaxEntries)
 	}

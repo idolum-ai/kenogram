@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type DigestEntry struct {
@@ -218,6 +219,9 @@ func (r contextReader) Read(buffer []byte) (int, error) {
 }
 func (l Layout) WriteDigest(generation int64, tree DigestTree) (string, error) {
 	path := filepath.Join(l.Digests, fmt.Sprintf("g%d.json", generation))
+	if err := ValidateDigestTree(tree); err != nil {
+		return path, fmt.Errorf("validate digest tree before write: %w", err)
+	}
 	return path, atomicJSON(path, tree, 0o600)
 }
 func (l Layout) ReadDigest(generation int64) (DigestTree, error) {
@@ -278,6 +282,9 @@ func ValidateDigestTreeContext(ctx context.Context, tree DigestTree) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if err := validateDigestEntryUTF8(entry); err != nil {
+			return err
+		}
 		if i == 0 {
 			if entry.Path != "" || entry.Type != "directory" {
 				return fmt.Errorf("first entry is not the workspace root directory")
@@ -330,6 +337,16 @@ func ValidateDigestTreeContext(ctx context.Context, tree DigestTree) error {
 	}
 	if tree.Root != want {
 		return fmt.Errorf("root hash mismatch")
+	}
+	return nil
+}
+
+func validateDigestEntryUTF8(entry DigestEntry) error {
+	if !utf8.ValidString(entry.Path) {
+		return fmt.Errorf("entry path %q is not valid UTF-8", entry.Path)
+	}
+	if !utf8.ValidString(entry.Link) {
+		return fmt.Errorf("entry %q link target is not valid UTF-8", entry.Path)
 	}
 	return nil
 }

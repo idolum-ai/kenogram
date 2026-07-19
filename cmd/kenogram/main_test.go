@@ -152,6 +152,34 @@ func TestInspectWorkspaceCancellationEmitsNoPartialJSON(t *testing.T) {
 	}
 }
 
+func TestInspectWorkspaceInvalidUTF8NameEmitsNoJSON(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux filenames exercise the byte-oriented workspace boundary")
+	}
+	base, layout := inspectionCommandFixture(t)
+	baseline, err := worldfs.Digest(layout.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.WriteDigest(1, baseline); err != nil {
+		t.Fatal(err)
+	}
+	bindInspectionHistory(t, layout, baseline.Root)
+	invalid := filepath.Join(layout.WorkspacePath("/workspace"), string([]byte{0xff}))
+	if err := os.WriteFile(invalid, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := newApp
+	newApp = func(io.Writer) (*app.App, error) { return &app.App{BaseDir: base}, nil }
+	t.Cleanup(func() { newApp = previous })
+
+	var stdout, stderr bytes.Buffer
+	code := runInspectWorkspace(context.Background(), []string{"--baseline", "g1", "--json", "w"}, &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not valid UTF-8") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestInspectWorkspaceByteLimitBoundsWholeDocument(t *testing.T) {
 	inspection := app.WorkspaceInspection{
 		SchemaVersion: 1, World: "w", BaselineGeneration: 1,
@@ -367,7 +395,7 @@ func TestUpComparisonFailuresPrecedeOutputAndConfirmation(t *testing.T) {
 		{
 			name: "recorded workspace digest without state",
 			set: func(t *testing.T, layout worldfs.Layout, _ app.Prepared) {
-				if _, err := layout.WriteDigest(1, worldfs.DigestTree{Root: "orphan"}); err != nil {
+				if err := os.WriteFile(filepath.Join(layout.Digests, "g1.json"), []byte("{\"root\":\"orphan\"}\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			},
