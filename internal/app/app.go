@@ -51,6 +51,9 @@ type App struct {
 	// sendProxyControl is replaceable only by package tests that coordinate a
 	// blocked control exchange. Production uses the bounded Unix-socket client.
 	sendProxyControl func(context.Context, string, proxy.ControlRequest) error
+	// observeProxyIdentity is replaceable only by package tests that model PID
+	// reuse between the two identity observations surrounding reconciliation.
+	observeProxyIdentity func(worldfs.Layout) (proxyProcessIdentity, bool)
 	// digestWorkspace is nil in production. Tests use it to prove that a live
 	// predecessor is not required to produce a stable tree before cutover.
 	digestWorkspace func(string) (worldfs.DigestTree, error)
@@ -1011,7 +1014,7 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 	}
 	proxyPID := state.ProxyPID
 	if len(prepared.Result.Plan.NetworkAllow) > 0 {
-		if livePID, alive := a.liveProxyPID(l); alive {
+		if liveIdentity, alive := a.liveProxyIdentity(l); alive {
 			compatible, compatibilityErr := a.proxySupportsDiagnostics(ctx, l, state.Generation)
 			if compatibilityErr != nil {
 				return false, compatibilityErr
@@ -1032,14 +1035,14 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 			if err != nil {
 				return false, fmt.Errorf("reconcile running network door; existing door left running: %w", err)
 			}
-			confirmedPID, stillAlive := a.liveProxyPID(l)
-			if !stillAlive || confirmedPID != livePID {
+			confirmedIdentity, stillAlive := a.liveProxyIdentity(l)
+			if !stillAlive || confirmedIdentity != liveIdentity {
 				return false, fmt.Errorf("running network door identity changed during adoption; settled authority left unchanged; run kenogram down %s before reapplying the declaration", state.Name)
 			}
 			// proxy.pid is the ownership evidence for the process actually probed
 			// and reconciled. It may be newer than state.json when a prior adoption
 			// was interrupted after proxy readiness but before state commit.
-			proxyPID = confirmedPID
+			proxyPID = confirmedIdentity.PID
 		} else {
 			proxyPID, err = a.startProxy(ctx, l, evidence.PID, state.Generation, prepared.Result.Plan.NetworkAllow)
 			if err != nil {
@@ -1097,35 +1100,46 @@ func adoptionWorkspaceEvidence(path string, digest func(string) (worldfs.DigestT
 	return "", "", err
 }
 func (a *App) proxyAlive(l worldfs.Layout) bool {
-	_, alive := a.liveProxyPID(l)
+	_, alive := a.liveProxyIdentity(l)
 	return alive
 }
 
-func (a *App) liveProxyPID(l worldfs.Layout) (int, bool) {
+type proxyProcessIdentity struct {
+	PID   int
+	Start string
+}
+
+func (a *App) liveProxyIdentity(l worldfs.Layout) (proxyProcessIdentity, bool) {
+	if a.observeProxyIdentity != nil {
+		return a.observeProxyIdentity(l)
+	}
 	raw, err := os.ReadFile(l.ProxyPID)
 	if err != nil {
-		return 0, false
+		return proxyProcessIdentity{}, false
 	}
 	fields := strings.Fields(string(raw))
 	if len(fields) != 2 {
-		return 0, false
+		return proxyProcessIdentity{}, false
 	}
 	pid, err := strconv.Atoi(fields[0])
 	if err != nil || pid <= 1 || lockfile.ProcessStart(pid) != fields[1] {
-		return 0, false
+		return proxyProcessIdentity{}, false
 	}
 	cmdline, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
 	if err != nil {
-		return 0, false
+		return proxyProcessIdentity{}, false
 	}
 	if !strings.Contains(string(cmdline), "_proxy") || !strings.Contains(string(cmdline), l.ProxySocket) {
-		return 0, false
+		return proxyProcessIdentity{}, false
 	}
 	if err := syscall.Kill(pid, 0); err != nil {
-		return 0, false
+		return proxyProcessIdentity{}, false
 	}
 	_, err = os.Stat(l.ProxySocket)
-	return pid, err == nil
+	if err != nil {
+		return proxyProcessIdentity{}, false
+	}
+	return proxyProcessIdentity{PID: pid, Start: fields[1]}, true
 }
 
 func (a *App) loadPredecessor(l worldfs.Layout, prior worldfs.State) (Prepared, error) {

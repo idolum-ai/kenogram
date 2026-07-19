@@ -2024,6 +2024,124 @@ func TestUpAdoptionRecordsTheLiveReconciledProxyIdentity(t *testing.T) {
 	}
 }
 
+func TestUpRejectsSamePIDWithChangedStartIdentity(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+		proxyDiagnosticsReady: func(context.Context, worldfs.Layout, int64) (bool, error) {
+			return true, nil
+		},
+		sendProxyControl: func(context.Context, string, proxy.ControlRequest) error { return nil },
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	identity, alive := a.liveProxyIdentity(layout)
+	if !alive {
+		t.Fatal("fixture proxy is not alive")
+	}
+	beforeState, err := os.ReadFile(layout.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	a.observeProxyIdentity = func(worldfs.Layout) (proxyProcessIdentity, bool) {
+		calls++
+		if calls == 1 {
+			return identity, true
+		}
+		return proxyProcessIdentity{PID: identity.PID, Start: identity.Start + "-reused"}, true
+	}
+	err = a.Up(context.Background(), prepared)
+	a.observeProxyIdentity = nil
+	if err == nil || !strings.Contains(err.Error(), "identity changed during adoption") {
+		t.Fatalf("identity-change error = %v", err)
+	}
+	afterState, readErr := os.ReadFile(layout.State)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(afterState, beforeState) || !a.proxyAlive(layout) {
+		t.Fatalf("identity change rewrote state or disturbed live door: state_equal=%t alive=%t", bytes.Equal(afterState, beforeState), a.proxyAlive(layout))
+	}
+}
+
+func TestUpRejectsDisappearingProxyIdentityWithoutWritingAuthority(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+		proxyDiagnosticsReady: func(context.Context, worldfs.Layout, int64) (bool, error) {
+			return true, nil
+		},
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	identityRaw, err := os.ReadFile(layout.ProxyPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.WriteFile(layout.ProxyPID, identityRaw, 0o600) }()
+	authorityPaths := []string{layout.State, layout.AppliedPlan, layout.History}
+	before := make(map[string][]byte, len(authorityPaths))
+	for _, path := range authorityPaths {
+		before[path], err = os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.sendProxyControl = func(_ context.Context, _ string, request proxy.ControlRequest) error {
+		if request.Operation == "reconcile" {
+			return os.Remove(layout.ProxyPID)
+		}
+		return nil
+	}
+	err = a.Up(context.Background(), prepared)
+	if err == nil || !strings.Contains(err.Error(), "identity changed during adoption") {
+		t.Fatalf("disappearing-identity error = %v", err)
+	}
+	for _, path := range authorityPaths {
+		after, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(after, before[path]) {
+			t.Fatalf("identity change rewrote %s", path)
+		}
+	}
+	fields := strings.Fields(string(identityRaw))
+	livePID, parseErr := strconv.Atoi(fields[0])
+	if parseErr != nil || lockfile.ProcessStart(livePID) != fields[1] {
+		t.Fatalf("identity rejection killed the owned proxy: identity=%q parse=%v", identityRaw, parseErr)
+	}
+}
+
 func TestAdoptionRecordsUnavailableDigestForChangingWorkspace(t *testing.T) {
 	digest, detail, err := adoptionWorkspaceEvidence("workspace", func(string) (worldfs.DigestTree, error) {
 		return worldfs.DigestTree{}, fmt.Errorf("digest retries exhausted: %w", worldfs.ErrWorkspaceChanging)
