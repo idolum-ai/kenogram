@@ -21,6 +21,9 @@ rg -Fq 'Natural Numbers in Trans-Classic' docs/kenogrammatics.md
 rg -Fq 'Morphogrammatik: Eine Einführung' docs/kenogrammatics.md
 rg -Fq 'Morphogrammatics for' docs/kenogrammatics.md
 rg -q 'Status: design proposal' docs/world-pattern-proposal.md
+rg -q 'Status: design proposal for review' docs/cutover-readiness-proposal.md
+rg -Fq 'cutover-readiness-proposal.md' docs/compositions/readiness-wrapper.md requirements/INDEX.md
+rg -Fq '"current_health": "unknown"' docs/cutover-readiness-proposal.md
 rg -q 'candidate-reviewed tree' docs/release-strategy.md
 rg -q 'scripts/install-release.sh' README.md docs/release-strategy.md
 rg -q 'macos-26' .github/workflows/ci.yml docs/apple-container-machine.md

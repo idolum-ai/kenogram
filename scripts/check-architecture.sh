@@ -7,6 +7,7 @@ cd "$repo_root"
 required=(
   README.md CHANGELOG.md docs/design.md docs/getting-started.md docs/kenogrammatics.md
   docs/apple-container-machine.md docs/release-strategy.md docs/world-pattern-proposal.md
+  docs/cutover-readiness-proposal.md
   docs/compositions/README.md docs/compositions/engram.md
   docs/compositions/openclaw.md docs/compositions/hermes-agent.md
   docs/compositions/ssh.md docs/compositions/readiness-wrapper.md

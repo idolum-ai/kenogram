@@ -3,6 +3,10 @@
 Status: binding design. Observable implementation status is recorded in the
 requirements index.
 
+The bounded generation-level cutover-readiness architecture is under review in
+[`cutover-readiness-proposal.md`](cutover-readiness-proposal.md). It does not
+change the binding version 1 declaration or lifecycle contracts.
+
 Kenogram writes worlds; it never decides them. A world is a rootless Linux
 environment materialized from one host-authored declaration. The inhabitant owns
 everything visible within it. Undeclared paths, processes, devices, credentials,
