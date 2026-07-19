@@ -6,6 +6,11 @@ application readiness. This page records proposed semantic evidence for a
 possible later **transactional cutover readiness** contract. It does not add a
 declaration field, status field, health monitor, or supported readiness API.
 
+The candidate production contract is now drafted in
+[`../cutover-readiness-proposal.md`](../cutover-readiness-proposal.md). Feedback
+should challenge that architecture; this page remains executable design
+evidence, not a contract.
+
 The motivating K-Live observation is concrete: an OpenClaw gateway was already
 supervised and its loopback `/readyz` surface answered before its messaging
 adapter reported connected. A later channel-status action reported connected
@@ -69,20 +74,18 @@ reuse Kenogram's existing lifecycle fixtures; this proof does not duplicate the
 rootless Podman proxy-enforcement evidence already indexed for implemented
 boundaries.
 
-## Deliberately open design questions
+## Questions carried into architecture review
 
-- Whether readiness belongs to one service, a relation among services, or the
-  whole candidate generation.
-- Declaration syntax, command representation, production bounds, and whether
-  retries are fixed or operator-selected within hard limits.
-- How multiple actions compose and which failures are retryable.
-- Whether and how one service's readiness gates another service's startup.
-- Whether any bounded historical result belongs in durable state or `status`.
-  A past success must never be rendered as current health.
-- Redaction rules for action output and whether output should be retained at all.
-- Process-group termination and bounded stdout/stderr ingestion when an action
-  ignores cancellation or forks descendants.
-- Adoption, stopped-generation restart, and manual-service behavior.
+The architecture draft makes provisional choices for these questions. They
+remain open to review until a binding contract accepts them:
+
+- whether generation-level placement faithfully captures the observed boundary;
+- schema versioning, command representation, hard bounds, and retry behavior;
+- ordered multiple actions without introducing service dependency semantics;
+- the minimal historical result that belongs in durable state and `status`;
+- whether explicitly requested diagnostic output can be exposed safely;
+- process-group termination and bounded stdout/stderr ingestion; and
+- adoption, stopped-generation restart, and manual-service behavior.
 
 Continuous health monitoring, automatic reaction to later degradation, and
 application-specific interpretation remain outside this design.
