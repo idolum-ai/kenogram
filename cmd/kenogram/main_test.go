@@ -20,8 +20,156 @@ import (
 	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/doctor"
 	"github.com/idolum-ai/kenogram/internal/history"
+	"github.com/idolum-ai/kenogram/internal/proxy"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
+
+func TestNetworkDiagnosticsOutputBoundsCompleteDocument(t *testing.T) {
+	result := app.NetworkDiagnosticsResult{
+		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
+		SensitiveData: "destination host and port",
+		Trust: app.NetworkDiagnosticsTrust{
+			Destination: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
+		},
+	}
+	for index := 0; index < 8; index++ {
+		result.Events = append(result.Events, proxy.NetworkDiagnostic{
+			Timestamp: "2026-07-18T00:00:00Z", Generation: 4,
+			Outcome: "refused", Host: strings.Repeat(string(rune('a'+index)), 120) + ".example", Port: 443,
+		})
+	}
+	for _, jsonOut := range []bool{false, true} {
+		output, err := boundedNetworkDiagnostics(result, 512, jsonOut)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(output) > 512 {
+			t.Fatalf("json=%t output is %d bytes", jsonOut, len(output))
+		}
+		if jsonOut {
+			var bounded app.NetworkDiagnosticsResult
+			decoder := json.NewDecoder(bytes.NewReader(output))
+			if err := decoder.Decode(&bounded); err != nil {
+				t.Fatal(err)
+			}
+			if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+				t.Fatalf("JSON output is not one document: %v", err)
+			}
+			if !bounded.Truncated || bounded.Omitted == 0 {
+				t.Fatalf("bounded result is dishonest: %#v", bounded)
+			}
+			if bounded.Trust.Destination != "untrusted-world-authored-request-metadata" || bounded.Trust.Outcome != "kenogram-derived-bounded-observation" {
+				t.Fatalf("incomplete provenance envelope: %#v", bounded.Trust)
+			}
+		}
+	}
+}
+
+func TestNetworkDiagnosticsTextIsDeterministic(t *testing.T) {
+	result := app.NetworkDiagnosticsResult{
+		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
+		SensitiveData: "destination host and port",
+		Trust: app.NetworkDiagnosticsTrust{
+			Destination: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
+		},
+		Events: []proxy.NetworkDiagnostic{{Timestamp: "2026-07-18T00:00:00Z", Generation: 4, Outcome: "refused", Host: "2001:db8::1", Port: 443}},
+	}
+	output, err := boundedNetworkDiagnostics(result, proxy.MaxDiagnosticBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "world: w\ngeneration: g4\nscope: current-generation-ephemeral\nsensitive metadata: destination host and port\n" +
+		"destination trust: untrusted-world-authored-request-metadata\n" +
+		"outcome provenance: kenogram-derived-bounded-observation\n" +
+		"2026-07-18T00:00:00Z\trefused\t\"[2001:db8::1]:443\"\ntruncated: false\nomitted: 0\nencoded event bytes: 103\n"
+	if string(output) != want {
+		t.Fatalf("text output = %q; want %q", output, want)
+	}
+}
+
+func TestNetworkDiagnosticsTextEscapesFormatControls(t *testing.T) {
+	result := app.NetworkDiagnosticsResult{
+		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
+		SensitiveData: "destination host and port",
+		Trust: app.NetworkDiagnosticsTrust{
+			Destination: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
+		},
+		Events: []proxy.NetworkDiagnostic{{Timestamp: "2026-07-18T00:00:00Z", Generation: 4, Outcome: "refused", Host: "safe\u202eevil.example", Port: 443}},
+	}
+	output, err := boundedNetworkDiagnostics(result, proxy.MaxDiagnosticBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.ContainsRune(output, '\u202e') || !bytes.Contains(output, []byte(`\u202e`)) {
+		t.Fatalf("format control was not ASCII-escaped: %q", output)
+	}
+}
+
+func TestNetworkDiagnosticsRejectsUnrepresentableAndExcessiveBounds(t *testing.T) {
+	for _, arguments := range [][]string{{"--max-bytes", "511", "w"}, {"--max-bytes", "65537", "w"}, {"--limit", "0", "w"}, {"--limit", "257", "w"}} {
+		var stdout, stderr bytes.Buffer
+		if code := runNetworkDiagnostics(context.Background(), arguments, &stdout, &stderr); code != 2 {
+			t.Fatalf("arguments %v: code=%d stdout=%q stderr=%q", arguments, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestCompatibilityMetadataLogTruncatesAtBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy.log")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.Write(bytes.Repeat([]byte{'x'}, metadataLogLimit-4)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Seek(metadataLogLimit*2, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	line := []byte("new-line\n")
+	if _, err := (boundedMetadataLog{file: file}).Write(line); err != nil {
+		t.Fatal(err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != int64(len(line)) {
+		t.Fatalf("rotated log size = %d", info.Size())
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(content, line) {
+		t.Fatalf("rotated log is sparse or misplaced: size=%d content=%q", info.Size(), content)
+	}
+}
+
+func TestCompatibilityMetadataLogBoundsSingleOversizedWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy.log")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	oversized := bytes.Repeat([]byte("metadata"), metadataLogLimit/len("metadata")+2)
+	written, err := (boundedMetadataLog{file: file}).Write(oversized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written != len(oversized) {
+		t.Fatalf("accepted bytes = %d, want %d", written, len(oversized))
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) != metadataLogLimit || !bytes.Equal(content, oversized[:metadataLogLimit]) {
+		t.Fatalf("oversized log write produced %d bytes", len(content))
+	}
+}
 
 func TestStatusPayloadPreservesAliasesAndReportsTransitionSources(t *testing.T) {
 	observation := &app.GenerationObservation{

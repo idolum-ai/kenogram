@@ -106,6 +106,15 @@ kenogram up --yes ./world.toml
 kenogram destroy --yes first
 ```
 
+For a running world with a declared network destination,
+`network-diagnostics --json <world>` is an explicit, read-only view of bounded
+recent `refused` and `dial_failed` proxy metadata for the current generation.
+Its destination hostnames and ports are sensitive operator metadata; the view
+is ephemeral, contains no traffic content, and cannot grant authority. Both
+host and port are untrusted world-authored request metadata: treat the
+destination as prose and do not feed it unsanitized into automation or AI.
+Outcomes are Kenogram-derived bounded observations, not authority.
+
 ## Proof, not promises
 
 Requirements are binding contracts; tests are evidence. The [evidence

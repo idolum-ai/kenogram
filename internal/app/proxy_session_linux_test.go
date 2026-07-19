@@ -33,7 +33,7 @@ func TestProxySessionHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := &App{BaseDir: base, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
-	if _, err := a.startProxy(context.Background(), layout, 123, nil); err != nil {
+	if _, err := a.startProxy(context.Background(), layout, 123, 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(base, "applying-session-ready"), []byte("ready\n"), 0o600); err != nil {
@@ -113,7 +113,7 @@ func TestReadyProxyOutlivesStartupContext(t *testing.T) {
 	a := &App{BaseDir: base, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
 	t.Cleanup(func() { _ = a.stopProxy(layout) })
 	ctx, cancel := context.WithCancel(context.Background())
-	if _, err := a.startProxy(ctx, layout, 123, nil); err != nil {
+	if _, err := a.startProxy(ctx, layout, 123, 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	cancel()

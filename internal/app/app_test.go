@@ -19,7 +19,9 @@ import (
 	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/decl"
 	"github.com/idolum-ai/kenogram/internal/history"
+	"github.com/idolum-ai/kenogram/internal/lockfile"
 	"github.com/idolum-ai/kenogram/internal/plan"
+	"github.com/idolum-ai/kenogram/internal/proxy"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
 
@@ -1309,7 +1311,7 @@ func TestStartProxyDoesNotAcceptStaleSocketAsReady(t *testing.T) {
 	a := &App{BaseDir: base, Executable: executable}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if _, err := a.startProxy(ctx, layout, 123, nil); err == nil {
+	if _, err := a.startProxy(ctx, layout, 123, 1, nil); err == nil {
 		t.Fatal("proxy without a control server was accepted as ready")
 	}
 	if _, err := os.Stat(layout.ProxySocket); !os.IsNotExist(err) {
@@ -1339,6 +1341,135 @@ func TestStoppedStatusStillObservesRetainedContainer(t *testing.T) {
 	if observation == nil || !observation.Exists || observation.Evidence == nil || observation.Evidence.Running {
 		t.Fatalf("status = %#v", status)
 	}
+}
+
+func TestNetworkDiagnosticsRequireVerifiedActiveRuntimeWithoutRewritingLock(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		runner func(runtimeRunner) backend.Runner
+		want   string
+	}{
+		{name: "missing", runner: func(base runtimeRunner) backend.Runner { base.containers = "other\n"; return &base }, want: "is not active"},
+		{name: "stopped", runner: func(base runtimeRunner) backend.Runner { return &stoppedRunner{runtimeRunner: base} }, want: "is not active"},
+		{name: "mismatched", runner: func(base runtimeRunner) backend.Runner { base.network = "bridge"; return &base }, want: "network mode"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			layout, state := writeNetworkDiagnosticsAuthority(t, base)
+			lockBytes := []byte("retained observation metadata\n")
+			if err := os.WriteFile(layout.Lock, lockBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runner := test.runner(runtimeRunner{mountSource: layout.WorkspacePath("/workspace"), planDigest: state.PlanDigest, declDigest: state.DeclarationDigest})
+			a := &App{Backend: testBackend(runner), BaseDir: base}
+			if _, err := a.NetworkDiagnostics(context.Background(), "w", 1, 512); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v; want %q", err, test.want)
+			}
+			got, err := os.ReadFile(layout.Lock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, lockBytes) {
+				t.Fatalf("read-only diagnostic rewrote lock: %q", got)
+			}
+		})
+	}
+}
+
+func TestNetworkDiagnosticsRejectDanglingTransitionEntry(t *testing.T) {
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.Lock, []byte("lock\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "missing-transition"), layout.Transition); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Backend: testBackend(&runtimeRunner{}), BaseDir: base}
+	if _, err := a.NetworkDiagnostics(context.Background(), "w", 1, 512); err == nil || !strings.Contains(err.Error(), "inspect transition") {
+		t.Fatalf("dangling transition error = %v", err)
+	}
+}
+
+func TestNetworkDiagnosticsCancellationReleasesObservationLock(t *testing.T) {
+	base := t.TempDir()
+	layout, _ := writeNetworkDiagnosticsAuthority(t, base)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a := &App{Backend: testBackend(&runtimeRunner{}), BaseDir: base}
+	if _, err := a.NetworkDiagnostics(ctx, "w", 1, 512); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v", err)
+	}
+	lock, err := lockfile.Acquire(layout.Lock)
+	if err != nil {
+		t.Fatalf("exclusive lock remained blocked after cancellation: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNetworkDiagnosticsDistinguishesAbsentFromFailedDoor(t *testing.T) {
+	t.Run("no declared destinations", func(t *testing.T) {
+		base := t.TempDir()
+		layout, state := writeNetworkDiagnosticsAuthority(t, base)
+		runner := &runtimeRunner{mountSource: layout.WorkspacePath("/workspace"), planDigest: state.PlanDigest, declDigest: state.DeclarationDigest}
+		a := &App{Backend: testBackend(runner), BaseDir: base}
+		if _, err := a.NetworkDiagnostics(context.Background(), "w", 1, 512); err == nil || !strings.Contains(err.Error(), "declares no network destinations") {
+			t.Fatalf("absence error = %v", err)
+		}
+	})
+	t.Run("declared door failed", func(t *testing.T) {
+		base := t.TempDir()
+		prepared := preparedFixture()
+		prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+		refreshPreparedPlanDigest(&prepared)
+		layout, state := writeNetworkDiagnosticsAuthority(t, base, prepared)
+		runner := &runtimeRunner{mountSource: layout.WorkspacePath("/workspace"), planDigest: state.PlanDigest, declDigest: state.DeclarationDigest}
+		a := &App{Backend: testBackend(runner), BaseDir: base}
+		if _, err := a.NetworkDiagnostics(context.Background(), "w", 1, 512); err == nil || !strings.Contains(err.Error(), "declared network door is not responsive") {
+			t.Fatalf("failed-door error = %v", err)
+		}
+	})
+}
+
+func writeNetworkDiagnosticsAuthority(t *testing.T, base string, candidates ...Prepared) (worldfs.Layout, worldfs.State) {
+	t.Helper()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.Lock, []byte("fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.EnsureWorkspace("/workspace"); err != nil {
+		t.Fatal(err)
+	}
+	prepared := preparedFixture()
+	if len(candidates) > 0 {
+		prepared = candidates[0]
+	}
+	rawPlan, err := encodeRecoveryPlan(prepared.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteApplied(prepared.Raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteAppliedPlan(rawPlan); err != nil {
+		t.Fatal(err)
+	}
+	state := worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, Status: "running", ProxyPID: 4242}
+	if err := layout.WriteState(state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := history.Append(layout.History, history.Record{Action: "up", PlanDigest: state.PlanDigest, DeclarationDigest: state.DeclarationDigest, Outcome: "applied"}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	return layout, state
 }
 
 func TestMutationsFailClosedDuringTransition(t *testing.T) {
@@ -1703,6 +1834,311 @@ func TestUpAdoptsVerifiedMatchingGeneration(t *testing.T) {
 	after := countCalls(runner.calls, "create ")
 	if before != 1 || after != 1 {
 		t.Fatalf("create calls before=%d after=%d: %v", before, after, runner.calls)
+	}
+}
+
+func TestUpRejectsLegacyProxyDuringAdoptionWithoutStoppingIt(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	before, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.proxyDiagnosticsReady = func(context.Context, worldfs.Layout, int64) (bool, error) { return false, nil }
+	// A broken replacement executable proves that adoption never attempts the
+	// destructive stop-and-start path after discovering a legacy live door.
+	a.Executable = filepath.Join(base, "missing-kenogram")
+	if err := a.Up(context.Background(), prepared); err == nil || !strings.Contains(err.Error(), "existing door left running") {
+		t.Fatalf("legacy adoption error = %v", err)
+	}
+	after, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ProxyPID <= 1 || after.ProxyPID != before.ProxyPID || !a.proxyAlive(layout) {
+		t.Fatalf("legacy proxy was disturbed: before=%d after=%d alive=%t", before.ProxyPID, after.ProxyPID, a.proxyAlive(layout))
+	}
+}
+
+func TestUpCancellationDuringCompatibilityProbePreservesProxy(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	before, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	probeEntered := make(chan struct{})
+	a.proxyDiagnosticsReady = func(probeCtx context.Context, _ worldfs.Layout, _ int64) (bool, error) {
+		close(probeEntered)
+		<-probeCtx.Done()
+		return false, probeCtx.Err()
+	}
+	go func() {
+		<-probeEntered
+		cancel()
+	}()
+	if err := a.Up(ctx, prepared); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled adoption error = %v", err)
+	}
+	after, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ProxyPID != before.ProxyPID || !a.proxyAlive(layout) {
+		t.Fatalf("canceled probe changed healthy proxy: before=%d after=%d alive=%t", before.ProxyPID, after.ProxyPID, a.proxyAlive(layout))
+	}
+}
+
+func TestUpCancellationDuringReconcilePreservesProxy(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	before, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.proxyDiagnosticsReady = func(context.Context, worldfs.Layout, int64) (bool, error) { return true, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	reconcileEntered := make(chan struct{})
+	a.sendProxyControl = func(controlCtx context.Context, _ string, request proxy.ControlRequest) error {
+		if request.Operation != "reconcile" {
+			return nil
+		}
+		close(reconcileEntered)
+		<-controlCtx.Done()
+		return controlCtx.Err()
+	}
+	go func() {
+		<-reconcileEntered
+		cancel()
+	}()
+	if err := a.Up(ctx, prepared); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled reconciliation error = %v", err)
+	}
+	after, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ProxyPID != before.ProxyPID || !a.proxyAlive(layout) {
+		t.Fatalf("canceled reconciliation changed healthy proxy: before=%d after=%d alive=%t", before.ProxyPID, after.ProxyPID, a.proxyAlive(layout))
+	}
+}
+
+func TestUpAdoptionRecordsTheLiveReconciledProxyIdentity(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+		proxyDiagnosticsReady: func(context.Context, worldfs.Layout, int64) (bool, error) {
+			return true, nil
+		},
+		sendProxyControl: func(context.Context, string, proxy.ControlRequest) error { return nil },
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	state, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	livePID := state.ProxyPID
+	state.ProxyPID = livePID + 100000
+	if err := layout.WriteState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.ProxyPID != livePID || !a.proxyAlive(layout) {
+		t.Fatalf("adopted proxy identity = %d, want live PID %d (alive=%t)", repaired.ProxyPID, livePID, a.proxyAlive(layout))
+	}
+}
+
+func TestUpRejectsSamePIDWithChangedStartIdentity(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+		proxyDiagnosticsReady: func(context.Context, worldfs.Layout, int64) (bool, error) {
+			return true, nil
+		},
+		sendProxyControl: func(context.Context, string, proxy.ControlRequest) error { return nil },
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	identity, alive := a.liveProxyIdentity(layout)
+	if !alive {
+		t.Fatal("fixture proxy is not alive")
+	}
+	beforeState, err := os.ReadFile(layout.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	a.observeProxyIdentity = func(worldfs.Layout) (proxyProcessIdentity, bool) {
+		calls++
+		if calls == 1 {
+			return identity, true
+		}
+		return proxyProcessIdentity{PID: identity.PID, Start: identity.Start + "-reused"}, true
+	}
+	err = a.Up(context.Background(), prepared)
+	a.observeProxyIdentity = nil
+	if err == nil || !strings.Contains(err.Error(), "identity changed during adoption") {
+		t.Fatalf("identity-change error = %v", err)
+	}
+	afterState, readErr := os.ReadFile(layout.State)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(afterState, beforeState) || !a.proxyAlive(layout) {
+		t.Fatalf("identity change rewrote state or disturbed live door: state_equal=%t alive=%t", bytes.Equal(afterState, beforeState), a.proxyAlive(layout))
+	}
+}
+
+func TestUpRejectsDisappearingProxyIdentityWithoutWritingAuthority(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+		proxyDiagnosticsReady: func(context.Context, worldfs.Layout, int64) (bool, error) {
+			return true, nil
+		},
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	identityRaw, err := os.ReadFile(layout.ProxyPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.WriteFile(layout.ProxyPID, identityRaw, 0o600) }()
+	authorityPaths := []string{layout.State, layout.AppliedPlan, layout.History}
+	before := make(map[string][]byte, len(authorityPaths))
+	for _, path := range authorityPaths {
+		before[path], err = os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.sendProxyControl = func(_ context.Context, _ string, request proxy.ControlRequest) error {
+		if request.Operation == "reconcile" {
+			return os.Remove(layout.ProxyPID)
+		}
+		return nil
+	}
+	err = a.Up(context.Background(), prepared)
+	if err == nil || !strings.Contains(err.Error(), "identity changed during adoption") {
+		t.Fatalf("disappearing-identity error = %v", err)
+	}
+	for _, path := range authorityPaths {
+		after, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(after, before[path]) {
+			t.Fatalf("identity change rewrote %s", path)
+		}
+	}
+	fields := strings.Fields(string(identityRaw))
+	livePID, parseErr := strconv.Atoi(fields[0])
+	if parseErr != nil || lockfile.ProcessStart(livePID) != fields[1] {
+		t.Fatalf("identity rejection killed the owned proxy: identity=%q parse=%v", identityRaw, parseErr)
 	}
 }
 

@@ -16,6 +16,7 @@ also reports the byte-sensitive declaration digest.
 | `enter [--repair] <world>` | attach to the world | world processes may |
 | `connect <world> <interface>` | relay stdin/stdout to one declared loopback stream | world processes may |
 | `status <world>` / `worlds` | report recorded and observed state | no |
+| `network-diagnostics … <world>` | inspect recent current-generation proxy refusals and upstream dial failures | no |
 | `inspect-workspace --baseline g<N> … <world>` | report bounded metadata-only carried-state drift | no |
 | `allow … --for <duration>` | grant temporary destination access | yes |
 | `revoke <world> <destination>` | remove access and close admitted connections | yes |
@@ -87,6 +88,46 @@ confirmed `destroy` instead removes every generation named by the transition.
 `status --json` preserves the `state` and `runtime_evidence`
 aliases while also reporting authoritative and candidate observations; during
 recovery, its declaration and state provenance is `transition.json`.
+
+`network-diagnostics [--json] [--limit N] [--max-bytes N] <world>` is an
+explicitly invoked local operator diagnostic, not an event stream or authority
+source. It reads only the responsive proxy belonging to the settled, running
+authoritative generation and rejects a generation mismatch. Each observation
+contains a UTC timestamp, generation, coarse `refused` or `dial_failed`
+outcome, and exact destination host and port. Host and port are sensitive
+operator metadata. The command never copies observations into `status`,
+history, generated files, composition channels, or declarations, and it never
+grants access. It records no payloads, headers, credentials, URL paths, query
+strings, or environment values.
+
+Host and port are untrusted world-authored request metadata and form a bounded
+world-to-operator prose channel. The destination must not be interpreted as
+authority or supplied unsanitized to automation or AI. Outcome is a Kenogram-derived bounded
+classification influenced by the attempted request and observed dial; it is
+evidence for this diagnostic distinction, but not authority. The JSON envelope
+labels destination trust separately from outcome provenance; text output ASCII-quotes destinations so
+Unicode cannot reorder the terminal presentation. A world that declares no
+destinations has no diagnostic view and reports that expected absence
+explicitly. A declaration that requires a proxy but has no responsive door
+reports infrastructure failure instead.
+
+Applying an unchanged declaration reconciles policy only through a responsive
+current-generation diagnostic-capable door. Kenogram does not destructively
+replace a responsive legacy door during adoption: it leaves that door and
+settled authority intact and asks the operator to run `down` before reapplying
+the declaration. A missing door may be recreated because there is no healthy
+network boundary to preserve.
+
+The proxy retains at most 256 observations and 64 KiB in memory for its own
+process lifetime. The command defaults to 64 observations and a 16 KiB output;
+accepted bounds are 1–256 observations and 512–65536 complete output bytes.
+Both text and JSON honor the complete-output byte bound; JSON is exactly one
+document. `truncated`, `omitted`, and `encoded_bytes` report known loss and the
+JSON-encoded event bytes independently of the complete document bound. The
+newest fitting observations are returned in chronological order. Collection is
+drop-on-contention so it cannot wait behind a diagnostic reader; overload is
+reported as omitted. There are no cursors, retention guarantees, durable or
+cross-generation continuity, service/lifecycle events, or automatic actions.
 
 `inspect-workspace` requires an explicit canonical `g<N>` baseline and compares
 that committed canonical digest with one stable observation of the current

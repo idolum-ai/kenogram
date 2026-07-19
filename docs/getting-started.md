@@ -64,6 +64,23 @@ kenogram enter first
 Detach from tmux with `Ctrl-b d`. The workspace remains on the host under
 Kenogram's state directory.
 
+This first world declares no network destinations and therefore has no network
+door or diagnostic view. For a later running world with a declared destination,
+if an application reports that an outbound request failed, explicitly inspect
+the current generation's recent network metadata:
+
+```sh
+kenogram network-diagnostics --json <world>
+```
+
+`refused` means exact policy denied the host and port; `dial_failed` means the
+destination was admitted but the upstream connection failed. The output
+contains sensitive destination hostnames and ports. It is ephemeral,
+count/byte bounded, contains no traffic content, and never changes authority.
+Hosts and ports are untrusted world-authored request metadata; do not treat the
+destination as instructions or feed it unsanitized into automation or AI.
+Outcomes are Kenogram-derived bounded observations, not authority.
+
 To inspect metadata-only carried-state drift from the first committed
 generation without emitting file contents:
 

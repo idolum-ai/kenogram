@@ -3,6 +3,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/idolum-ai/kenogram/internal/naming"
 )
@@ -39,6 +41,8 @@ type Options struct {
 	Resolver             Resolver
 	Dialer               Dialer
 	Logger               *log.Logger
+	Generation           int64
+	Now                  func() time.Time
 }
 type grant struct {
 	destination Destination
@@ -49,18 +53,24 @@ type tracked struct {
 	conn      net.Conn
 	admission string
 }
+type logMessage struct {
+	format    string
+	arguments []any
+}
 type Proxy struct {
-	mu         sync.Mutex
-	durable    map[string]string
-	grants     map[string]grant
-	active     map[uint64]tracked
-	next       uint64
-	opts       Options
-	sem        chan struct{}
-	rateMu     sync.Mutex
-	rateWindow time.Time
-	rateCount  int
-	admission  uint64
+	mu          sync.Mutex
+	durable     map[string]string
+	grants      map[string]grant
+	active      map[uint64]tracked
+	next        uint64
+	opts        Options
+	sem         chan struct{}
+	rateMu      sync.Mutex
+	rateWindow  time.Time
+	rateCount   int
+	admission   uint64
+	diagnostics *diagnosticBuffer
+	logMessages chan logMessage
 }
 
 func New(destinations []Destination, opts Options) *Proxy {
@@ -76,10 +86,15 @@ func New(destinations []Destination, opts Options) *Proxy {
 	if opts.Dialer == nil {
 		opts.Dialer = &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	}
-	if opts.Logger == nil {
-		opts.Logger = log.New(io.Discard, "", 0)
+	p := &Proxy{durable: map[string]string{}, grants: map[string]grant{}, active: map[uint64]tracked{}, opts: opts, sem: make(chan struct{}, opts.MaxConnections), diagnostics: newDiagnosticBuffer(opts.Generation, opts.Now)}
+	if opts.Logger != nil {
+		p.logMessages = make(chan logMessage, MaxDiagnosticLimit)
+		go func() {
+			for message := range p.logMessages {
+				opts.Logger.Printf(message.format, message.arguments...)
+			}
+		}()
 	}
-	p := &Proxy{durable: map[string]string{}, grants: map[string]grant{}, active: map[uint64]tracked{}, opts: opts, sem: make(chan struct{}, opts.MaxConnections)}
 	for _, d := range destinations {
 		p.durable[d.key()] = p.newAdmissionLocked("declaration", d.key())
 	}
@@ -123,7 +138,13 @@ func (p *Proxy) handle(client net.Conn) {
 	_ = client.SetReadDeadline(time.Now().Add(30 * time.Second))
 	bounded := &headerReader{reader: client, remaining: 64 << 10}
 	reader := bufio.NewReader(bounded)
-	request, err := http.ReadRequest(reader)
+	header, err := readProxyHeader(reader)
+	if err != nil || !requestTargetValidUTF8(header) {
+		writeError(client, http.StatusBadRequest)
+		return
+	}
+	requestReader := bufio.NewReader(io.MultiReader(bytes.NewReader(header), reader))
+	request, err := http.ReadRequest(requestReader)
 	if err != nil {
 		writeError(client, http.StatusBadRequest)
 		return
@@ -139,30 +160,32 @@ func (p *Proxy) handle(client net.Conn) {
 	}
 	admission, ok := p.allowed(Destination{host, port})
 	if !ok {
-		p.opts.Logger.Printf("outcome=refused host=%q port=%d", host, port)
+		p.diagnostics.record("refused", host, port)
+		p.logf("outcome=refused host=%q port=%d", host, port)
 		writeError(client, http.StatusForbidden)
 		return
 	}
 	outbound, address, err := p.dialResolved(request.Context(), host, port)
 	if err != nil {
-		p.opts.Logger.Printf("outcome=dial_failed host=%q port=%d", host, port)
+		p.diagnostics.record("dial_failed", host, port)
+		p.logf("outcome=dial_failed host=%q port=%d", host, port)
 		writeError(client, http.StatusBadGateway)
 		return
 	}
 	defer outbound.Close()
 	id, current := p.trackIfCurrent(client, admission)
 	if !current {
-		p.opts.Logger.Printf("outcome=revoked_during_dial host=%q port=%d", host, port)
+		p.logf("outcome=revoked_during_dial host=%q port=%d", host, port)
 		writeError(client, http.StatusForbidden)
 		return
 	}
 	defer p.untrack(id)
-	p.opts.Logger.Printf("outcome=connected host=%q port=%d address=%q", host, port, address)
+	p.logf("outcome=connected host=%q port=%d address=%q", host, port, address)
 	if request.Method == http.MethodConnect {
 		if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 			return
 		}
-		relay(&bufferedConn{Conn: client, reader: reader}, outbound)
+		relay(&bufferedConn{Conn: client, reader: requestReader}, outbound)
 		return
 	}
 	request.RequestURI = ""
@@ -175,6 +198,48 @@ func (p *Proxy) handle(client net.Conn) {
 		return
 	}
 	relay(client, outbound)
+}
+
+func readProxyHeader(reader *bufio.Reader) ([]byte, error) {
+	var header bytes.Buffer
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		_, _ = header.WriteString(line)
+		if line == "\r\n" || line == "\n" {
+			return header.Bytes(), nil
+		}
+	}
+}
+
+func requestTargetValidUTF8(header []byte) bool {
+	lineEnd := bytes.IndexByte(header, '\n')
+	if lineEnd < 0 {
+		return true
+	}
+	line := bytes.TrimSuffix(header[:lineEnd], []byte{'\r'})
+	firstSpace := bytes.IndexByte(line, ' ')
+	if firstSpace < 0 {
+		return true
+	}
+	remainder := line[firstSpace+1:]
+	secondSpace := bytes.IndexByte(remainder, ' ')
+	if secondSpace < 0 {
+		return true
+	}
+	return utf8.Valid(remainder[:secondSpace])
+}
+
+func (p *Proxy) logf(format string, arguments ...any) {
+	if p.logMessages == nil {
+		return
+	}
+	select {
+	case p.logMessages <- logMessage{format: format, arguments: arguments}:
+	default:
+	}
 }
 
 var errHeaderTooLarge = errors.New("proxy request header exceeds 64 KiB")
@@ -225,8 +290,8 @@ func requestDestination(r *http.Request) (string, int, error) {
 		return "", 0, fmt.Errorf("invalid port")
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	if host == "" {
-		return "", 0, fmt.Errorf("empty host")
+	if err := naming.Host(host); err != nil {
+		return "", 0, err
 	}
 	return host, port, nil
 }
@@ -289,6 +354,9 @@ func (p *Proxy) dialResolved(ctx context.Context, host string, port int) (net.Co
 	ips, err := p.opts.Resolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return nil, "", err
+	}
+	if len(ips) == 0 {
+		return nil, "", errors.New("resolver returned no addresses")
 	}
 	var errs []error
 	for _, ip := range ips {

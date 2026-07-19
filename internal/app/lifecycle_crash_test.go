@@ -18,6 +18,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/history"
 	"github.com/idolum-ai/kenogram/internal/plan"
+	"github.com/idolum-ai/kenogram/internal/proxy"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
 
@@ -251,7 +252,7 @@ func TestLifecycleSIGKILLHelper(t *testing.T) {
 	layout := worldfs.For(base, "w")
 	prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
 	runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
-	a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(1, 0) }, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
+	a := crashTestApp(crashBackend(runner), base, crashProxyExecutable(t, base), func() time.Time { return time.Unix(1, 0) })
 	if err := a.Up(context.Background(), prior); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +282,7 @@ func TestLifecycleRecoversAfterSIGKILLAtCommitBoundaries(t *testing.T) {
 			layout := worldfs.For(base, "w")
 			prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
 			runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
-			a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(3, 0) }, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
+			a := crashTestApp(crashBackend(runner), base, crashProxyExecutable(t, base), func() time.Time { return time.Unix(3, 0) })
 			defer func() { _ = a.stopProxy(layout) }()
 			transition, transitionErr := layout.ReadTransition()
 			expectedGeneration := int64(2)
@@ -360,7 +361,7 @@ func TestCommitRecoveryFailureNeverReversesAuthority(t *testing.T) {
 					return true, nil
 				}
 			}
-			a := &App{Backend: podman, BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
+			a := crashTestApp(podman, base, crashProxyExecutable(t, base), time.Now)
 			defer func() { _ = a.stopProxy(layout) }()
 			if err := a.recoverTransition(context.Background(), layout); err == nil || !strings.Contains(err.Error(), "preserving commit transition") {
 				t.Fatalf("first recovery error = %v", err)
@@ -399,7 +400,7 @@ func TestCommitRecoveryRestartsStoppedSuccessorAndServices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
+	a := crashTestApp(crashBackend(runner), base, crashProxyExecutable(t, base), time.Now)
 	defer func() { _ = a.stopProxy(layout) }()
 	if err := a.recoverTransition(context.Background(), layout); err != nil {
 		t.Fatal(err)
@@ -468,7 +469,7 @@ func TestDestroyRemovesEveryGenerationWithoutRecoveringMissingSuccessor(t *testi
 					t.Fatal(err)
 				}
 			}
-			a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: func() time.Time { return time.Unix(4, 0) }, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
+			a := crashTestApp(crashBackend(runner), base, crashProxyExecutable(t, base), func() time.Time { return time.Unix(4, 0) })
 			if err := a.Destroy(context.Background(), "w"); err != nil {
 				t.Fatal(err)
 			}
@@ -501,7 +502,7 @@ func TestRollbackRecoveryReplaysServicesAfterStartFailure(t *testing.T) {
 	prior, successor := crashPrepared("prior", 3), crashPrepared("successor", 4)
 	runner := newCrashRunner(layout.WorkspacePath("/workspace"), filepath.Join(base, "fake-runtime.json"), prior.Result, successor.Result)
 	runner.failPrefix = "exec --detach kenogram-w-g1"
-	a := &App{Backend: crashBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: crashProxyExecutable(t, base), proxyReady: crashProxyReady}
+	a := crashTestApp(crashBackend(runner), base, crashProxyExecutable(t, base), time.Now)
 	defer func() { _ = a.stopProxy(layout) }()
 	if err := a.recoverTransition(context.Background(), layout); err == nil {
 		t.Fatal("first recovery unexpectedly succeeded")
@@ -565,6 +566,19 @@ done
 func crashProxyReady(layout worldfs.Layout) bool {
 	_, err := os.Stat(layout.ProxySocket)
 	return err == nil
+}
+
+func crashProxyDiagnosticsReady(context.Context, worldfs.Layout, int64) (bool, error) {
+	return true, nil
+}
+
+func crashTestApp(podman *backend.Podman, base, executable string, now func() time.Time) *App {
+	return &App{
+		Backend: podman, BaseDir: base, Out: &bytes.Buffer{}, Now: now,
+		Executable: executable, proxyReady: crashProxyReady,
+		proxyDiagnosticsReady: crashProxyDiagnosticsReady,
+		sendProxyControl:      func(context.Context, string, proxy.ControlRequest) error { return nil },
+	}
 }
 
 var lifecycleCrashCheckpoints = []string{

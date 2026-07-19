@@ -26,12 +26,12 @@ func TestOperationalNames(t *testing.T) {
 }
 
 func TestExactHosts(t *testing.T) {
-	for _, value := range []string{"example.com", "LOCALHOST.", "127.0.0.1", "2001:db8::1"} {
+	for _, value := range []string{"example.com", "LOCALHOST.", "127.0.0.1", "2001:db8::1", "caf\u00e9.example", "\uFFFD.example"} {
 		if err := Host(value); err != nil {
 			t.Errorf("Host(%q): %v", value, err)
 		}
 	}
-	for _, value := range []string{"", "*", "bad host", "bad\thost", "bad\nhost", "user@example.com", "host/path", "[2001:db8::1]", "not:ipv6"} {
+	for _, value := range []string{"", "*", "bad host", "bad\thost", "bad\nhost", "user@example.com", "host/path", "[2001:db8::1]", "not:ipv6", string([]byte{0xff}), "safe\u202eevil.example", "safe\u200devil.example"} {
 		if err := Host(value); err == nil {
 			t.Errorf("Host(%q) accepted", value)
 		}
