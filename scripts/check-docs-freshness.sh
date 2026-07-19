@@ -11,6 +11,9 @@ rg -q 'make integration' README.md requirements/INDEX.md
 rg -q 'make e2e' README.md requirements/INDEX.md
 rg -q 'first-world guide' README.md
 rg -q 'kenogram doctor' README.md docs/getting-started.md requirements/INDEX.md
+rg -q 'network-diagnostics' README.md docs/getting-started.md requirements/operations.md requirements/network.md requirements/security.md requirements/INDEX.md
+rg -q 'sensitive operator metadata' README.md requirements/operations.md requirements/security.md
+rg -q 'inspect-workspace' cmd/kenogram/main.go requirements/operations.md requirements/INDEX.md CHANGELOG.md
 rg -q 'prepare-first-world.sh' README.md docs/getting-started.md docs/release-strategy.md
 rg -q 'exact local image ID' docs/getting-started.md requirements/declaration.md
 rg -q 'not a morphogrammatic calculus' docs/kenogrammatics.md

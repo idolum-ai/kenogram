@@ -20,8 +20,156 @@ import (
 	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/doctor"
 	"github.com/idolum-ai/kenogram/internal/history"
+	"github.com/idolum-ai/kenogram/internal/proxy"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
+
+func TestNetworkDiagnosticsOutputBoundsCompleteDocument(t *testing.T) {
+	result := app.NetworkDiagnosticsResult{
+		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
+		SensitiveData: "destination host and port",
+		Trust: app.NetworkDiagnosticsTrust{
+			Destination: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
+		},
+	}
+	for index := 0; index < 8; index++ {
+		result.Events = append(result.Events, proxy.NetworkDiagnostic{
+			Timestamp: "2026-07-18T00:00:00Z", Generation: 4,
+			Outcome: "refused", Host: strings.Repeat(string(rune('a'+index)), 120) + ".example", Port: 443,
+		})
+	}
+	for _, jsonOut := range []bool{false, true} {
+		output, err := boundedNetworkDiagnostics(result, 512, jsonOut)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(output) > 512 {
+			t.Fatalf("json=%t output is %d bytes", jsonOut, len(output))
+		}
+		if jsonOut {
+			var bounded app.NetworkDiagnosticsResult
+			decoder := json.NewDecoder(bytes.NewReader(output))
+			if err := decoder.Decode(&bounded); err != nil {
+				t.Fatal(err)
+			}
+			if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+				t.Fatalf("JSON output is not one document: %v", err)
+			}
+			if !bounded.Truncated || bounded.Omitted == 0 {
+				t.Fatalf("bounded result is dishonest: %#v", bounded)
+			}
+			if bounded.Trust.Destination != "untrusted-world-authored-request-metadata" || bounded.Trust.Outcome != "kenogram-derived-bounded-observation" {
+				t.Fatalf("incomplete provenance envelope: %#v", bounded.Trust)
+			}
+		}
+	}
+}
+
+func TestNetworkDiagnosticsTextIsDeterministic(t *testing.T) {
+	result := app.NetworkDiagnosticsResult{
+		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
+		SensitiveData: "destination host and port",
+		Trust: app.NetworkDiagnosticsTrust{
+			Destination: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
+		},
+		Events: []proxy.NetworkDiagnostic{{Timestamp: "2026-07-18T00:00:00Z", Generation: 4, Outcome: "refused", Host: "2001:db8::1", Port: 443}},
+	}
+	output, err := boundedNetworkDiagnostics(result, proxy.MaxDiagnosticBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "world: w\ngeneration: g4\nscope: current-generation-ephemeral\nsensitive metadata: destination host and port\n" +
+		"destination trust: untrusted-world-authored-request-metadata\n" +
+		"outcome provenance: kenogram-derived-bounded-observation\n" +
+		"2026-07-18T00:00:00Z\trefused\t\"[2001:db8::1]:443\"\ntruncated: false\nomitted: 0\nencoded event bytes: 103\n"
+	if string(output) != want {
+		t.Fatalf("text output = %q; want %q", output, want)
+	}
+}
+
+func TestNetworkDiagnosticsTextEscapesFormatControls(t *testing.T) {
+	result := app.NetworkDiagnosticsResult{
+		World: "w", Generation: 4, Scope: "current-generation-ephemeral",
+		SensitiveData: "destination host and port",
+		Trust: app.NetworkDiagnosticsTrust{
+			Destination: "untrusted-world-authored-request-metadata", Outcome: "kenogram-derived-bounded-observation",
+		},
+		Events: []proxy.NetworkDiagnostic{{Timestamp: "2026-07-18T00:00:00Z", Generation: 4, Outcome: "refused", Host: "safe\u202eevil.example", Port: 443}},
+	}
+	output, err := boundedNetworkDiagnostics(result, proxy.MaxDiagnosticBytes, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.ContainsRune(output, '\u202e') || !bytes.Contains(output, []byte(`\u202e`)) {
+		t.Fatalf("format control was not ASCII-escaped: %q", output)
+	}
+}
+
+func TestNetworkDiagnosticsRejectsUnrepresentableAndExcessiveBounds(t *testing.T) {
+	for _, arguments := range [][]string{{"--max-bytes", "511", "w"}, {"--max-bytes", "65537", "w"}, {"--limit", "0", "w"}, {"--limit", "257", "w"}} {
+		var stdout, stderr bytes.Buffer
+		if code := runNetworkDiagnostics(context.Background(), arguments, &stdout, &stderr); code != 2 {
+			t.Fatalf("arguments %v: code=%d stdout=%q stderr=%q", arguments, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestCompatibilityMetadataLogTruncatesAtBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy.log")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.Write(bytes.Repeat([]byte{'x'}, metadataLogLimit-4)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Seek(metadataLogLimit*2, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	line := []byte("new-line\n")
+	if _, err := (boundedMetadataLog{file: file}).Write(line); err != nil {
+		t.Fatal(err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != int64(len(line)) {
+		t.Fatalf("rotated log size = %d", info.Size())
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(content, line) {
+		t.Fatalf("rotated log is sparse or misplaced: size=%d content=%q", info.Size(), content)
+	}
+}
+
+func TestCompatibilityMetadataLogBoundsSingleOversizedWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proxy.log")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	oversized := bytes.Repeat([]byte("metadata"), metadataLogLimit/len("metadata")+2)
+	written, err := (boundedMetadataLog{file: file}).Write(oversized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written != len(oversized) {
+		t.Fatalf("accepted bytes = %d, want %d", written, len(oversized))
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) != metadataLogLimit || !bytes.Equal(content, oversized[:metadataLogLimit]) {
+		t.Fatalf("oversized log write produced %d bytes", len(content))
+	}
+}
 
 func TestStatusPayloadPreservesAliasesAndReportsTransitionSources(t *testing.T) {
 	observation := &app.GenerationObservation{
@@ -83,6 +231,195 @@ func TestStatusCommandJSONAndTextSurface(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("text missing %q: %s", want, stdout.String())
 		}
+	}
+}
+
+func TestInspectWorkspaceJSONIsOneBoundedMetadataOnlyDocument(t *testing.T) {
+	base, layout := inspectionCommandFixture(t)
+	writeCommandFile(t, filepath.Join(layout.WorkspacePath("/workspace"), "secret"), "baseline-secret-canary")
+	baseline, err := worldfs.Digest(layout.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.WriteDigest(1, baseline); err != nil {
+		t.Fatal(err)
+	}
+	bindInspectionHistory(t, layout, baseline.Root)
+	writeCommandFile(t, filepath.Join(layout.WorkspacePath("/workspace"), "secret"), "current-secret-canary")
+	writeCommandFile(t, filepath.Join(layout.WorkspacePath("/workspace"), "second"), "another-canary")
+
+	previous := newApp
+	newApp = func(io.Writer) (*app.App, error) { return &app.App{BaseDir: base}, nil }
+	t.Cleanup(func() { newApp = previous })
+
+	var stdout, stderr bytes.Buffer
+	code := runInspectWorkspace(context.Background(), []string{"--baseline", "g1", "--json", "--max-entries", "1", "--max-bytes", "4096", "w"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if stdout.Len() > 4096 {
+		t.Fatalf("encoded output = %d bytes", stdout.Len())
+	}
+	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+	var payload workspaceInspectionOutput
+	if err := decoder.Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		t.Fatalf("JSON output contains more than one document: %v", err)
+	}
+	if payload.TotalEntries != 2 || payload.EmittedEntries != 1 || payload.OmittedEntries != 1 {
+		t.Fatalf("bounds = total %d emitted %d omitted %d", payload.TotalEntries, payload.EmittedEntries, payload.OmittedEntries)
+	}
+	for _, canary := range []string{"baseline-secret-canary", "current-secret-canary", "another-canary"} {
+		if strings.Contains(stdout.String(), canary) || strings.Contains(stderr.String(), canary) {
+			t.Fatalf("content canary %q leaked", canary)
+		}
+	}
+}
+
+func TestInspectWorkspaceCancellationEmitsNoPartialJSON(t *testing.T) {
+	base, layout := inspectionCommandFixture(t)
+	baseline, err := worldfs.Digest(layout.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.WriteDigest(1, baseline); err != nil {
+		t.Fatal(err)
+	}
+	bindInspectionHistory(t, layout, baseline.Root)
+	previous := newApp
+	newApp = func(io.Writer) (*app.App, error) { return &app.App{BaseDir: base}, nil }
+	t.Cleanup(func() { newApp = previous })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	code := runInspectWorkspace(ctx, []string{"--baseline", "g1", "--json", "w"}, &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), context.Canceled.Error()) {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestInspectWorkspaceInvalidUTF8NameEmitsNoJSON(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux filenames exercise the byte-oriented workspace boundary")
+	}
+	base, layout := inspectionCommandFixture(t)
+	baseline, err := worldfs.Digest(layout.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.WriteDigest(1, baseline); err != nil {
+		t.Fatal(err)
+	}
+	bindInspectionHistory(t, layout, baseline.Root)
+	invalid := filepath.Join(layout.WorkspacePath("/workspace"), string([]byte{0xff}))
+	if err := os.WriteFile(invalid, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := newApp
+	newApp = func(io.Writer) (*app.App, error) { return &app.App{BaseDir: base}, nil }
+	t.Cleanup(func() { newApp = previous })
+
+	var stdout, stderr bytes.Buffer
+	code := runInspectWorkspace(context.Background(), []string{"--baseline", "g1", "--json", "w"}, &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not valid UTF-8") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestInspectWorkspaceByteLimitBoundsWholeDocument(t *testing.T) {
+	inspection := app.WorkspaceInspection{
+		SchemaVersion: 1, World: "w", BaselineGeneration: 1,
+		BaselineRoot: strings.Repeat("a", 64), CurrentRoot: strings.Repeat("b", 64),
+		Loci: []app.WorkspaceLocusInspection{{Locus: "/workspace", Changes: []app.WorkspaceChange{
+			{Path: strings.Repeat("x", 300), Change: "added", After: &app.WorkspaceEntry{Type: "file", Mode: "0600", SHA256: strings.Repeat("c", 64)}},
+			{Path: "small", Change: "added", After: &app.WorkspaceEntry{Type: "file", Mode: "0600", SHA256: strings.Repeat("d", 64)}},
+		}}},
+	}
+	_, envelope, err := boundWorkspaceInspection(inspection, 10, 10_000, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullLength := len(envelope)
+	report, raw, err := boundWorkspaceInspection(inspection, 10, fullLength-200, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > fullLength-200 || report.EmittedEntries != 0 || report.OmittedEntries != 2 {
+		t.Fatalf("len=%d emitted=%d omitted=%d limit=%d", len(raw), report.EmittedEntries, report.OmittedEntries, fullLength-200)
+	}
+	if _, _, err := boundWorkspaceInspection(inspection, 0, 1, true); err == nil || !strings.Contains(err.Error(), "report envelope") {
+		t.Fatalf("small-envelope err = %v", err)
+	}
+}
+
+func TestInspectWorkspaceRequiresCanonicalExplicitBaseline(t *testing.T) {
+	for _, baseline := range []string{"", "1", "g0", "g01", "G1", "g-1"} {
+		var stdout, stderr bytes.Buffer
+		args := []string{"--baseline", baseline, "w"}
+		if baseline == "" {
+			args = []string{"w"}
+		}
+		if code := runInspectWorkspace(context.Background(), args, &stdout, &stderr); code != 2 {
+			t.Fatalf("baseline %q code = %d", baseline, code)
+		}
+	}
+}
+
+func inspectionCommandFixture(t *testing.T) (string, worldfs.Layout) {
+	t.Helper()
+	base := t.TempDir()
+	layout := worldfs.For(base, "w")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.Lock, []byte("fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layout.EnsureWorkspace("/workspace"); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte("version = 1\nname = \"w\"\nallow_unpinned = true\n\n[world]\nhostname = \"w\"\nbase = \"example.invalid/world:latest\"\nworkdir = \"/workspace\"\nuser = \"agent\"\n\n[resources]\ncpus = 1\nmemory_bytes = 1073741824\npids = 64\n\n[workspace]\npaths = [\"/workspace\"]\n")
+	declaration := filepath.Join(t.TempDir(), "world.toml")
+	if err := os.WriteFile(declaration, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := app.Prepare(declaration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planRaw, err := json.MarshalIndent(prepared.Result, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteApplied(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteAppliedPlan(append(planRaw, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.WriteState(worldfs.State{Name: "w", Generation: 1, Container: "kenogram-w-g1", PlanDigest: prepared.Result.PlanDigest, DeclarationDigest: prepared.Result.DeclarationDigest, Status: "down"}); err != nil {
+		t.Fatal(err)
+	}
+	return base, layout
+}
+
+func bindInspectionHistory(t *testing.T, layout worldfs.Layout, root string) {
+	t.Helper()
+	state, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := history.Append(layout.History, history.Record{Action: "up", Outcome: "applied", PlanDigest: state.PlanDigest, DeclarationDigest: state.DeclarationDigest, WorkspaceDigest: root}, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeCommandFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -206,7 +543,7 @@ func TestUpComparisonFailuresPrecedeOutputAndConfirmation(t *testing.T) {
 		{
 			name: "recorded workspace digest without state",
 			set: func(t *testing.T, layout worldfs.Layout, _ app.Prepared) {
-				if _, err := layout.WriteDigest(1, worldfs.DigestTree{Root: "orphan"}); err != nil {
+				if err := os.WriteFile(filepath.Join(layout.Digests, "g1.json"), []byte("{\"root\":\"orphan\"}\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			},

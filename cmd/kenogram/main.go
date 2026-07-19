@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -85,6 +86,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runConnect(ctx, args[1:], stdout, stderr)
 	case "status":
 		return runStatus(ctx, args[1:], stdout, stderr)
+	case "network-diagnostics":
+		return runNetworkDiagnostics(ctx, args[1:], stdout, stderr)
+	case "inspect-workspace":
+		return runInspectWorkspace(ctx, args[1:], stdout, stderr)
 	case "allow":
 		return runAllow(args[1:], stdout, stderr)
 	case "revoke":
@@ -100,6 +105,210 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printHelp(stderr)
 		return 2
 	}
+}
+
+const (
+	defaultInspectionEntries = 256
+	defaultInspectionBytes   = 128 * 1024
+	maximumInspectionEntries = 10_000
+	maximumInspectionBytes   = 10 * 1024 * 1024
+)
+
+type workspaceInspectionLimits struct {
+	MaxEntries int `json:"max_entries"`
+	MaxBytes   int `json:"max_bytes"`
+}
+
+type workspaceInspectionLocusOutput struct {
+	Locus          string                `json:"locus"`
+	TotalEntries   int                   `json:"total_entries"`
+	EmittedEntries int                   `json:"emitted_entries"`
+	OmittedEntries int                   `json:"omitted_entries"`
+	Changes        []app.WorkspaceChange `json:"changes"`
+}
+
+type workspaceInspectionOutput struct {
+	SchemaVersion      int                              `json:"schema_version"`
+	World              string                           `json:"world"`
+	BaselineGeneration int64                            `json:"baseline_generation"`
+	BaselineRoot       string                           `json:"baseline_root"`
+	CurrentRoot        string                           `json:"current_root"`
+	Limits             workspaceInspectionLimits        `json:"limits"`
+	TotalEntries       int                              `json:"total_entries"`
+	EmittedEntries     int                              `json:"emitted_entries"`
+	OmittedEntries     int                              `json:"omitted_entries"`
+	Loci               []workspaceInspectionLocusOutput `json:"loci"`
+}
+
+func runInspectWorkspace(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram inspect-workspace --baseline g<N> [--max-entries N] [--max-bytes N] [--json] <world>"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
+	fs := flag.NewFlagSet("inspect-workspace", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprintln(stderr, usage) }
+	baseline := fs.String("baseline", "", "explicit baseline generation, for example g3")
+	maxEntries := fs.Int("max-entries", defaultInspectionEntries, "maximum emitted changes")
+	maxBytes := fs.Int("max-bytes", defaultInspectionBytes, "maximum encoded output bytes")
+	jsonOut := fs.Bool("json", false, "JSON output")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 || *baseline == "" {
+		fs.Usage()
+		return 2
+	}
+	world := fs.Arg(0)
+	if err := worldfs.ValidateName(world); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	generation, err := parseGeneration(*baseline)
+	if err != nil {
+		fmt.Fprintln(stderr, "inspect-workspace:", err)
+		return 2
+	}
+	if *maxEntries < 0 || *maxEntries > maximumInspectionEntries {
+		fmt.Fprintf(stderr, "inspect-workspace: --max-entries must be between 0 and %d\n", maximumInspectionEntries)
+		return 2
+	}
+	if *maxBytes < 1 || *maxBytes > maximumInspectionBytes {
+		fmt.Fprintf(stderr, "inspect-workspace: --max-bytes must be between 1 and %d\n", maximumInspectionBytes)
+		return 2
+	}
+	a, err := newApp(io.Discard)
+	if err != nil {
+		fmt.Fprintln(stderr, "inspect-workspace:", err)
+		return 1
+	}
+	inspection, err := a.InspectWorkspaceContext(ctx, world, generation)
+	if err != nil {
+		fmt.Fprintln(stderr, "inspect-workspace:", err)
+		return 1
+	}
+	_, raw, err := boundWorkspaceInspection(inspection, *maxEntries, *maxBytes, *jsonOut)
+	if err != nil {
+		fmt.Fprintln(stderr, "inspect-workspace:", err)
+		return 1
+	}
+	if _, err := stdout.Write(raw); err != nil {
+		fmt.Fprintln(stderr, "inspect-workspace:", err)
+		return 1
+	}
+	return 0
+}
+
+func parseGeneration(raw string) (int64, error) {
+	if len(raw) < 2 || raw[0] != 'g' || raw[1] == '0' {
+		return 0, fmt.Errorf("baseline must use canonical g<N> syntax")
+	}
+	generation, err := strconv.ParseInt(raw[1:], 10, 64)
+	if err != nil || generation < 1 || "g"+strconv.FormatInt(generation, 10) != raw {
+		return 0, fmt.Errorf("baseline must use canonical g<N> syntax")
+	}
+	return generation, nil
+}
+
+func boundWorkspaceInspection(source app.WorkspaceInspection, maxEntries, maxBytes int, jsonOut bool) (workspaceInspectionOutput, []byte, error) {
+	total := 0
+	for _, locus := range source.Loci {
+		total += len(locus.Changes)
+	}
+	build := func(emitted int) workspaceInspectionOutput {
+		remaining := emitted
+		report := workspaceInspectionOutput{
+			SchemaVersion: source.SchemaVersion, World: source.World,
+			BaselineGeneration: source.BaselineGeneration, BaselineRoot: source.BaselineRoot,
+			CurrentRoot: source.CurrentRoot, Limits: workspaceInspectionLimits{MaxEntries: maxEntries, MaxBytes: maxBytes},
+			TotalEntries: total, EmittedEntries: emitted, OmittedEntries: total - emitted,
+			Loci: make([]workspaceInspectionLocusOutput, 0, len(source.Loci)),
+		}
+		for _, locus := range source.Loci {
+			count := len(locus.Changes)
+			selected := count
+			if selected > remaining {
+				selected = remaining
+			}
+			changes := append([]app.WorkspaceChange{}, locus.Changes[:selected]...)
+			report.Loci = append(report.Loci, workspaceInspectionLocusOutput{
+				Locus: locus.Locus, TotalEntries: count, EmittedEntries: selected,
+				OmittedEntries: count - selected, Changes: changes,
+			})
+			remaining -= selected
+		}
+		return report
+	}
+	render := func(report workspaceInspectionOutput) ([]byte, error) {
+		if jsonOut {
+			raw, err := json.Marshal(report)
+			return append(raw, '\n'), err
+		}
+		return renderWorkspaceInspectionText(report), nil
+	}
+	base := build(0)
+	raw, err := render(base)
+	if err != nil {
+		return workspaceInspectionOutput{}, nil, err
+	}
+	if len(raw) > maxBytes {
+		return workspaceInspectionOutput{}, nil, fmt.Errorf("--max-bytes %d is smaller than the %d-byte report envelope", maxBytes, len(raw))
+	}
+	limit := total
+	if limit > maxEntries {
+		limit = maxEntries
+	}
+	// Adding a complete change object makes both renderings monotonically
+	// larger. Binary search keeps a 10,000-entry bound from becoming quadratic
+	// serialization work.
+	low, high := 0, limit
+	for low < high {
+		mid := low + (high-low+1)/2
+		candidateRaw, err := render(build(mid))
+		if err != nil {
+			return workspaceInspectionOutput{}, nil, err
+		}
+		if len(candidateRaw) > maxBytes {
+			high = mid - 1
+		} else {
+			low = mid
+		}
+	}
+	best := build(low)
+	bestRaw, err := render(best)
+	return best, bestRaw, err
+}
+
+func renderWorkspaceInspectionText(report workspaceInspectionOutput) []byte {
+	var out strings.Builder
+	fmt.Fprintf(&out, "world: %s\nbaseline: g%d %s\ncurrent: %s\nlimits: entries=%d bytes=%d\n", report.World, report.BaselineGeneration, report.BaselineRoot, report.CurrentRoot, report.Limits.MaxEntries, report.Limits.MaxBytes)
+	for _, locus := range report.Loci {
+		fmt.Fprintf(&out, "locus: %q (changes=%d omitted=%d)\n", locus.Locus, locus.TotalEntries, locus.OmittedEntries)
+		for _, change := range locus.Changes {
+			fmt.Fprintf(&out, "  %s %q", change.Change, change.Path)
+			if change.Before != nil {
+				fmt.Fprintf(&out, " before=%s", renderWorkspaceEntry(*change.Before))
+			}
+			if change.After != nil {
+				fmt.Fprintf(&out, " after=%s", renderWorkspaceEntry(*change.After))
+			}
+			out.WriteByte('\n')
+		}
+	}
+	fmt.Fprintf(&out, "changes: total=%d emitted=%d omitted=%d\n", report.TotalEntries, report.EmittedEntries, report.OmittedEntries)
+	return []byte(out.String())
+}
+
+func renderWorkspaceEntry(entry app.WorkspaceEntry) string {
+	fields := []string{"type=" + entry.Type, "mode=" + entry.Mode}
+	if entry.Size != nil {
+		fields = append(fields, "size="+strconv.FormatInt(*entry.Size, 10))
+	}
+	if entry.SHA256 != "" {
+		fields = append(fields, "sha256="+entry.SHA256)
+	}
+	return strings.Join(fields, ",")
 }
 
 func operationContext(parent context.Context) (context.Context, func()) {
@@ -544,6 +753,99 @@ func newStatusPayload(status app.StatusResult) statusPayload {
 	}
 	return payload
 }
+
+func runNetworkDiagnostics(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram network-diagnostics [--json] [--limit <count>] [--max-bytes <bytes>] <world>"
+	if helpRequested(args) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
+	fs := flag.NewFlagSet("network-diagnostics", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprintln(stderr, usage) }
+	jsonOut := fs.Bool("json", false, "JSON output")
+	limit := fs.Int("limit", proxy.DefaultDiagnosticLimit, "maximum observations")
+	maxBytes := fs.Int("max-bytes", proxy.DefaultDiagnosticBytes, "maximum complete output bytes")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return 2
+	}
+	if err := worldfs.ValidateName(fs.Arg(0)); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if *limit < 1 || *limit > proxy.MaxDiagnosticLimit {
+		fmt.Fprintf(stderr, "network-diagnostics: --limit must be between 1 and %d\n", proxy.MaxDiagnosticLimit)
+		return 2
+	}
+	if *maxBytes < 512 || *maxBytes > proxy.MaxDiagnosticBytes {
+		fmt.Fprintf(stderr, "network-diagnostics: --max-bytes must be between 512 and %d\n", proxy.MaxDiagnosticBytes)
+		return 2
+	}
+	a, err := newApp(io.Discard)
+	if err != nil {
+		fmt.Fprintln(stderr, "network-diagnostics:", err)
+		return 1
+	}
+	result, err := a.NetworkDiagnostics(ctx, fs.Arg(0), *limit, proxy.MaxDiagnosticBytes)
+	if err != nil {
+		fmt.Fprintln(stderr, "network-diagnostics:", err)
+		return 1
+	}
+	output, err := boundedNetworkDiagnostics(result, *maxBytes, *jsonOut)
+	if err != nil {
+		fmt.Fprintln(stderr, "network-diagnostics:", err)
+		return 1
+	}
+	if _, err := stdout.Write(output); err != nil {
+		fmt.Fprintln(stderr, "network-diagnostics:", err)
+		return 1
+	}
+	return 0
+}
+
+func boundedNetworkDiagnostics(result app.NetworkDiagnosticsResult, maxBytes int, jsonOut bool) ([]byte, error) {
+	for {
+		result.EncodedBytes = 0
+		for _, event := range result.Events {
+			raw, err := json.Marshal(event)
+			if err != nil {
+				return nil, err
+			}
+			result.EncodedBytes += len(raw)
+		}
+		var output []byte
+		if jsonOut {
+			raw, err := json.Marshal(result)
+			if err != nil {
+				return nil, err
+			}
+			output = append(raw, '\n')
+		} else {
+			var text strings.Builder
+			fmt.Fprintf(&text, "world: %s\ngeneration: g%d\nscope: %s\nsensitive metadata: %s\ndestination trust: %s\noutcome provenance: %s\n", result.World, result.Generation, result.Scope, result.SensitiveData, result.Trust.Destination, result.Trust.Outcome)
+			for _, event := range result.Events {
+				destination := net.JoinHostPort(event.Host, strconv.Itoa(event.Port))
+				fmt.Fprintf(&text, "%s\t%s\t%s\n", event.Timestamp, event.Outcome, strconv.QuoteToASCII(destination))
+			}
+			fmt.Fprintf(&text, "truncated: %t\nomitted: %d\nencoded event bytes: %d\n", result.Truncated, result.Omitted, result.EncodedBytes)
+			output = []byte(text.String())
+		}
+		if len(output) <= maxBytes {
+			return output, nil
+		}
+		if len(result.Events) == 0 {
+			return nil, fmt.Errorf("--max-bytes cannot contain the diagnostic envelope")
+		}
+		result.Events = result.Events[1:]
+		result.Omitted++
+		result.Truncated = true
+	}
+}
+
 func runWorlds(args []string, stdout, stderr io.Writer) int {
 	const usage = "usage: kenogram worlds [--json]"
 	if helpRequested(args) {
@@ -672,15 +974,50 @@ type repeated []string
 
 func (r *repeated) String() string         { return strings.Join(*r, ",") }
 func (r *repeated) Set(value string) error { *r = append(*r, value); return nil }
+
+const metadataLogLimit = 1 << 20
+
+type boundedMetadataLog struct {
+	file *os.File
+}
+
+func (w boundedMetadataLog) Write(buffer []byte) (int, error) {
+	originalLength := len(buffer)
+	if len(buffer) > metadataLogLimit {
+		buffer = buffer[:metadataLogLimit]
+	}
+	info, err := w.file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if info.Size()+int64(len(buffer)) > metadataLogLimit {
+		if err := w.file.Truncate(0); err != nil {
+			return 0, err
+		}
+		if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+			return 0, err
+		}
+	}
+	written, err := w.file.Write(buffer)
+	if err != nil {
+		return 0, err
+	}
+	if written != len(buffer) {
+		return 0, io.ErrShortWrite
+	}
+	return originalLength, nil
+}
+
 func runProxy(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("_proxy", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	pid := fs.Int("pid", 0, "world pid")
+	generation := fs.Int64("generation", 0, "world generation")
 	control := fs.String("control", "", "control socket")
 	logPath := fs.String("log", "", "metadata log")
 	var allows repeated
 	fs.Var(&allows, "allow", "allowed host:port")
-	if err := fs.Parse(args); err != nil || *pid <= 0 || *control == "" || *logPath == "" {
+	if err := fs.Parse(args); err != nil || *pid <= 0 || *generation <= 0 || *control == "" || *logPath == "" {
 		return 2
 	}
 	destinations := []proxy.Destination{}
@@ -706,7 +1043,7 @@ func runProxy(args []string, stderr io.Writer) int {
 		return 1
 	}
 	defer listener.Close()
-	p := proxy.New(destinations, proxy.Options{Logger: log.New(file, "", log.LstdFlags|log.LUTC)})
+	p := proxy.New(destinations, proxy.Options{Logger: log.New(boundedMetadataLog{file: file}, "", log.LstdFlags|log.LUTC), Generation: *generation})
 	go func() { <-ctx.Done(); listener.Close() }()
 	go func() {
 		if err := p.ServeControl(*control); err != nil {
@@ -750,6 +1087,8 @@ func printHelp(w io.Writer) {
   kenogram enter [--repair] <world>
   kenogram connect <world> <interface>
   kenogram status [--json] <world>
+  kenogram network-diagnostics [--json] [--limit <count>] [--max-bytes <bytes>] <world>
+  kenogram inspect-workspace --baseline g<N> [--max-entries N] [--max-bytes N] [--json] <world>
   kenogram allow <world> <host>:<port> --for <duration>
   kenogram revoke <world> <host>:<port>
   kenogram repair-history --yes <world>

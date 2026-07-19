@@ -97,6 +97,11 @@ func (l Layout) WriteTransition(t Transition) error {
 	if t.Version != 1 || (t.Phase != "rollback" && t.Phase != "commit") {
 		return fmt.Errorf("invalid transition version or phase")
 	}
+	if t.Workspace.Root != "" || len(t.Workspace.Entries) != 0 {
+		if err := ValidateDigestTree(t.Workspace); err != nil {
+			return fmt.Errorf("validate transition workspace before write: %w", err)
+		}
+	}
 	return atomicJSON(l.Transition, t, 0o600)
 }
 func (l Layout) ReadTransition() (Transition, error) {

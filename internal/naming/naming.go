@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 var operational = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
@@ -24,11 +25,11 @@ func Interface(value string) error { return validate("interface", value) }
 
 // Host validates an exact, non-wildcard network name or IP address.
 func Host(value string) error {
-	if value == "" {
+	if value == "" || !utf8.ValidString(value) {
 		return fmt.Errorf("invalid host %q: use an exact non-wildcard name or address", value)
 	}
 	for _, r := range value {
-		if unicode.IsSpace(r) || unicode.IsControl(r) || strings.ContainsRune("*/\\@?#[]", r) {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || strings.ContainsRune("*/\\@?#[]", r) {
 			return fmt.Errorf("invalid host %q: use an exact non-wildcard name or address", value)
 		}
 	}

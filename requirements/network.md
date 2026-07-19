@@ -36,6 +36,23 @@ the world's user and network namespaces and transfer its descriptor over an
 proxy resolves per connection, bounds rate and concurrency, logs metadata only,
 and closes connections when their grant is removed or expires.
 
+The explicitly invoked `network-diagnostics` view distinguishes exact-policy
+`refused` from admitted `dial_failed` attempts for the current proxy generation.
+It is a bounded, ephemeral, metadata-only observation: UTC timestamp,
+generation, outcome, host, and port. Destination metadata is sensitive. No
+traffic content enters the view, and observation cannot alter policy. Both the
+diagnostic recorder and the non-authoritative compatibility log use bounded
+drop-on-pressure delivery so unavailable readers or storage cannot delay proxy
+traffic; diagnostic loss is reported honestly by the command. Host and port are
+untrusted world-authored request metadata. Outcome is a Kenogram-derived bounded
+classification influenced by the attempted request and observed dial, but is
+not authority. Invalid UTF-8 and Unicode format controls are rejected from the
+request target before policy lookup or observation.
+
+The private compatibility `proxy.log` is non-authoritative, drop-on-pressure,
+and truncates before its next metadata line would exceed 1 MiB; it has no
+retention guarantee.
+
 Declared operator interfaces use the same namespace principle in the opposite
 direction: a short-lived helper dials the exact declared loopback address inside
 the authoritative generation and transfers the connected descriptor to

@@ -50,6 +50,24 @@ func Acquire(path string) (*Lock, error) {
 	return &Lock{path: path, file: f}, nil
 }
 
+// AcquireShared serializes a read-only observation with mutations without
+// rewriting lock metadata. Multiple observations may proceed concurrently.
+// Established worlds always have a lock file created by their first mutation.
+func AcquireShared(path string) (*Lock, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf("world is already being mutated: %s", path)
+		}
+		return nil, fmt.Errorf("lock world for observation: %w", err)
+	}
+	return &Lock{path: path, file: f}, nil
+}
+
 // ProcessStart returns the Linux process start-time field used to distinguish
 // a live process from a later process that reused its PID.
 func ProcessStart(pid int) string {

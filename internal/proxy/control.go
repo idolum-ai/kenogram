@@ -11,16 +11,21 @@ import (
 	"time"
 )
 
+const diagnosticControlTimeout = 5 * time.Second
+
 type ControlRequest struct {
 	Operation    string        `json:"operation"`
 	Host         string        `json:"host,omitempty"`
 	Port         int           `json:"port,omitempty"`
 	Duration     string        `json:"duration,omitempty"`
 	Destinations []Destination `json:"destinations,omitempty"`
+	Limit        int           `json:"limit,omitempty"`
+	MaxBytes     int           `json:"max_bytes,omitempty"`
 }
 type ControlResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
+	OK          bool                `json:"ok"`
+	Error       string              `json:"error,omitempty"`
+	Diagnostics *DiagnosticSnapshot `json:"diagnostics,omitempty"`
 }
 
 func (p *Proxy) ServeControl(path string) error {
@@ -75,6 +80,13 @@ func (p *Proxy) control(conn net.Conn) {
 			return
 		}
 		json.NewEncoder(conn).Encode(ControlResponse{OK: true})
+	case "network-diagnostics":
+		if request.Limit < 1 || request.Limit > MaxDiagnosticLimit || request.MaxBytes < 1 || request.MaxBytes > MaxDiagnosticBytes {
+			json.NewEncoder(conn).Encode(ControlResponse{Error: "invalid diagnostic bounds"})
+			return
+		}
+		snapshot := p.diagnostics.snapshot(request.Limit, request.MaxBytes)
+		json.NewEncoder(conn).Encode(ControlResponse{OK: true, Diagnostics: &snapshot})
 	default:
 		json.NewEncoder(conn).Encode(ControlResponse{Error: "unsupported operation"})
 	}
@@ -94,11 +106,46 @@ func SendControlContext(ctx context.Context, path string, request ControlRequest
 	return sendControlContext(ctx, conn, request)
 }
 
+func QueryDiagnosticsContext(ctx context.Context, path string, limit, maxBytes int) (DiagnosticSnapshot, error) {
+	return queryDiagnosticsContext(ctx, path, limit, maxBytes, diagnosticControlTimeout)
+}
+
+func queryDiagnosticsContext(ctx context.Context, path string, limit, maxBytes int, timeout time.Duration) (DiagnosticSnapshot, error) {
+	var dialer net.Dialer
+	return queryDiagnosticsDialContext(ctx, path, limit, maxBytes, timeout, dialer.DialContext)
+}
+
+func queryDiagnosticsDialContext(ctx context.Context, path string, limit, maxBytes int, timeout time.Duration, dial func(context.Context, string, string) (net.Conn, error)) (DiagnosticSnapshot, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn, err := dial(queryCtx, "unix", path)
+	if err != nil {
+		return DiagnosticSnapshot{}, err
+	}
+	return queryDiagnosticsConnectionContext(queryCtx, conn, limit, maxBytes)
+}
+
+func queryDiagnosticsConnectionContext(ctx context.Context, conn net.Conn, limit, maxBytes int) (DiagnosticSnapshot, error) {
+	response, err := exchangeControlContext(ctx, conn, ControlRequest{Operation: "network-diagnostics", Limit: limit, MaxBytes: maxBytes})
+	if err != nil {
+		return DiagnosticSnapshot{}, err
+	}
+	if response.Diagnostics == nil {
+		return DiagnosticSnapshot{}, errors.New("proxy returned no network diagnostics")
+	}
+	return *response.Diagnostics, nil
+}
+
 func sendControlContext(ctx context.Context, conn net.Conn, request ControlRequest) error {
+	_, err := exchangeControlContext(ctx, conn, request)
+	return err
+}
+
+func exchangeControlContext(ctx context.Context, conn net.Conn, request ControlRequest) (ControlResponse, error) {
 	defer conn.Close()
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := conn.SetDeadline(deadline); err != nil {
-			return err
+			return ControlResponse{}, err
 		}
 	}
 	stopCancellation := context.AfterFunc(ctx, func() {
@@ -106,19 +153,19 @@ func sendControlContext(ctx context.Context, conn net.Conn, request ControlReque
 	})
 	defer stopCancellation()
 	if err := json.NewEncoder(conn).Encode(request); err != nil {
-		return controlContextError(ctx, err)
+		return ControlResponse{}, controlContextError(ctx, err)
 	}
 	var response ControlResponse
 	if err := json.NewDecoder(conn).Decode(&response); err != nil {
-		return controlContextError(ctx, err)
+		return ControlResponse{}, controlContextError(ctx, err)
 	}
 	if !response.OK {
 		if response.Error == "" {
-			return errors.New("proxy rejected control request")
+			return ControlResponse{}, errors.New("proxy rejected control request")
 		}
-		return fmt.Errorf("proxy: %s", response.Error)
+		return ControlResponse{}, fmt.Errorf("proxy: %s", response.Error)
 	}
-	return nil
+	return response, nil
 }
 
 func controlContextError(ctx context.Context, err error) error {

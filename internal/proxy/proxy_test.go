@@ -50,6 +50,26 @@ func TestSendControlContextStopsWaitingForUnresponsivePeer(t *testing.T) {
 	<-done
 }
 
+func TestQueryDiagnosticsAddsDeadlineForUnresponsiveSocket(t *testing.T) {
+	client, server := net.Pipe()
+	go func() {
+		defer server.Close()
+		var request ControlRequest
+		_ = json.NewDecoder(server).Decode(&request)
+		_, _ = io.Copy(io.Discard, server)
+	}()
+	started := time.Now()
+	_, err := queryDiagnosticsDialContext(context.Background(), "silent.sock", 1, 1, 25*time.Millisecond, func(context.Context, string, string) (net.Conn, error) {
+		return client, nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("unresponsive diagnostic error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bounded diagnostic query took %s", elapsed)
+	}
+}
+
 type resolver struct {
 	mu    sync.Mutex
 	hosts []string

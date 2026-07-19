@@ -119,6 +119,77 @@ func TestRootlessNetworkAbsenceAndDoor(t *testing.T) {
 	if !strings.Contains(denied, "403") {
 		t.Fatalf("denied=%q", denied)
 	}
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedPort := closed.Addr().(*net.TCPAddr).Port
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	run(t, tmp, env, bin, "allow", "integration", fmt.Sprintf("localhost:%d", closedPort), "--for", "1m")
+	failed := run(t, tmp, env, "podman", "exec", container, "/usr/local/bin/probe", "proxy", "127.0.0.1:3128", fmt.Sprintf("localhost:%d", closedPort))
+	if !strings.Contains(failed, "502") {
+		t.Fatalf("admitted unavailable destination=%q", failed)
+	}
+	historyPath := filepath.Join(state, "integration", "history.jsonl")
+	historyBefore, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(state, "integration", "mutation.lock")
+	lockBefore, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostic := run(t, tmp, env, bin, "network-diagnostics", "--json", "--limit", "10", "--max-bytes", "4096", "integration")
+	historyAfter, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(historyAfter) != string(historyBefore) {
+		t.Fatal("read-only diagnostic changed authoritative history")
+	}
+	lockAfter, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(lockAfter) != string(lockBefore) {
+		t.Fatal("read-only diagnostic changed mutation-lock metadata")
+	}
+	if len(diagnostic) > 4096 {
+		t.Fatalf("diagnostic is %d bytes", len(diagnostic))
+	}
+	var observed struct {
+		Generation int64 `json:"generation"`
+		Events     []struct {
+			Generation int64  `json:"generation"`
+			Outcome    string `json:"outcome"`
+			Host       string `json:"host"`
+			Port       int    `json:"port"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(diagnostic), &observed); err != nil {
+		t.Fatal(err)
+	}
+	if observed.Generation != 2 || len(observed.Events) < 2 {
+		t.Fatalf("network diagnostic = %#v", observed)
+	}
+	want := map[string]bool{"refused:denied.example:443": false, fmt.Sprintf("dial_failed:localhost:%d", closedPort): false}
+	for _, event := range observed.Events {
+		if event.Generation != observed.Generation {
+			t.Fatalf("mixed generation event = %#v", event)
+		}
+		key := fmt.Sprintf("%s:%s:%d", event.Outcome, event.Host, event.Port)
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for key, found := range want {
+		if !found {
+			t.Fatalf("diagnostic missing %s: %s", key, diagnostic)
+		}
+	}
 	second, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

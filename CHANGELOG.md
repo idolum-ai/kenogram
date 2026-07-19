@@ -8,6 +8,12 @@ Notable user-visible and operational changes are recorded here.
   including bounded provider actions, rollback, pre-commit process death,
   inherited egress, and acknowledgement-only compatibility without adding a
   declaration or status surface.
+- Add an explicitly invoked, complete-output-bounded current-generation
+  network diagnostic that distinguishes exact-policy refusal from admitted
+  dial failure without retaining traffic content or granting authority.
+- Add explicit-generation, fail-closed workspace inspection with deterministic
+  metadata-only locus grouping, independent entry and whole-document byte
+  bounds, honest omission counts, and one-document JSON output.
 - Make repeated-plan comparisons insertion-aware while preserving order and
   redacting secret copy digests across insertion, removal, modification, and
   reorder evidence.
