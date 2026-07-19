@@ -203,7 +203,7 @@ func referenceActionSpec(destination string) readinessActionSpec {
 }
 
 func TestReadinessWrapperSemanticReference(t *testing.T) {
-	t.Run("delayed action precedes dependent and real commit", func(t *testing.T) {
+	t.Run("delayed action precedes successor verification and commit", func(t *testing.T) {
 		base, layout, prior, successor, runner, application := newReadinessApp(t)
 		defer func() { _ = application.stopProxy(layout) }()
 		applyReadinessPredecessor(t, application, prior)
@@ -220,7 +220,7 @@ func TestReadinessWrapperSemanticReference(t *testing.T) {
 				if observation.Status != "ready" {
 					t.Fatal("delayed action did not become ready")
 				}
-				events = append(events, "readiness-succeeded", "dependent-started")
+				events = append(events, "readiness-succeeded")
 			}
 		}
 		if err := application.Up(context.Background(), successor); err != nil {
@@ -229,7 +229,7 @@ func TestReadinessWrapperSemanticReference(t *testing.T) {
 		if observation.Attempts != 3 || provider.calls != 3 || !reflect.DeepEqual(observation.Command, spec.Command) {
 			t.Fatalf("observation = %#v, provider calls = %d", observation, provider.calls)
 		}
-		assertEventOrder(t, events, "services-started", "readiness-succeeded", "dependent-started", "successor-verified", "commit-recorded")
+		assertEventOrder(t, events, "services-started", "readiness-succeeded", "successor-verified", "commit-recorded")
 		assertReadinessAuthority(t, base, runner, application, 2, successor.Result.PlanDigest)
 	})
 

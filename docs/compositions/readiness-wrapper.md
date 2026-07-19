@@ -22,8 +22,10 @@ fixture, network-door process, rollback, commit, and SIGKILL recovery paths then
 perform the authority handoff:
 
 1. Supervisor acknowledgement does not satisfy a declared action. A delayed
-   provider-facing action must succeed before its dependent behavior starts and
-   before commit.
+   provider-facing action succeeds after the real `startServices` call and
+   before successor verification and commit. Because every configured service
+   has already been started at this checkpoint, the fixture does not prove
+   ordering or gating between services.
 2. A never-ready successor is removed; the predecessor and its network door are
    restored through the ordinary rollback path. Because there is no supported
    readiness gate yet, the fixture routes a negative result into the next real
@@ -74,6 +76,7 @@ boundaries.
 - Declaration syntax, command representation, production bounds, and whether
   retries are fixed or operator-selected within hard limits.
 - How multiple actions compose and which failures are retryable.
+- Whether and how one service's readiness gates another service's startup.
 - Whether any bounded historical result belongs in durable state or `status`.
   A past success must never be rendered as current health.
 - Redaction rules for action output and whether output should be retained at all.
