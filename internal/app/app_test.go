@@ -1978,6 +1978,52 @@ func TestUpCancellationDuringReconcilePreservesProxy(t *testing.T) {
 	}
 }
 
+func TestUpAdoptionRecordsTheLiveReconciledProxyIdentity(t *testing.T) {
+	base := t.TempDir()
+	runner := &runtimeRunner{}
+	prepared := preparedFixture()
+	prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "allowed.example", Port: 443}}
+	refreshPreparedPlanDigest(&prepared)
+	runner.planDigest = prepared.Result.PlanDigest
+	runner.declDigest = prepared.Result.DeclarationDigest
+	a := &App{
+		Backend:    testBackend(runner),
+		BaseDir:    base,
+		Out:        &bytes.Buffer{},
+		Now:        time.Now,
+		Executable: crashProxyExecutable(t, base),
+		proxyReady: crashProxyReady,
+		proxyDiagnosticsReady: func(context.Context, worldfs.Layout, int64) (bool, error) {
+			return true, nil
+		},
+		sendProxyControl: func(context.Context, string, proxy.ControlRequest) error { return nil },
+	}
+	layout := worldfs.For(base, "w")
+	t.Cleanup(func() { _ = a.stopProxy(layout) })
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	state, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	livePID := state.ProxyPID
+	state.ProxyPID = livePID + 100000
+	if err := layout.WriteState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Up(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := layout.ReadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.ProxyPID != livePID || !a.proxyAlive(layout) {
+		t.Fatalf("adopted proxy identity = %d, want live PID %d (alive=%t)", repaired.ProxyPID, livePID, a.proxyAlive(layout))
+	}
+}
+
 func TestAdoptionRecordsUnavailableDigestForChangingWorkspace(t *testing.T) {
 	digest, detail, err := adoptionWorkspaceEvidence("workspace", func(string) (worldfs.DigestTree, error) {
 		return worldfs.DigestTree{}, fmt.Errorf("digest retries exhausted: %w", worldfs.ErrWorkspaceChanging)

@@ -1011,7 +1011,7 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 	}
 	proxyPID := state.ProxyPID
 	if len(prepared.Result.Plan.NetworkAllow) > 0 {
-		if a.proxyAlive(l) {
+		if livePID, alive := a.liveProxyPID(l); alive {
 			compatible, compatibilityErr := a.proxySupportsDiagnostics(ctx, l, state.Generation)
 			if compatibilityErr != nil {
 				return false, compatibilityErr
@@ -1032,6 +1032,14 @@ func (a *App) adopt(ctx context.Context, l worldfs.Layout, state worldfs.State, 
 			if err != nil {
 				return false, fmt.Errorf("reconcile running network door; existing door left running: %w", err)
 			}
+			confirmedPID, stillAlive := a.liveProxyPID(l)
+			if !stillAlive || confirmedPID != livePID {
+				return false, fmt.Errorf("running network door identity changed during adoption; settled authority left unchanged; run kenogram down %s before reapplying the declaration", state.Name)
+			}
+			// proxy.pid is the ownership evidence for the process actually probed
+			// and reconciled. It may be newer than state.json when a prior adoption
+			// was interrupted after proxy readiness but before state commit.
+			proxyPID = confirmedPID
 		} else {
 			proxyPID, err = a.startProxy(ctx, l, evidence.PID, state.Generation, prepared.Result.Plan.NetworkAllow)
 			if err != nil {
@@ -1089,30 +1097,35 @@ func adoptionWorkspaceEvidence(path string, digest func(string) (worldfs.DigestT
 	return "", "", err
 }
 func (a *App) proxyAlive(l worldfs.Layout) bool {
+	_, alive := a.liveProxyPID(l)
+	return alive
+}
+
+func (a *App) liveProxyPID(l worldfs.Layout) (int, bool) {
 	raw, err := os.ReadFile(l.ProxyPID)
 	if err != nil {
-		return false
+		return 0, false
 	}
 	fields := strings.Fields(string(raw))
 	if len(fields) != 2 {
-		return false
+		return 0, false
 	}
 	pid, err := strconv.Atoi(fields[0])
 	if err != nil || pid <= 1 || lockfile.ProcessStart(pid) != fields[1] {
-		return false
+		return 0, false
 	}
 	cmdline, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
 	if err != nil {
-		return false
+		return 0, false
 	}
 	if !strings.Contains(string(cmdline), "_proxy") || !strings.Contains(string(cmdline), l.ProxySocket) {
-		return false
+		return 0, false
 	}
 	if err := syscall.Kill(pid, 0); err != nil {
-		return false
+		return 0, false
 	}
 	_, err = os.Stat(l.ProxySocket)
-	return err == nil
+	return pid, err == nil
 }
 
 func (a *App) loadPredecessor(l worldfs.Layout, prior worldfs.State) (Prepared, error) {
