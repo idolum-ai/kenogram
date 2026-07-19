@@ -42,10 +42,13 @@ perform the authority handoff:
    rootless integration evidence. The rollback cases independently prove that
    App restores its existing proxy-door process for the predecessor.
 5. The reference wrapper has a 150 ms total timeout, 5 ms retry cadence, five-
-   attempt ceiling, and 192-byte total diagnostic-text ceiling. The complete
-   serialized observation is not claimed to fit within 192 bytes. These values
-   make the proof fast; they establish the need for hard bounds, not production
-   defaults.
+   attempt ceiling, and 192-byte retained diagnostic-text ceiling. Deadline or
+   parent cancellation wins over a simultaneously available success, including
+   on the final attempt. The complete serialized observation is not claimed to
+   fit within 192 bytes. These values make the proof fast; they establish the
+   need for hard bounds, not production defaults. The in-memory fixture action
+   honors context cancellation; it does not prove production process-tree
+   termination or bounded stdout/stderr ingestion.
 6. The exact operator-declared command is preserved in the result. Provider
    invocation mutates a counter deliberately: this is a bounded action that may
    affect provider or world state, never a claim of passive observation.
@@ -74,6 +77,8 @@ boundaries.
 - Whether any bounded historical result belongs in durable state or `status`.
   A past success must never be rendered as current health.
 - Redaction rules for action output and whether output should be retained at all.
+- Process-group termination and bounded stdout/stderr ingestion when an action
+  ignores cancellation or forks descendants.
 - Adoption, stopped-generation restart, and manual-service behavior.
 
 Continuous health monitoring, automatic reaction to later degradation, and

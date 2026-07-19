@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -68,6 +69,10 @@ func runReadinessWrapper(parent context.Context, spec readinessActionSpec, door 
 	ctx, cancel := context.WithTimeout(parent, spec.Timeout)
 	defer cancel()
 	for number := 1; number <= spec.MaxAttempts; number++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			observation.Status = readinessContextStatus(ctxErr)
+			return observation
+		}
 		result := runBoundedAttempt(ctx, attempt, door)
 		observation.Attempts = number
 		line := fmt.Sprintf("attempt %d: %s", number, strings.TrimSpace(result.output))
@@ -75,6 +80,13 @@ func runReadinessWrapper(parent context.Context, spec readinessActionSpec, door 
 			line += ": " + result.err.Error()
 		}
 		appendBoundedDiagnostic(&observation, line+"\n", spec.MaxOutputBytes)
+		// A result and the context deadline may become observable together.
+		// Deadline/cancellation wins so a late success can never authorize
+		// readiness nondeterministically.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			observation.Status = readinessContextStatus(ctxErr)
+			return observation
+		}
 		if result.err == nil && result.ready {
 			observation.Status = "ready"
 			return observation
@@ -89,12 +101,19 @@ func runReadinessWrapper(parent context.Context, spec readinessActionSpec, door 
 			if !timer.Stop() {
 				<-timer.C
 			}
-			observation.Status = "timeout"
+			observation.Status = readinessContextStatus(ctx.Err())
 			return observation
 		case <-timer.C:
 		}
 	}
 	panic("unreachable")
+}
+
+func readinessContextStatus(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "canceled"
 }
 
 func runBoundedAttempt(ctx context.Context, attempt readinessAttempt, door *readinessDoor) attemptResult {
@@ -211,7 +230,7 @@ func TestReadinessWrapperSemanticReference(t *testing.T) {
 			t.Fatalf("observation = %#v, provider calls = %d", observation, provider.calls)
 		}
 		assertEventOrder(t, events, "services-started", "readiness-succeeded", "dependent-started", "successor-verified", "commit-recorded")
-		assertReadinessAuthority(t, base, runner, 2, successor.Result.PlanDigest)
+		assertReadinessAuthority(t, base, runner, application, 2, successor.Result.PlanDigest)
 	})
 
 	t.Run("never ready occupies pre-commit rollback boundary", func(t *testing.T) {
@@ -252,7 +271,7 @@ func TestReadinessWrapperSemanticReference(t *testing.T) {
 		if marshalErr != nil || !json.Valid(raw) || strings.Count(string(raw), "\n") != 0 {
 			t.Fatalf("observation JSON = %q, %v", raw, marshalErr)
 		}
-		assertReadinessAuthority(t, base, runner, 1, prior.Result.PlanDigest)
+		assertReadinessAuthority(t, base, runner, application, 1, prior.Result.PlanDigest)
 		if _, exists := runner.containers["kenogram-w-g2"]; exists {
 			t.Fatal("failed successor survived rollback")
 		}
@@ -283,7 +302,7 @@ func TestReadinessWrapperSemanticReference(t *testing.T) {
 		if _, broadened := door.allowed[undeclared]; broadened || len(door.allowed) != 1 {
 			t.Fatalf("readiness action changed authority: %#v", door.allowed)
 		}
-		assertReadinessAuthority(t, base, runner, 1, prior.Result.PlanDigest)
+		assertReadinessAuthority(t, base, runner, application, 1, prior.Result.PlanDigest)
 	})
 
 	t.Run("timeout interrupts one hanging attempt", func(t *testing.T) {
@@ -296,6 +315,32 @@ func TestReadinessWrapperSemanticReference(t *testing.T) {
 		})
 		if observation.Status != "timeout" || observation.Attempts != 1 || len(observation.Diagnostic) > spec.MaxOutputBytes {
 			t.Fatalf("timeout observation = %#v", observation)
+		}
+	})
+
+	t.Run("deadline outranks final-attempt exhaustion", func(t *testing.T) {
+		spec := referenceActionSpec("not-invoked.fixture:443")
+		spec.Timeout = 25 * time.Millisecond
+		spec.MaxAttempts = 1
+		observation := runReadinessWrapper(context.Background(), spec, nil, func(ctx context.Context, _ *readinessDoor) (bool, string, error) {
+			<-ctx.Done()
+			return false, "late failure", ctx.Err()
+		})
+		if observation.Status != "timeout" || observation.Attempts != 1 {
+			t.Fatalf("deadline observation = %#v", observation)
+		}
+	})
+
+	t.Run("parent cancellation prevents a late success", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		attempted := false
+		observation := runReadinessWrapper(ctx, referenceActionSpec("not-invoked.fixture:443"), nil, func(context.Context, *readinessDoor) (bool, string, error) {
+			attempted = true
+			return true, "too late", nil
+		})
+		if observation.Status != "canceled" || observation.Attempts != 0 || attempted {
+			t.Fatalf("canceled observation = %#v, attempted=%t", observation, attempted)
 		}
 	})
 
@@ -314,7 +359,7 @@ func TestReadinessWrapperSemanticReference(t *testing.T) {
 				t.Fatalf("legacy apply invented readiness event: %v", events)
 			}
 		}
-		assertReadinessAuthority(t, base, runner, 2, successor.Result.PlanDigest)
+		assertReadinessAuthority(t, base, runner, application, 2, successor.Result.PlanDigest)
 	})
 }
 
@@ -366,7 +411,7 @@ func TestReadinessSuccessBeforeCommitRecoversThenExplicitlyReruns(t *testing.T) 
 	if got := readActionCount(t, filepath.Join(base, "readiness-action-count")); got != 1 {
 		t.Fatalf("recovery reran readiness action: count = %d", got)
 	}
-	assertReadinessAuthority(t, base, runner, 1, prior.Result.PlanDigest)
+	assertReadinessAuthority(t, base, runner, application, 1, prior.Result.PlanDigest)
 
 	destination := declaredReadinessDestination(t, successor.Result.Plan.NetworkAllow)
 	spec := referenceActionSpec(destination)
@@ -385,7 +430,7 @@ func TestReadinessSuccessBeforeCommitRecoversThenExplicitlyReruns(t *testing.T) 
 	if got := readActionCount(t, filepath.Join(base, "readiness-action-count")); got != 2 {
 		t.Fatalf("explicit apply action count = %d", got)
 	}
-	assertReadinessAuthority(t, base, runner, 2, successor.Result.PlanDigest)
+	assertReadinessAuthority(t, base, runner, application, 2, successor.Result.PlanDigest)
 }
 
 func newReadinessApp(t *testing.T) (string, worldfs.Layout, Prepared, Prepared, *crashRunner, *App) {
@@ -420,7 +465,7 @@ func applyReadinessPredecessor(t *testing.T, application *App, prior Prepared) {
 	application.Now = func() time.Time { return time.Unix(2, 0) }
 }
 
-func assertReadinessAuthority(t *testing.T, base string, runner *crashRunner, generation int64, digest string) {
+func assertReadinessAuthority(t *testing.T, base string, runner *crashRunner, application *App, generation int64, digest string) {
 	t.Helper()
 	layout := worldfs.For(base, "w")
 	state, err := layout.ReadState()
@@ -434,8 +479,9 @@ func assertReadinessAuthority(t *testing.T, base string, runner *crashRunner, ge
 	if len(runner.containers) != 1 || container == nil || !container.Running || !container.Services["worker"] {
 		t.Fatalf("runtime authority = %#v", runner.containers)
 	}
-	if !crashProxyReady(layout) {
-		t.Fatal("authoritative network door is not ready")
+	identity, alive := application.liveProxyIdentity(layout)
+	if !alive || state.ProxyPID != identity.PID {
+		t.Fatalf("authoritative network door identity = %#v alive=%t; state PID=%d", identity, alive, state.ProxyPID)
 	}
 }
 
