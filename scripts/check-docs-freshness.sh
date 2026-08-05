@@ -5,7 +5,10 @@ cd "$repo_root"
 rg -q 'Status: binding contract' requirements/declaration.md
 rg -q 'Evidence and known limits' requirements/INDEX.md
 rg -Fq 'Status: implemented provider-independent core' requirements/jobs.md
-rg -Fq 'Status: development provenance implemented' requirements/provenance.md
+rg -Fq 'Status: packaged release provenance implemented' requirements/provenance.md
+rg -Fq 'full-SHA and canonical-UTC release packaging' requirements/INDEX.md
+rg -Fq 'independent packaged-binary cross-binding' requirements/provenance.md
+rg -Fq 'Canonical release manifest and external attestation remain intentionally absent' requirements/INDEX.md
 rg -Fq 'kenogram job --request' requirements/jobs.md
 rg -Fq 'kenogram.podman-runtime-observation.v1' requirements/jobs.md docs/governed-jobs.md
 rg -Fq 'kenogram.job-egress-evidence.v1' requirements/jobs.md docs/governed-jobs.md

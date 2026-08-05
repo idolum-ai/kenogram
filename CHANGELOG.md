@@ -6,8 +6,9 @@ Notable user-visible and operational changes are recorded here.
 
 - Preserve the full 40-character source commit and canonical UTC source date in
   release binaries, and make
-  candidate and publication qualification validate closed JSON provenance and
-  execute a governed job with the exact packaged binary.
+  ordinary CI, candidate, and publication qualification independently
+  cross-bind closed JSON provenance and execute a governed job with the exact
+  packaged binary.
 
 ## [v0.2.0] - 2026-08-05
 

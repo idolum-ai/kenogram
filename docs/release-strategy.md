@@ -27,7 +27,8 @@ Build metadata is not accepted in tags.
    needs, validation, and known limits in its required sections.
 4. Review normal CI and the release-candidate artifact. The candidate workflow
    runs the full gate and real runtime integration, builds both archives,
-   validates the packaged executable's closed JSON provenance, reruns governed
+   independently cross-binds the packaged executable's closed JSON provenance
+   to the expected release coordinates and exact executable digest, reruns governed
    job integration with that exact packaged executable, and records checksums
    and release-note preview.
 5. Merge only when notes, source, and candidate evidence agree.

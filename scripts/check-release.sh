@@ -17,11 +17,19 @@ diff -u \
 
 version=v0.0.0-check
 commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+source_date=1970-01-01T00:00:00Z
 asset="kenogram-${version}-linux-amd64.tar.gz"
 assert_version() {
   local executable="$1"
+  local provenance
   if [[ "$(uname -s)" == Linux ]]; then
     "${executable}" version | grep -F "kenogram ${version} commit=${commit}" >/dev/null
+    provenance="$(mktemp "${tmp_dir}/release-provenance.XXXXXX")"
+    "${executable}" version --json > "${provenance}"
+    go run ./internal/cmd/releaseprovenance \
+      -executable "${executable}" -provenance "${provenance}" \
+      -version "${version}" -commit "${commit}" -source-date "${source_date}" \
+      -goos linux -goarch amd64 >/dev/null
   else
     # A native Darwin gate cannot execute the Linux release asset. Preserve
     # the package proof without pretending emulation by checking the exact
@@ -30,9 +38,9 @@ assert_version() {
     grep -aF "${commit}" "${executable}" >/dev/null
   fi
 }
-RELEASE_TARGETS=linux/amd64 RELEASE_COMMIT="${commit}" RELEASE_DATE=1970-01-01T00:00:00Z SOURCE_DATE_EPOCH=0 \
+RELEASE_TARGETS=linux/amd64 RELEASE_COMMIT="${commit}" RELEASE_DATE="${source_date}" SOURCE_DATE_EPOCH=0 \
   ./scripts/package-release.sh "${version}" "${tmp_dir}/first" >/dev/null
-RELEASE_TARGETS=linux/amd64 RELEASE_COMMIT="${commit}" RELEASE_DATE=1970-01-01T00:00:00Z SOURCE_DATE_EPOCH=0 \
+RELEASE_TARGETS=linux/amd64 RELEASE_COMMIT="${commit}" RELEASE_DATE="${source_date}" SOURCE_DATE_EPOCH=0 \
   ./scripts/package-release.sh "${version}" "${tmp_dir}/second" >/dev/null
 cmp "${tmp_dir}/first/${asset}" "${tmp_dir}/second/${asset}"
 cmp "${tmp_dir}/first/checksums.txt" "${tmp_dir}/second/checksums.txt"

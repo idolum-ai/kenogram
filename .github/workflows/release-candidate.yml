@@ -73,13 +73,18 @@ jobs:
         run: |
           set -euo pipefail
           commit="$(git rev-parse HEAD)"
-          date="$(date -u -d "@$(git show -s --format=%ct HEAD)" '+%Y-%m-%dT%H:%M:%SZ')"
+          date="$(date -u -d "@$(git show -s --format=%ct HEAD)" "+%Y-%m-%dT%H:%M:%SZ")"
           make release-dist VERSION="${TAG}" COMMIT="${commit}" DATE="${date}"
           mkdir candidate-smoke
           tar -xzf "dist/kenogram-${TAG}-linux-amd64.tar.gz" -C candidate-smoke kenogram
           candidate-smoke/kenogram version | tee candidate-version.txt
           grep -F "kenogram ${TAG} commit=${commit}" candidate-version.txt >/dev/null
           candidate-smoke/kenogram version --json | tee candidate-provenance.json
+          go run ./internal/cmd/releaseprovenance \
+            -executable "${PWD}/candidate-smoke/kenogram" \
+            -provenance "${PWD}/candidate-provenance.json" \
+            -version "${TAG}" -commit "${commit}" -source-date "${date}" \
+            -goos linux -goarch amd64
           KENOGRAM_INTEGRATION=1 \
             KENOGRAM_INTEGRATION_BINARY="${PWD}/candidate-smoke/kenogram" \
             go test ./internal/integration -run '^TestGovernedJobDirectPodmanEvidence$' -count=1 -timeout=5m -v
