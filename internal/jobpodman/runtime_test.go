@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -73,24 +75,25 @@ func (f *fakeAttachedProcess) finish(err error) {
 }
 
 type fakePodmanRunner struct {
-	mu              sync.Mutex
-	exists          bool
-	running         bool
-	name            string
-	labels          map[string]string
-	mounts          []map[string]any
-	calls           [][]string
-	onStop          func()
-	failRemove      bool
-	failCreateAfter bool
-	ownerOverride   string
-	artifactSymlink bool
-	imageDigest     string
-	imageReference  string
-	omitImageDigest bool
-	containerID     string
-	cancelOnCreate  func()
-	afterStart      func()
+	mu                   sync.Mutex
+	exists               bool
+	running              bool
+	name                 string
+	labels               map[string]string
+	mounts               []map[string]any
+	calls                [][]string
+	onStop               func()
+	failRemove           bool
+	failCreateAfter      bool
+	failWorkspaceCleanup bool
+	ownerOverride        string
+	artifactSymlink      bool
+	imageDigest          string
+	imageReference       string
+	omitImageDigest      bool
+	containerID          string
+	cancelOnCreate       func()
+	afterStart           func()
 }
 
 func (f *fakePodmanRunner) Run(ctx context.Context, _ string, args ...string) ([]byte, error) {
@@ -156,16 +159,42 @@ func (f *fakePodmanRunner) Run(ctx context.Context, _ string, args ...string) ([
 	case "exec":
 		return []byte{}, nil
 	case "unshare":
-		if len(args) != 10 || args[2] != "_job-collect" || args[3] != f.containerIDValue() || args[4] != f.name || args[5] != f.labels["io.kenogram.job-owner"] {
-			return nil, errors.New("artifact collector authority mismatch")
+		switch {
+		case len(args) == 15 && args[2] == "_job-collect" && args[3] == f.containerIDValue() && args[4] == f.name && args[5] == f.labels["io.kenogram.job-owner"]:
+			if err := os.Mkdir(args[7], 0o700); err != nil {
+				return nil, err
+			}
+			if f.artifactSymlink {
+				return nil, os.Symlink("/etc/passwd", filepath.Join(args[7], "report.json"))
+			}
+			return nil, os.WriteFile(filepath.Join(args[7], "report.json"), []byte(`{"ok":true}`), 0o600)
+		case len(args) == 11 && args[2] == "_job-clean-workspaces-after-container" && containerIDPattern.MatchString(args[3]) && args[4] == f.labels["io.kenogram.job-owner"]:
+			if f.failWorkspaceCleanup {
+				return nil, errors.New("post-container workspace cleanup failed")
+			}
+			if f.exists && f.containerIDValue() == args[3] {
+				return nil, errors.New("container is still present")
+			}
+			device, deviceErr := strconv.ParseUint(args[8], 10, 64)
+			inode, inodeErr := strconv.ParseUint(args[9], 10, 64)
+			if deviceErr != nil || inodeErr != nil {
+				return nil, errors.New("invalid cleanup identity")
+			}
+			identity, identityErr := filesystemIdentityAt(args[7])
+			record, recordErr := readWorkspaceCleanupAuthority(args[7], args[10])
+			if identityErr != nil || identity != (FilesystemIdentity{Device: device, Inode: inode}) || recordErr != nil ||
+				record.ContainerID != args[3] || record.OwnerToken != args[4] || record.PlanDigest != args[5] || record.DeclarationDigest != args[6] {
+				return nil, errors.Join(identityErr, recordErr, errors.New("post-container cleanup authority mismatch"))
+			}
+			for _, binding := range record.Bindings {
+				if err := clearWorkspaceContents(ctx, binding); err != nil {
+					return nil, err
+				}
+			}
+			return nil, nil
+		default:
+			return nil, errors.New("governed helper authority mismatch")
 		}
-		if err := os.Mkdir(args[7], 0o700); err != nil {
-			return nil, err
-		}
-		if f.artifactSymlink {
-			return nil, os.Symlink("/etc/passwd", filepath.Join(args[7], "report.json"))
-		}
-		return nil, os.WriteFile(filepath.Join(args[7], "report.json"), []byte(`{"ok":true}`), 0o600)
 	case "stop", "kill":
 		f.running = false
 		if f.onStop != nil {
@@ -860,6 +889,75 @@ func TestOwnedContainerRenameCannotEscapeImmutableIDCleanup(t *testing.T) {
 	}
 }
 
+func TestCleanupDoesNotMutateWhileFinalizeWorkerIsUnjoined(t *testing.T) {
+	runtime, runner, _, invocation := runtimeFixture(t)
+	started, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := started.(*process)
+	process.BeginFinalization()
+	before := len(runner.calls)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	cleanup := runtime.Cleanup(ctx, invocation)
+	if cleanup.Status != "incomplete" || cleanup.ContainerAbsent || !slices.Contains(cleanup.Reasons, "FINALIZATION_WORKER_PRESENT") || len(runner.calls) != before || !runner.exists {
+		t.Fatalf("cleanup=%#v calls=%v before=%d exists=%t", cleanup, runner.calls, before, runner.exists)
+	}
+	if _, err := os.Lstat(runtime.scratch); err != nil {
+		t.Fatalf("active finalization scratch was mutated: %v", err)
+	}
+	process.finishFinalization()
+	if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" {
+		t.Fatalf("cleanup after join=%#v", cleanup)
+	}
+}
+
+func TestCleanupRetriesExactWorkspacesAfterContainerAbsence(t *testing.T) {
+	runtime, runner, attached, invocation := runtimeFixture(t)
+	invocation.Request.Artifacts = &jobcontract.ArtifactRequest{ContainerRoot: "/workspace/artifacts", MaxEntries: 2, MaxBytes: 1024}
+	started, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached.finish(nil)
+	if _, err := started.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := started.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	scratch := runtime.scratch
+	runner.failWorkspaceCleanup = true
+	first := runtime.Cleanup(context.Background(), invocation)
+	if first.Status != "incomplete" || !first.ContainerAbsent || !slices.Contains(first.Reasons, "WORKSPACE_NAMESPACE_CLEANUP_FAILED") || !slices.Contains(first.Reasons, "SCRATCH_RETAINED_FOR_NAMESPACE_CLEANUP") {
+		t.Fatalf("first cleanup=%#v", first)
+	}
+	if _, err := os.Lstat(filepath.Join(scratch, workspaceCleanupAuthorityName)); err != nil {
+		t.Fatalf("retry authority was not retained: %v", err)
+	}
+	runner.failWorkspaceCleanup = false
+	second := runtime.Cleanup(context.Background(), invocation)
+	if second.Status != "complete" || !second.ContainerAbsent {
+		t.Fatalf("second cleanup=%#v calls=%v", second, runner.calls)
+	}
+	if _, err := os.Lstat(scratch); !os.IsNotExist(err) {
+		t.Fatalf("scratch remains after successful post-absence retry: %v", err)
+	}
+	removeIndex, helperIndex := -1, -1
+	for index, call := range runner.calls {
+		if len(call) != 0 && call[0] == "rm" && removeIndex < 0 {
+			removeIndex = index
+		}
+		if len(call) > 2 && call[0] == "unshare" && call[2] == "_job-clean-workspaces-after-container" && helperIndex < 0 {
+			helperIndex = index
+		}
+	}
+	if removeIndex < 0 || helperIndex <= removeIndex {
+		t.Fatalf("workspace retry did not occur after container destroy: calls=%v", runner.calls)
+	}
+}
+
 func TestAllPostCreateProviderCallsUseImmutableContainerID(t *testing.T) {
 	runtime, runner, attached, invocation := runtimeFixture(t)
 	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
@@ -1520,6 +1618,205 @@ func TestDirectRuntimeRejectsArtifactSymlink(t *testing.T) {
 	}
 	if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" {
 		t.Fatalf("cleanup=%#v", cleanup)
+	}
+}
+
+func TestArtifactCollectionResolvesDeepestBoundMountWithoutMutation(t *testing.T) {
+	outer := t.TempDir()
+	inner := t.TempDir()
+	if err := os.Mkdir(filepath.Join(inner, "artifacts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wanted := []byte("bound artifact\n")
+	artifact := filepath.Join(inner, "artifacts", "report.txt")
+	if err := os.WriteFile(artifact, wanted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := filesystemIdentityAt(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := stoppedArtifactRunner([]map[string]any{
+		{"Source": outer, "Destination": "/workspace", "RW": true, "Mode": "rw,nodev,nosuid", "Options": []string{"rw", "nodev", "nosuid"}},
+		{"Source": inner, "Destination": "/workspace/nested", "RW": true, "Mode": "rw,nodev,nosuid", "Options": []string{"rw", "nodev", "nosuid"}},
+	})
+	destination := filepath.Join(t.TempDir(), "collected")
+	binding := ArtifactMountBinding{Role: "declared", Target: "/workspace/nested", Device: identity.Device, Inode: identity.Inode}
+	err = CollectArtifacts(context.Background(), backend.New(runner), runner.containerIDValue(), runner.name, runner.labels["io.kenogram.job-owner"], "/workspace/nested/artifacts", destination, 2, 1024, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(destination, "report.txt"))
+	after, statErr := os.Stat(artifact)
+	if readErr != nil || statErr != nil || !bytes.Equal(got, wanted) || before.Mode() != after.Mode() || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("got=%q read=%v stat=%v before=%v after=%v", got, readErr, statErr, before, after)
+	}
+	if hasCall(runner.calls, "mount") || hasCall(runner.calls, "unmount") {
+		t.Fatalf("bind-aware collection consulted storage root: %v", runner.calls)
+	}
+}
+
+func TestArtifactCollectionRejectsChangedOrEscapingBindAuthority(t *testing.T) {
+	source := t.TempDir()
+	identity, err := filesystemIdentityAt(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := stoppedArtifactRunner([]map[string]any{{"Source": source, "Destination": "/workspace", "RW": true, "Mode": "rw,nodev,nosuid", "Options": []string{"rw", "nodev", "nosuid"}}})
+	base := ArtifactMountBinding{Role: "declared", Target: "/workspace", Device: identity.Device, Inode: identity.Inode}
+	wrong := base
+	wrong.Inode++
+	if err := CollectArtifacts(context.Background(), backend.New(runner), runner.containerIDValue(), runner.name, runner.labels["io.kenogram.job-owner"], "/workspace/artifacts", filepath.Join(t.TempDir(), "changed"), 2, 1024, wrong); err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("changed identity error=%v", err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(source, "artifacts")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CollectArtifacts(context.Background(), backend.New(runner), runner.containerIDValue(), runner.name, runner.labels["io.kenogram.job-owner"], "/workspace/artifacts", filepath.Join(t.TempDir(), "escape"), 2, 1024, base); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlink escape error=%v", err)
+	}
+}
+
+func TestArtifactCollectionAcceptsOnlyExactWorkspaceProjection(t *testing.T) {
+	scratch := t.TempDir()
+	layout := worldfs.For(scratch, "ephemeral")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := layout.EnsurePortableWritableWorkspace("/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(workspace, "artifacts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "artifacts", "report"), []byte("workspace"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := filesystemIdentityAt(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := stoppedArtifactRunner([]map[string]any{{"Source": workspace, "Destination": "/workspace", "RW": true, "Mode": "rw,nodev,nosuid", "Options": []string{"rw", "nodev", "nosuid"}}})
+	binding := ArtifactMountBinding{Role: "workspace", Target: "/workspace", Scratch: scratch, Device: identity.Device, Inode: identity.Inode}
+	destination := filepath.Join(t.TempDir(), "exact")
+	if err := CollectArtifacts(context.Background(), backend.New(runner), runner.containerIDValue(), runner.name, runner.labels["io.kenogram.job-owner"], "/workspace/artifacts", destination, 1, 1024, binding); err != nil {
+		t.Fatal(err)
+	}
+	wrong := binding
+	wrong.Scratch = t.TempDir()
+	if err := CollectArtifacts(context.Background(), backend.New(runner), runner.containerIDValue(), runner.name, runner.labels["io.kenogram.job-owner"], "/workspace/artifacts", filepath.Join(t.TempDir(), "wrong"), 1, 1024, wrong); err == nil || !strings.Contains(err.Error(), "not Kenogram-owned") {
+		t.Fatalf("wrong workspace projection error=%v", err)
+	}
+}
+
+func TestWorkspaceNamespaceCleanupIsExactAndIdempotent(t *testing.T) {
+	scratch := t.TempDir()
+	if err := os.Chmod(scratch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	layout := worldfs.For(scratch, "ephemeral")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := layout.EnsurePortableWritableWorkspace("/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "nested", "target"), []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target", filepath.Join(workspace, "nested", "link")); err != nil {
+		t.Fatal(err)
+	}
+	declared := t.TempDir()
+	if err := os.WriteFile(filepath.Join(declared, "operator"), []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceID, err := filesystemIdentityAt(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratchID, err := filesystemIdentityAt(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := []jobcontract.RuntimeMountObservation{{Role: "workspace", PermissionPolicy: jobcontract.RuntimeWorkspacePermissionPolicy, Target: "/workspace", Mode: "rw", Device: workspaceID.Device, Inode: workspaceID.Inode, FileType: "directory"}}
+	mounts := []backend.Mount{{Source: workspace, Target: "/workspace", Mode: "rw"}, {Source: declared, Target: "/operator", Mode: "rw"}}
+	bindings, digest, err := workspaceCleanupAuthority(scratch, facts, mounts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := stoppedArtifactRunner([]map[string]any{
+		{"Source": workspace, "Destination": "/workspace", "RW": true, "Mode": "rw,nodev,nosuid", "Options": []string{"rw", "nodev", "nosuid"}},
+		{"Source": declared, "Destination": "/operator", "RW": true, "Mode": "rw,nodev,nosuid", "Options": []string{"rw", "nodev", "nosuid"}},
+	})
+	authorityFileDigest, err := persistWorkspaceCleanupAuthority(
+		scratch, runner.containerIDValue(), runner.labels["io.kenogram.job-owner"],
+		runner.labels["io.kenogram.plan-digest"], runner.labels["io.kenogram.declaration-digest"],
+		scratchID, bindings, digest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.exists = false
+	for attempt := 0; attempt < 2; attempt++ {
+		err = CleanupWorkspaceContentsAfterContainer(
+			context.Background(), backend.New(runner), runner.containerIDValue(),
+			runner.labels["io.kenogram.job-owner"], runner.labels["io.kenogram.plan-digest"],
+			runner.labels["io.kenogram.declaration-digest"], scratch, scratchID,
+			authorityFileDigest,
+		)
+		if err != nil {
+			t.Fatalf("attempt %d: %v", attempt, err)
+		}
+	}
+	entries, err := os.ReadDir(workspace)
+	preserved, preserveErr := os.ReadFile(filepath.Join(declared, "operator"))
+	if err != nil || len(entries) != 0 || preserveErr != nil || string(preserved) != "preserve" {
+		t.Fatalf("workspace=%v read=%v declared=%q error=%v", entries, err, preserved, preserveErr)
+	}
+}
+
+func TestWorkspaceNamespaceCleanupFailureIsRetained(t *testing.T) {
+	runtime, runner, attached, invocation := runtimeFixture(t)
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached.finish(nil)
+	if _, err := process.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	runner.failWorkspaceCleanup = true
+	cleanup := runtime.Cleanup(context.Background(), invocation)
+	if cleanup.Status != "incomplete" || !cleanup.ContainerAbsent || !hasReason(cleanup.Reasons, "WORKSPACE_NAMESPACE_CLEANUP_FAILED") {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+}
+
+func stoppedArtifactRunner(mounts []map[string]any) *fakePodmanRunner {
+	return &fakePodmanRunner{
+		exists: true, name: "governed-job", mounts: mounts,
+		labels: map[string]string{
+			"io.kenogram.job-owner":          strings.Repeat("d", 32),
+			"io.kenogram.plan-digest":        strings.Repeat("a", 64),
+			"io.kenogram.declaration-digest": strings.Repeat("b", 64),
+		},
 	}
 }
 

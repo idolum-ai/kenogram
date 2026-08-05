@@ -82,19 +82,40 @@ func runGovernedJobHelper(args []string, stdin io.Reader, stderr io.Writer) (int
 		}
 		return 0, true
 	case "_job-collect":
-		if len(args) != 8 {
+		if len(args) != 13 {
 			return 125, true
 		}
 		maximumEntries, entriesErr := strconv.ParseInt(args[6], 10, 64)
 		maximumBytes, bytesErr := strconv.ParseInt(args[7], 10, 64)
-		if entriesErr != nil || bytesErr != nil || maximumEntries < 1 || maximumBytes < 1 {
+		device, deviceErr := strconv.ParseUint(args[11], 10, 64)
+		inode, inodeErr := strconv.ParseUint(args[12], 10, 64)
+		if entriesErr != nil || bytesErr != nil || deviceErr != nil || inodeErr != nil || maximumEntries < 1 || maximumBytes < 1 {
 			fmt.Fprintln(stderr, "job artifact bounds are invalid")
 			return 125, true
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		if err := jobpodman.CollectArtifacts(ctx, backend.New(nil), args[1], args[2], args[3], args[4], args[5], maximumEntries, maximumBytes); err != nil {
+		binding := jobpodman.ArtifactMountBinding{Role: args[8], Target: args[9], Scratch: args[10], Device: device, Inode: inode}
+		if err := jobpodman.CollectArtifacts(ctx, backend.New(nil), args[1], args[2], args[3], args[4], args[5], maximumEntries, maximumBytes, binding); err != nil {
 			fmt.Fprintln(stderr, "job artifact collection failed")
+			return 125, true
+		}
+		return 0, true
+	case "_job-clean-workspaces-after-container":
+		if len(args) != 9 {
+			return 125, true
+		}
+		device, deviceErr := strconv.ParseUint(args[6], 10, 64)
+		inode, inodeErr := strconv.ParseUint(args[7], 10, 64)
+		if deviceErr != nil || inodeErr != nil {
+			fmt.Fprintln(stderr, "post-container workspace cleanup authority is invalid")
+			return 125, true
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		identity := jobpodman.FilesystemIdentity{Device: device, Inode: inode}
+		if err := jobpodman.CleanupWorkspaceContentsAfterContainer(ctx, backend.New(nil), args[1], args[2], args[3], args[4], args[5], identity, args[8]); err != nil {
+			fmt.Fprintln(stderr, "post-container workspace cleanup failed")
 			return 125, true
 		}
 		return 0, true

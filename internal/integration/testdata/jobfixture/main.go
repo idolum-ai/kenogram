@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -129,13 +130,34 @@ func runProof() {
 			os.Exit(46)
 		}
 	}
+	hostile := "/workspace/cleanup-hostile/locked"
+	if err := os.MkdirAll(hostile, 0o700); err != nil {
+		fmt.Fprintln(os.Stderr, "cleanup-hostile tree could not be created")
+		os.Exit(47)
+	}
+	if err := os.WriteFile(filepath.Join(hostile, "private"), []byte("remove me"), 0o000); err != nil {
+		fmt.Fprintln(os.Stderr, "cleanup-hostile file could not be created")
+		os.Exit(48)
+	}
+	if err := os.Symlink("private", filepath.Join(hostile, "link")); err != nil {
+		fmt.Fprintln(os.Stderr, "cleanup-hostile symlink could not be created")
+		os.Exit(49)
+	}
+	if err := syscall.Mkfifo(filepath.Join(hostile, "fifo"), 0o000); err != nil {
+		fmt.Fprintln(os.Stderr, "cleanup-hostile fifo could not be created")
+		os.Exit(50)
+	}
+	if err := os.Chmod(hostile, 0o000); err != nil {
+		fmt.Fprintln(os.Stderr, "cleanup-hostile directory could not be locked")
+		os.Exit(51)
+	}
 	if err := os.Mkdir("/workspace/artifacts", 0o700); err != nil {
 		fmt.Fprintln(os.Stderr, "artifact root could not be created")
-		os.Exit(47)
+		os.Exit(52)
 	}
 	if err := os.WriteFile(filepath.Join("/workspace/artifacts", "report.json"), []byte("{\"proof\":true}\n"), 0o600); err != nil {
 		fmt.Fprintln(os.Stderr, "artifact could not be written")
-		os.Exit(48)
+		os.Exit(53)
 	}
 	fmt.Println("governed stdout")
 	fmt.Fprintln(os.Stderr, "governed stderr")

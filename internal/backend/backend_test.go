@@ -46,7 +46,53 @@ func TestExecRunnerSignalHelper(t *testing.T) {
 			time.Sleep(time.Hour)
 		}
 	}
+	if mode == "group-parent" {
+		child := exec.Command(os.Args[0], "-test.run=^TestExecRunnerSignalHelper$")
+		child.Env = append(os.Environ(), "KENOGRAM_SIGNAL_HELPER=group-child")
+		if err := child.Start(); err != nil {
+			os.Exit(116)
+		}
+		if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {
+			os.Exit(117)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+	if mode == "group-child" {
+		time.Sleep(250 * time.Millisecond)
+		if err := os.WriteFile(observed, []byte("survived"), 0o600); err != nil {
+			os.Exit(118)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	os.Exit(115)
+}
+
+func TestExecRunnerKillsAndJoinsNamespaceHelperProcessGroup(t *testing.T) {
+	root := t.TempDir()
+	ready := filepath.Join(root, "ready")
+	survived := filepath.Join(root, "survived")
+	t.Setenv("KENOGRAM_SIGNAL_HELPER", "group-parent")
+	t.Setenv("KENOGRAM_SIGNAL_READY", ready)
+	t.Setenv("KENOGRAM_SIGNAL_OBSERVED", survived)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := (ExecRunner{}).RunJoinedProcessGroup(ctx, os.Args[0], "-test.run=^TestExecRunnerSignalHelper$")
+		done <- err
+	}()
+	waitForTestFile(t, ready)
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if _, err := os.Stat(survived); !os.IsNotExist(err) {
+		t.Fatalf("namespace helper descendant survived group cancellation: %v", err)
+	}
 }
 
 func TestExecRunnerForwardsSignalBeforeEscalation(t *testing.T) {

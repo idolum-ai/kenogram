@@ -31,6 +31,19 @@ is only a collection request. It must already exist or be target-creatable
 inside declared write authority; Kenogram never makes an unrelated image path
 writable to satisfy artifact collection.
 
+Artifact collection distinguishes image-root paths from bind-mounted paths.
+The deepest exact inspected mount boundary and its retained source inode bind
+the read; workspace mounts must also resolve beneath the exact private scratch.
+Cleanup persists a private owner/plan/declaration/scratch-bound inventory of
+the exact workspace source devices and inodes while the stopped container is
+still provable. After immutable container absence, a namespace helper proves
+that absence and empties only the recorded Kenogram workspace roots. Failure
+retains the record for an idempotent post-absence retry. The finalization worker
+and every namespace-helper process group must be joined before cleanup can
+advance. Symlinks and special nodes inside a workspace are unlinked as names,
+not followed or interpreted. Declared writable sources are never cleanup
+targets, even when the target made their contents inaccessible to the host.
+
 Relative sources resolve against the declaration directory, not the caller's
 working directory. Missing sources fail validation. Every file and directory in
 a secret tree must have no group or other permission bits. Secret permission

@@ -110,6 +110,20 @@ an operator-owned declared writable mount. A requested artifact root is not
 created by the runtime: choose an image-owned writable path or, normally, a
 subdirectory the target creates under `/workspace`.
 
+Artifact roots beneath a bind mount are collected from that exact inspected
+mount source rather than from Podman's storage-only root mount. The deepest
+container mount boundary wins and its retained device/inode must still match;
+workspace bindings must also be the deterministic projection under Kenogram's
+private scratch. After those readers are published and finalization has joined,
+cleanup records the exact workspace source identities, destroys and proves the
+container absent, then lets a no-shell helper in the rootless user namespace
+empty only those recorded workspace roots. Failed namespace cleanup retains its
+private authority record for retry after container absence. This lets cleanup
+remove mode-`000` and subordinate-UID entries without ever chmodding or deleting
+an operator-owned declared writable source. Namespace-helper process groups are
+killed and joined at deadline; container and scratch absence remain mandatory
+cleanup evidence.
+
 The Kenogram executable also acts as the image-independent holder and target
 launcher. It must therefore be a self-contained Linux binary for images that do
 not provide a compatible dynamic loader. The hosted integration builds it with

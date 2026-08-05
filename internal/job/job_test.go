@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -65,6 +66,41 @@ type fakeProcess struct {
 	provider       string
 	invocation     Invocation
 	afterRaw       []byte
+	finalizeMu     sync.Mutex
+	finalizeDone   chan struct{}
+	finalizeClosed bool
+}
+
+func (f *fakeProcess) BeginFinalization() {
+	f.finalizeMu.Lock()
+	if f.finalizeDone == nil {
+		f.finalizeDone = make(chan struct{})
+	}
+	f.finalizeMu.Unlock()
+}
+
+func (f *fakeProcess) JoinFinalization(ctx context.Context) error {
+	f.finalizeMu.Lock()
+	done := f.finalizeDone
+	f.finalizeMu.Unlock()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (f *fakeProcess) finishFinalization() {
+	f.finalizeMu.Lock()
+	if !f.finalizeClosed {
+		close(f.finalizeDone)
+		f.finalizeClosed = true
+	}
+	f.finalizeMu.Unlock()
 }
 
 func (f *fakeProcess) Identity(context.Context) (RuntimeIdentity, error) {
@@ -101,6 +137,8 @@ func (f *fakeProcess) Wait(ctx context.Context) (jobcontract.TargetResult, error
 	return f.target, f.waitErr
 }
 func (f *fakeProcess) Finalize(context.Context) (RuntimeFinalization, error) {
+	f.BeginFinalization()
+	defer f.finishFinalization()
 	if f.finalBlock != nil {
 		<-f.finalBlock
 	}
@@ -501,6 +539,9 @@ func TestExecutorBoundsContextIgnoringRuntimePhases(t *testing.T) {
 			}
 			if outcome.Result.Status != "incomplete" {
 				t.Fatalf("result=%#v", outcome.Result)
+			}
+			if test.name == "finalize" && runtime.cleaned.Load() {
+				t.Fatal("cleanup raced a context-ignoring Finalize worker")
 			}
 			if _, err := Verify(evidence); err != nil {
 				t.Fatal(err)

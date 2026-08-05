@@ -2,6 +2,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,10 @@ type Runner interface {
 	Interactive(context.Context, string, ...string) error
 }
 
+type joinedProcessGroupRunner interface {
+	RunJoinedProcessGroup(context.Context, string, ...string) ([]byte, error)
+}
+
 // SignalCause records the signal that canceled an operation context so an
 // interactive child can receive the same signal before bounded escalation.
 type SignalCause struct {
@@ -44,6 +49,39 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 		return nil, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+// RunJoinedProcessGroup gives namespace helpers a stronger cancellation
+// boundary than exec.CommandContext: the helper and every descendant in its
+// process group are killed, and the direct child is always waited before this
+// method returns.
+func (ExecRunner) RunJoinedProcessGroup(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	command := exec.Command(name, args...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var output bytes.Buffer
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Start(); err != nil {
+		return nil, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			return nil, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(output.String()))
+		}
+		return output.Bytes(), nil
+	case <-ctx.Done():
+		killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		if errors.Is(killErr, syscall.ESRCH) {
+			killErr = nil
+		}
+		waitErr := <-done
+		return nil, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), errors.Join(ctx.Err(), killErr, waitErr))
+	}
 }
 func (ExecRunner) Start(ctx context.Context, name string, args ...string) error {
 	command := exec.CommandContext(ctx, name, args...)
@@ -280,7 +318,12 @@ func (p *Podman) RunUnshare(ctx context.Context, command []string) error {
 		return errors.New("podman unshare command must not be empty")
 	}
 	args := append([]string{"unshare"}, command...)
-	_, err := p.Runner.Run(ctx, p.Binary, args...)
+	var err error
+	if runner, ok := p.Runner.(joinedProcessGroupRunner); ok {
+		_, err = runner.RunJoinedProcessGroup(ctx, p.Binary, args...)
+	} else {
+		_, err = p.Runner.Run(ctx, p.Binary, args...)
+	}
 	return err
 }
 func (p *Podman) Start(ctx context.Context, name string) error {

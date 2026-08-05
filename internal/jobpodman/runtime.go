@@ -38,8 +38,12 @@ const generation = int64(1)
 
 const jobHelperPath = "/etc/kenogram/job-exec"
 const jobLifecyclePath = "/etc/kenogram/target-lifecycle.json"
+const workspaceCleanupAuthorityName = "workspace-cleanup-authority.json"
+const workspaceCleanupAuthoritySchema = "kenogram.workspace-cleanup-authority.v1"
+const maximumWorkspaceCleanupAuthorityBytes = 1 << 20
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var rawDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var containerIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var ownerTokenPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
@@ -100,6 +104,7 @@ type Runtime struct {
 	containerID       string
 	ownerToken        string
 	scratch           string
+	scratchID         FilesystemIdentity
 	helperSource      string
 	mayOwn            bool
 	process           *process
@@ -112,6 +117,39 @@ type Runtime struct {
 	lifecycleID       joblifecycle.FileIdentity
 	forced            bool
 	started           bool
+}
+
+type FilesystemIdentity struct {
+	Device uint64
+	Inode  uint64
+}
+
+type ArtifactMountBinding struct {
+	Role    string
+	Target  string
+	Scratch string
+	Device  uint64
+	Inode   uint64
+}
+
+type workspaceCleanupBinding struct {
+	Target string `json:"target"`
+	Source string `json:"source"`
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+}
+
+type workspaceCleanupAuthorityRecord struct {
+	Schema            string                    `json:"schema"`
+	ContainerID       string                    `json:"container_id"`
+	OwnerToken        string                    `json:"owner_token"`
+	PlanDigest        string                    `json:"plan_digest"`
+	DeclarationDigest string                    `json:"declaration_digest"`
+	Scratch           string                    `json:"scratch"`
+	ScratchDevice     uint64                    `json:"scratch_device"`
+	ScratchInode      uint64                    `json:"scratch_inode"`
+	Bindings          []workspaceCleanupBinding `json:"bindings"`
+	BindingsDigest    string                    `json:"bindings_digest"`
 }
 
 func New(podman *backend.Podman) *Runtime {
@@ -169,8 +207,13 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 		os.RemoveAll(scratch)
 		return nil, err
 	}
+	scratchID, err := filesystemIdentityAt(scratch)
+	if err != nil {
+		os.RemoveAll(scratch)
+		return nil, err
+	}
 	r.mu.Lock()
-	r.name, r.ownerToken, r.scratch, r.mayOwn = name, ownerToken, scratch, false
+	r.name, r.ownerToken, r.scratch, r.scratchID, r.mayOwn = name, ownerToken, scratch, scratchID, false
 	r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return r.refuseBeforeAdmission(err)
@@ -315,7 +358,7 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	process := &process{runtime: r, attached: attached, invocation: invocation, identity: job.RuntimeIdentity{
 		Provider: "podman-cli", Generation: generation, ImageReference: invocation.Prepared.Result.Plan.World.Base,
 		ImageDigest: imageDigest, Before: before,
-	}, done: make(chan error, 1), clientDone: make(chan struct{})}
+	}, done: make(chan error, 1), clientDone: make(chan struct{}), finalizeDone: make(chan struct{})}
 	r.mu.Lock()
 	r.mounts, r.process = mounts, process
 	r.mu.Unlock()
@@ -329,7 +372,7 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 func (r *Runtime) refuseBeforeAdmission(cause error) (job.Process, error) {
 	r.mu.Lock()
 	scratch, snapshots := r.scratch, r.readOnlySnapshots
-	r.name, r.ownerToken, r.scratch, r.helperSource = "", "", "", ""
+	r.name, r.ownerToken, r.scratch, r.helperSource, r.scratchID = "", "", "", "", FilesystemIdentity{}
 	r.mu.Unlock()
 	if scratch != "" {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -369,22 +412,50 @@ func (r *Runtime) proveOwned(ctx context.Context) (backend.Evidence, error) {
 func (r *Runtime) admittedFailure(invocation job.Invocation, cause error) (job.Process, error) {
 	done := make(chan struct{})
 	close(done)
-	process := &process{runtime: r, invocation: invocation, waited: true, waitErr: cause, clientDone: done}
+	process := &process{runtime: r, invocation: invocation, waited: true, waitErr: cause, clientDone: done, finalizeDone: make(chan struct{})}
 	r.mu.Lock()
 	r.process = process
 	r.mu.Unlock()
 	return process, cause
 }
 
-func (r *Runtime) Cleanup(ctx context.Context, _ job.Invocation) jobcontract.CleanupResult {
+func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcontract.CleanupResult {
 	started := time.Now()
 	r.mu.Lock()
-	name, containerID, ownerToken, scratch, mayOwn, process := r.name, r.containerID, r.ownerToken, r.scratch, r.mayOwn, r.process
+	name, containerID, ownerToken, scratch, scratchID, helperSource, mayOwn, process := r.name, r.containerID, r.ownerToken, r.scratch, r.scratchID, r.helperSource, r.mayOwn, r.process
 	readOnlySnapshots := r.readOnlySnapshots
-	artifactRoots := append([]*os.Root{}, r.artifactRoots...)
+	mountFacts := append([]jobcontract.RuntimeMountObservation{}, r.mountFacts...)
+	mounts := append([]backend.Mount{}, r.mounts...)
 	forced := r.forced
 	r.mu.Unlock()
 	reasons := []string{}
+	if process != nil {
+		if err := process.JoinFinalization(ctx); err != nil {
+			return jobcontract.CleanupResult{
+				Status:            "incomplete",
+				ContainerAbsent:   false,
+				ProxyAbsent:       true,
+				ProcessGroupEmpty: false,
+				DurationNS:        int64(time.Since(started)),
+				Reasons:           []string{"FINALIZATION_WORKER_PRESENT", "SCRATCH_RETAINED_FOR_ACTIVE_FINALIZATION"},
+			}
+		}
+	}
+	r.mu.Lock()
+	artifactRoots := append([]*os.Root{}, r.artifactRoots...)
+	r.artifactRoots = nil
+	r.mu.Unlock()
+	workspaceBindings, workspaceBindingsDigest, workspaceAuthorityErr := workspaceCleanupAuthority(scratch, mountFacts, mounts)
+	workspaceAuthorityErr = errors.Join(workspaceAuthorityErr, verifyMountFacts(ctx, mountFacts, mounts))
+	workspaceAuthorityFileDigest := ""
+	workspaceNamespaceClean := len(workspaceBindings) == 0
+	if workspaceAuthorityErr == nil && len(workspaceBindings) != 0 {
+		workspaceAuthorityFileDigest, workspaceAuthorityErr = persistWorkspaceCleanupAuthority(
+			scratch, containerID, ownerToken, invocation.Prepared.Result.PlanDigest,
+			invocation.Prepared.Result.DeclarationDigest, scratchID,
+			workspaceBindings, workspaceBindingsDigest,
+		)
+	}
 	if process != nil && process.attached != nil && !process.finished() {
 		forced = true
 		if err := process.attached.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
@@ -427,8 +498,27 @@ func (r *Runtime) Cleanup(ctx context.Context, _ job.Invocation) jobcontract.Cle
 			evidence, inspectErr := r.Podman.Inspect(ctx, containerID)
 			if inspectErr != nil || containerID == "" || evidence.ID != containerID || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
 				reasons = append(reasons, "CONTAINER_OWNERSHIP_UNPROVED")
-			} else if err := r.Podman.Destroy(ctx, containerID); err != nil {
-				reasons = append(reasons, "CONTAINER_REMOVE_FAILED")
+			} else {
+				if evidence.Running {
+					if err := r.Podman.StopWithin(ctx, containerID, 1); err != nil {
+						reasons = append(reasons, "CONTAINER_STOP_FAILED")
+					}
+					evidence, inspectErr = r.Podman.Inspect(ctx, containerID)
+				}
+				if inspectErr != nil || evidence.Running || evidence.ID != containerID || evidence.Name == "" || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
+					reasons = append(reasons, "STOPPED_CONTAINER_OWNERSHIP_UNPROVED")
+				} else {
+					observedBindings, observedErr := observedWorkspaceCleanupBindings(scratch, evidence.Mounts)
+					if workspaceAuthorityErr == nil && (observedErr != nil || len(observedBindings) != len(workspaceBindings) || workspaceCleanupDigest(observedBindings) != workspaceBindingsDigest) {
+						workspaceAuthorityErr = errors.New("stopped container workspace authority changed")
+					}
+					proof, proofErr := r.Podman.Inspect(ctx, containerID)
+					if proofErr != nil || proof.Running || proof.ID != containerID || proof.Name != evidence.Name || proof.Labels["io.kenogram.job-owner"] != ownerToken {
+						reasons = append(reasons, "CONTAINER_OWNERSHIP_UNPROVED")
+					} else if err := r.Podman.Destroy(ctx, containerID); err != nil {
+						reasons = append(reasons, "CONTAINER_REMOVE_FAILED")
+					}
+				}
 			}
 		}
 	}
@@ -448,15 +538,31 @@ func (r *Runtime) Cleanup(ctx context.Context, _ job.Invocation) jobcontract.Cle
 		reasons = append(reasons, "CONTAINER_ABSENCE_UNPROVED")
 		containerAbsent = false
 	}
-	if scratch != "" && containerAbsent {
+	if containerAbsent && len(workspaceBindings) != 0 {
+		if workspaceAuthorityErr != nil || PrepareWorkspaceRemovalAfterContainer(
+			ctx, r.Podman, helperSource, containerID, ownerToken,
+			invocation.Prepared.Result.PlanDigest, invocation.Prepared.Result.DeclarationDigest,
+			scratch, scratchID, workspaceAuthorityFileDigest,
+		) != nil {
+			reasons = append(reasons, "WORKSPACE_NAMESPACE_CLEANUP_FAILED")
+		} else {
+			workspaceNamespaceClean = true
+		}
+	}
+	if scratch != "" && containerAbsent && workspaceNamespaceClean {
 		if err := prepareReadOnlySnapshotsRemoval(ctx, readOnlySnapshots); err != nil {
 			reasons = append(reasons, "READ_ONLY_SNAPSHOT_PERMISSION_RESTORE_FAILED")
 		}
 		if err := os.RemoveAll(scratch); err != nil {
 			reasons = append(reasons, "SCRATCH_REMOVE_FAILED")
 		}
-	} else if scratch != "" {
+		if _, err := os.Lstat(scratch); !os.IsNotExist(err) {
+			reasons = append(reasons, "SCRATCH_ABSENCE_UNPROVED")
+		}
+	} else if scratch != "" && !containerAbsent {
 		reasons = append(reasons, "SCRATCH_RETAINED_FOR_UNPROVED_CONTAINER")
+	} else if scratch != "" {
+		reasons = append(reasons, "SCRATCH_RETAINED_FOR_NAMESPACE_CLEANUP")
 	}
 	status := "complete"
 	if len(reasons) != 0 || !containerAbsent {
@@ -476,6 +582,258 @@ func prepareReadOnlySnapshotsRemoval(ctx context.Context, snapshots map[string]r
 	return result
 }
 
+func workspaceCleanupAuthority(scratch string, facts []jobcontract.RuntimeMountObservation, mounts []backend.Mount) ([]workspaceCleanupBinding, string, error) {
+	bindings := []workspaceCleanupBinding{}
+	layout := worldfs.For(scratch, "ephemeral")
+	for _, fact := range facts {
+		if fact.Role != "workspace" {
+			continue
+		}
+		if fact.Mode != "rw" || fact.FileType != "directory" || fact.PermissionPolicy != jobcontract.RuntimeWorkspacePermissionPolicy || fact.Device == 0 || fact.Inode == 0 {
+			return nil, "", fmt.Errorf("workspace %q lacks portable cleanup authority", fact.Target)
+		}
+		source := ""
+		for _, mount := range mounts {
+			if mount.Target == fact.Target && mount.Mode == "rw" {
+				if source != "" {
+					return nil, "", fmt.Errorf("workspace %q has duplicate runtime sources", fact.Target)
+				}
+				source = mount.Source
+			}
+		}
+		if source == "" || source != layout.WorkspacePath(fact.Target) {
+			return nil, "", fmt.Errorf("workspace %q source is not Kenogram-owned", fact.Target)
+		}
+		bindings = append(bindings, workspaceCleanupBinding{Target: fact.Target, Source: source, Device: fact.Device, Inode: fact.Inode})
+	}
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].Target < bindings[j].Target })
+	return bindings, workspaceCleanupDigest(bindings), nil
+}
+
+func workspaceCleanupDigest(bindings []workspaceCleanupBinding) string {
+	hash := sha256.New()
+	for _, binding := range bindings {
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%d\x00%d\n", binding.Target, binding.Source, binding.Device, binding.Inode)
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+func persistWorkspaceCleanupAuthority(scratch, containerID, ownerToken, planDigest, declarationDigest string, scratchID FilesystemIdentity, bindings []workspaceCleanupBinding, bindingsDigest string) (string, error) {
+	if !containerIDPattern.MatchString(containerID) || !ownerTokenPattern.MatchString(ownerToken) ||
+		!rawDigestPattern.MatchString(planDigest) || !rawDigestPattern.MatchString(declarationDigest) ||
+		!filepath.IsAbs(scratch) || filepath.Clean(scratch) != scratch || scratchID.Device == 0 || scratchID.Inode == 0 ||
+		len(bindings) == 0 || len(bindings) > jobcontract.MaxRuntimeMounts || workspaceCleanupDigest(bindings) != bindingsDigest {
+		return "", errors.New("workspace cleanup authority record is invalid")
+	}
+	record := workspaceCleanupAuthorityRecord{
+		Schema: workspaceCleanupAuthoritySchema, ContainerID: containerID, OwnerToken: ownerToken,
+		PlanDigest: planDigest, DeclarationDigest: declarationDigest, Scratch: scratch,
+		ScratchDevice: scratchID.Device, ScratchInode: scratchID.Inode,
+		Bindings: append([]workspaceCleanupBinding{}, bindings...), BindingsDigest: bindingsDigest,
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		return "", err
+	}
+	raw = append(raw, '\n')
+	if len(raw) > maximumWorkspaceCleanupAuthorityBytes {
+		return "", errors.New("workspace cleanup authority record exceeds its bound")
+	}
+	path := filepath.Join(scratch, workspaceCleanupAuthorityName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		_, writeErr := file.Write(raw)
+		syncErr := file.Sync()
+		closeErr := file.Close()
+		if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+			return "", err
+		}
+	} else if errors.Is(err, os.ErrExist) {
+		info, statErr := os.Lstat(path)
+		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			return "", errors.Join(statErr, errors.New("workspace cleanup authority record is not a private regular file"))
+		}
+		existing, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(existing, raw) {
+			return "", errors.Join(readErr, errors.New("workspace cleanup authority record changed"))
+		}
+	} else {
+		return "", err
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return "", errors.Join(err, errors.New("workspace cleanup authority record is not a private regular file"))
+	}
+	hash := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(hash[:]), nil
+}
+
+// PrepareWorkspaceRemovalAfterContainer retries workspace cleanup only after
+// the immutable provider object is proved absent. The staged helper consumes a
+// create-only, scratch-private authority record rather than arbitrary paths.
+func PrepareWorkspaceRemovalAfterContainer(ctx context.Context, podman *backend.Podman, helperSource, containerID, ownerToken, planDigest, declarationDigest, scratch string, scratchID FilesystemIdentity, authorityFileDigest string) error {
+	if podman == nil || helperSource != filepath.Join(scratch, "job-exec") || !filepath.IsAbs(helperSource) || filepath.Clean(helperSource) != helperSource ||
+		!containerIDPattern.MatchString(containerID) || !ownerTokenPattern.MatchString(ownerToken) ||
+		!rawDigestPattern.MatchString(planDigest) || !rawDigestPattern.MatchString(declarationDigest) ||
+		!filepath.IsAbs(scratch) || filepath.Clean(scratch) != scratch || scratchID.Device == 0 || scratchID.Inode == 0 ||
+		!digestPattern.MatchString(authorityFileDigest) {
+		return errors.New("post-container workspace cleanup authority is invalid")
+	}
+	command := []string{
+		helperSource, "_job-clean-workspaces-after-container", containerID, ownerToken,
+		planDigest, declarationDigest, scratch,
+		fmt.Sprint(scratchID.Device), fmt.Sprint(scratchID.Inode), authorityFileDigest,
+	}
+	return podman.RunUnshare(ctx, command)
+}
+
+// CleanupWorkspaceContentsAfterContainer is the retryable namespace helper.
+// It proves immutable container absence, authenticates the exact persisted
+// binding inventory, and removes contents only through device/inode-bound
+// Kenogram workspace roots.
+func CleanupWorkspaceContentsAfterContainer(ctx context.Context, podman *backend.Podman, containerID, ownerToken, planDigest, declarationDigest, scratch string, scratchID FilesystemIdentity, authorityFileDigest string) error {
+	if podman == nil || !containerIDPattern.MatchString(containerID) || !ownerTokenPattern.MatchString(ownerToken) ||
+		!rawDigestPattern.MatchString(planDigest) || !rawDigestPattern.MatchString(declarationDigest) ||
+		!filepath.IsAbs(scratch) || filepath.Clean(scratch) != scratch || scratchID.Device == 0 || scratchID.Inode == 0 ||
+		!digestPattern.MatchString(authorityFileDigest) {
+		return errors.New("post-container workspace cleanup authority is invalid")
+	}
+	exists, err := podman.ExistsID(ctx, containerID)
+	if err != nil || exists {
+		return errors.Join(err, errors.New("container absence is unproved before workspace cleanup retry"))
+	}
+	observedScratch, err := filesystemIdentityAt(scratch)
+	if err != nil || observedScratch != scratchID {
+		return errors.New("workspace cleanup scratch identity changed")
+	}
+	record, err := readWorkspaceCleanupAuthority(scratch, authorityFileDigest)
+	if err != nil || record.ContainerID != containerID || record.OwnerToken != ownerToken || record.PlanDigest != planDigest ||
+		record.DeclarationDigest != declarationDigest || record.Scratch != scratch || record.ScratchDevice != scratchID.Device || record.ScratchInode != scratchID.Inode {
+		return errors.Join(err, errors.New("workspace cleanup authority record disagrees"))
+	}
+	for _, binding := range record.Bindings {
+		if err := clearWorkspaceContents(ctx, binding); err != nil {
+			return fmt.Errorf("clear workspace %q: %w", binding.Target, err)
+		}
+	}
+	return nil
+}
+
+func readWorkspaceCleanupAuthority(scratch, expectedDigest string) (workspaceCleanupAuthorityRecord, error) {
+	root, err := os.OpenRoot(scratch)
+	if err != nil {
+		return workspaceCleanupAuthorityRecord{}, err
+	}
+	defer root.Close()
+	file, err := root.Open(workspaceCleanupAuthorityName)
+	if err != nil {
+		return workspaceCleanupAuthorityRecord{}, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() < 1 || info.Size() > maximumWorkspaceCleanupAuthorityBytes {
+		return workspaceCleanupAuthorityRecord{}, errors.Join(err, errors.New("workspace cleanup authority record is not a bounded private regular file"))
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maximumWorkspaceCleanupAuthorityBytes+1))
+	if err != nil || len(raw) > maximumWorkspaceCleanupAuthorityBytes {
+		return workspaceCleanupAuthorityRecord{}, errors.Join(err, errors.New("workspace cleanup authority record is unreadable or oversized"))
+	}
+	hash := sha256.Sum256(raw)
+	if "sha256:"+hex.EncodeToString(hash[:]) != expectedDigest {
+		return workspaceCleanupAuthorityRecord{}, errors.New("workspace cleanup authority record digest changed")
+	}
+	if err := jobcontract.ValidateJSONDocument(raw, maximumWorkspaceCleanupAuthorityBytes); err != nil {
+		return workspaceCleanupAuthorityRecord{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var record workspaceCleanupAuthorityRecord
+	if err := decoder.Decode(&record); err != nil {
+		return workspaceCleanupAuthorityRecord{}, err
+	}
+	if record.Schema != workspaceCleanupAuthoritySchema || len(record.Bindings) == 0 || len(record.Bindings) > jobcontract.MaxRuntimeMounts ||
+		!digestPattern.MatchString(record.BindingsDigest) || workspaceCleanupDigest(record.Bindings) != record.BindingsDigest {
+		return workspaceCleanupAuthorityRecord{}, errors.New("workspace cleanup authority record structure is invalid")
+	}
+	layout := worldfs.For(scratch, "ephemeral")
+	for index, binding := range record.Bindings {
+		if binding.Target == "" || !filepath.IsAbs(binding.Target) || filepath.Clean(binding.Target) != binding.Target ||
+			binding.Source != layout.WorkspacePath(binding.Target) || binding.Device == 0 || binding.Inode == 0 ||
+			(index > 0 && record.Bindings[index-1].Target >= binding.Target) {
+			return workspaceCleanupAuthorityRecord{}, errors.New("workspace cleanup authority binding is invalid")
+		}
+	}
+	return record, nil
+}
+
+func observedWorkspaceCleanupBindings(scratch string, mounts []backend.EvidenceMount) ([]workspaceCleanupBinding, error) {
+	layout := worldfs.For(scratch, "ephemeral")
+	parent := layout.Workspace + string(os.PathSeparator)
+	bindings := []workspaceCleanupBinding{}
+	seen := map[string]struct{}{}
+	for _, mount := range mounts {
+		clean := filepath.Clean(mount.Source)
+		if clean != mount.Source || !strings.HasPrefix(clean, parent) {
+			continue
+		}
+		if _, duplicate := seen[mount.Destination]; duplicate || !mount.RW || clean != layout.WorkspacePath(mount.Destination) || !mountHasCleanupOptions(mount) {
+			return nil, errors.New("workspace cleanup mount is ambiguous or not Kenogram-owned")
+		}
+		identity, err := filesystemIdentityAt(clean)
+		if err != nil {
+			return nil, err
+		}
+		seen[mount.Destination] = struct{}{}
+		bindings = append(bindings, workspaceCleanupBinding{Target: mount.Destination, Source: clean, Device: identity.Device, Inode: identity.Inode})
+	}
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].Target < bindings[j].Target })
+	return bindings, nil
+}
+
+func mountHasCleanupOptions(mount backend.EvidenceMount) bool {
+	options := append([]string{}, mount.Options...)
+	options = append(options, strings.Split(mount.Mode, ",")...)
+	wanted := map[string]bool{"rw": false, "nodev": false, "nosuid": false}
+	for _, option := range options {
+		if _, ok := wanted[strings.ToLower(strings.TrimSpace(option))]; ok {
+			wanted[strings.ToLower(strings.TrimSpace(option))] = true
+		}
+	}
+	return wanted["rw"] && wanted["nodev"] && wanted["nosuid"]
+}
+
+func clearWorkspaceContents(ctx context.Context, binding workspaceCleanupBinding) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	identity, err := filesystemIdentityAt(binding.Source)
+	if err != nil || identity != (FilesystemIdentity{Device: binding.Device, Inode: binding.Inode}) {
+		return errors.New("workspace root identity changed")
+	}
+	root, err := os.OpenRoot(binding.Source)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	entries, err := fs.ReadDir(root.FS(), ".")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := root.RemoveAll(entry.Name()); err != nil {
+			return err
+		}
+	}
+	remaining, err := fs.ReadDir(root.FS(), ".")
+	if err != nil || len(remaining) != 0 {
+		return errors.Join(err, errors.New("workspace root is not empty after cleanup"))
+	}
+	return nil
+}
+
 type process struct {
 	runtime    *Runtime
 	attached   attachedProcess
@@ -488,6 +846,60 @@ type process struct {
 	waited            bool
 	waitErr           error
 	lifecycleObserved bool
+	finalizeStarted   bool
+	finalizeRunning   bool
+	finalizeComplete  bool
+	finalizeDone      chan struct{}
+}
+
+func (p *process) BeginFinalization() {
+	p.mu.Lock()
+	if p.finalizeDone == nil {
+		p.finalizeDone = make(chan struct{})
+	}
+	p.finalizeStarted = true
+	p.mu.Unlock()
+}
+
+func (p *process) JoinFinalization(ctx context.Context) error {
+	p.mu.Lock()
+	started, done := p.finalizeStarted, p.finalizeDone
+	p.mu.Unlock()
+	if !started {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *process) enterFinalization() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.finalizeStarted = true
+	if p.finalizeDone == nil {
+		p.finalizeDone = make(chan struct{})
+	}
+	if p.finalizeRunning || p.finalizeComplete {
+		return errors.New("runtime finalization is already active or complete")
+	}
+	p.finalizeRunning = true
+	return nil
+}
+
+func (p *process) finishFinalization() {
+	p.mu.Lock()
+	p.finalizeRunning, p.finalizeComplete = false, true
+	close(p.finalizeDone)
+	p.mu.Unlock()
 }
 
 func (p *process) Identity(ctx context.Context) (job.RuntimeIdentity, error) {
@@ -560,6 +972,10 @@ func (p *process) finished() bool {
 }
 
 func (p *process) Finalize(ctx context.Context) (job.RuntimeFinalization, error) {
+	if err := p.enterFinalization(); err != nil {
+		return job.RuntimeFinalization{}, err
+	}
+	defer p.finishFinalization()
 	if !p.finished() {
 		return job.RuntimeFinalization{}, errors.New("target terminal observation is absent")
 	}
@@ -687,10 +1103,16 @@ func (p *process) extractArtifacts(ctx context.Context) ([]job.Artifact, error) 
 		return nil, nil
 	}
 	destination := filepath.Join(p.runtime.scratch, "artifacts")
+	binding, err := artifactMountBinding(request.ContainerRoot, p.runtime.mountFacts, p.runtime.scratch)
+	if err != nil {
+		return nil, err
+	}
 	command := []string{
 		p.runtime.helperSource, "_job-collect", p.runtime.containerID, p.runtime.name,
 		p.runtime.ownerToken, request.ContainerRoot, destination,
 		fmt.Sprint(request.MaxEntries), fmt.Sprint(request.MaxBytes),
+		binding.Role, binding.Target, binding.Scratch,
+		fmt.Sprint(binding.Device), fmt.Sprint(binding.Inode),
 	}
 	if err := p.runtime.Podman.RunUnshare(ctx, command); err != nil {
 		return nil, err
@@ -751,19 +1173,69 @@ func (p *process) extractArtifacts(ctx context.Context) ([]job.Artifact, error) 
 	return artifacts, nil
 }
 
+func artifactMountBinding(containerRoot string, facts []jobcontract.RuntimeMountObservation, scratch string) (ArtifactMountBinding, error) {
+	selected := jobcontract.RuntimeMountObservation{}
+	for _, fact := range facts {
+		if !containerPathWithin(containerRoot, fact.Target) || len(fact.Target) <= len(selected.Target) {
+			continue
+		}
+		selected = fact
+	}
+	if selected.Target == "" {
+		return ArtifactMountBinding{Role: "rootfs"}, nil
+	}
+	if selected.FileType != "directory" {
+		return ArtifactMountBinding{}, errors.New("target artifact root resolves through a non-directory mount")
+	}
+	binding := ArtifactMountBinding{Role: selected.Role, Target: selected.Target, Device: selected.Device, Inode: selected.Inode}
+	if selected.Role == "workspace" {
+		binding.Scratch = scratch
+	}
+	return binding, nil
+}
+
+func containerPathWithin(path, root string) bool {
+	return path == root || root == "/" || strings.HasPrefix(path, root+"/")
+}
+
 // CollectArtifacts is the narrow helper entered under `podman unshare`. It
 // re-proves the stopped container identity, mounts its root only inside the
 // provider user namespace, copies a bounded regular-file tree, and unmounts it.
-func CollectArtifacts(ctx context.Context, podman *backend.Podman, containerID, name, ownerToken, containerRoot, destination string, maximumEntries, maximumBytes int64) (retErr error) {
+func CollectArtifacts(ctx context.Context, podman *backend.Podman, containerID, name, ownerToken, containerRoot, destination string, maximumEntries, maximumBytes int64, binding ArtifactMountBinding) (retErr error) {
 	if podman == nil || name == "" || !containerIDPattern.MatchString(containerID) || !ownerTokenPattern.MatchString(ownerToken) ||
 		!filepath.IsAbs(containerRoot) || filepath.Clean(containerRoot) != containerRoot ||
 		!filepath.IsAbs(destination) || filepath.Clean(destination) != destination ||
-		maximumEntries < 1 || maximumEntries > 10_000 || maximumBytes < 1 || maximumBytes > 1<<30 {
+		maximumEntries < 1 || maximumEntries > 10_000 || maximumBytes < 1 || maximumBytes > 1<<30 ||
+		!validArtifactMountBinding(binding) {
 		return errors.New("artifact collector authority is invalid")
 	}
 	evidence, err := podman.Inspect(ctx, containerID)
-	if err != nil || evidence.Running || evidence.ID != containerID || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
+	if err != nil || evidence.Running || evidence.ID != containerID || evidence.Name != name || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
 		return errors.New("stopped artifact source identity is unproved")
+	}
+	mount, matched, err := resolveArtifactMount(evidence.Mounts, containerRoot)
+	if err != nil {
+		return err
+	}
+	if matched {
+		if binding.Role == "rootfs" || binding.Target != mount.Destination || (binding.Role != "declared" && binding.Role != "workspace") {
+			return errors.New("artifact mount authority disagrees with the inspected runtime")
+		}
+		if binding.Role == "workspace" && mount.Source != worldfs.For(binding.Scratch, "ephemeral").WorkspacePath(binding.Target) {
+			return errors.New("artifact workspace source is not Kenogram-owned")
+		}
+		identity, identityErr := filesystemIdentityAt(mount.Source)
+		if identityErr != nil || identity != (FilesystemIdentity{Device: binding.Device, Inode: binding.Inode}) {
+			return errors.New("artifact mount source identity changed")
+		}
+		relative := strings.TrimPrefix(containerRoot, mount.Destination)
+		if relative == "" {
+			relative = "/"
+		}
+		return collectArtifactTreeFromMountedRoot(ctx, mount.Source, relative, destination, maximumEntries, maximumBytes)
+	}
+	if binding.Role != "rootfs" {
+		return errors.New("artifact mount authority is absent from the inspected runtime")
 	}
 	mounted, err := podman.MountRoot(ctx, containerID)
 	if err != nil {
@@ -782,6 +1254,35 @@ func CollectArtifacts(ctx context.Context, podman *backend.Podman, containerID, 
 		retErr = errors.Join(retErr, podman.Unmount(unmountCtx, containerID))
 	}()
 	return collectArtifactTreeFromMountedRoot(ctx, mounted, containerRoot, destination, maximumEntries, maximumBytes)
+}
+
+func validArtifactMountBinding(binding ArtifactMountBinding) bool {
+	if binding.Role == "rootfs" {
+		return binding.Target == "" && binding.Scratch == "" && binding.Device == 0 && binding.Inode == 0
+	}
+	if (binding.Role != "declared" && binding.Role != "workspace") || !filepath.IsAbs(binding.Target) || filepath.Clean(binding.Target) != binding.Target || binding.Device == 0 || binding.Inode == 0 {
+		return false
+	}
+	if binding.Role == "workspace" {
+		return filepath.IsAbs(binding.Scratch) && filepath.Clean(binding.Scratch) == binding.Scratch
+	}
+	return binding.Scratch == ""
+}
+
+func resolveArtifactMount(mounts []backend.EvidenceMount, containerRoot string) (backend.EvidenceMount, bool, error) {
+	selected := backend.EvidenceMount{}
+	for _, mount := range mounts {
+		if !containerPathWithin(containerRoot, mount.Destination) {
+			continue
+		}
+		if len(mount.Destination) == len(selected.Destination) && selected.Destination != "" {
+			return backend.EvidenceMount{}, false, errors.New("artifact root has ambiguous runtime mount authority")
+		}
+		if len(mount.Destination) > len(selected.Destination) {
+			selected = mount
+		}
+	}
+	return selected, selected.Destination != "", nil
 }
 
 func collectArtifactTreeFromMountedRoot(ctx context.Context, mounted, containerRoot, destination string, maximumEntries, maximumBytes int64) error {
@@ -1343,6 +1844,18 @@ func captureSourceFact(ctx context.Context, source, authoritySource, target, mod
 		return jobcontract.RuntimeMountObservation{}, err
 	}
 	return jobcontract.RuntimeMountObservation{Role: role, AuthoritySource: authoritySource, PermissionPolicy: permissionPolicy, Source: semanticSource, Target: target, Mode: mode, Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: fileType, SHA256: digest, IdentityVerified: true}, nil
+}
+
+func filesystemIdentityAt(path string) (FilesystemIdentity, error) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return FilesystemIdentity{}, errors.New("filesystem identity is not a non-symlink directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Dev == 0 || stat.Ino == 0 {
+		return FilesystemIdentity{}, errors.New("filesystem device and inode are unavailable")
+	}
+	return FilesystemIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}, nil
 }
 
 func boundedSourceContentDigest(ctx context.Context, source string, info fs.FileInfo) (string, error) {

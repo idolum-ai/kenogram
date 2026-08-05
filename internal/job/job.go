@@ -31,7 +31,9 @@ type Runtime interface {
 type Process interface {
 	Identity(context.Context) (RuntimeIdentity, error)
 	Wait(context.Context) (jobcontract.TargetResult, error)
+	BeginFinalization()
 	Finalize(context.Context) (RuntimeFinalization, error)
+	JoinFinalization(context.Context) error
 }
 
 type Invocation struct {
@@ -315,7 +317,12 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 	cleanupStarted := time.Now()
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), time.Duration(request.Limits.FinalizeNS))
 	var cleanupErr error
-	result.Cleanup, cleanupErr = cleanupRuntimeBounded(cleanupCtx, e.Runtime, invocation)
+	if process != nil {
+		cleanupErr = process.JoinFinalization(cleanupCtx)
+	}
+	if cleanupErr == nil {
+		result.Cleanup, cleanupErr = cleanupRuntimeBounded(cleanupCtx, e.Runtime, invocation)
+	}
 	cancelCleanup()
 	cleanupDone = true
 	result.Cleanup.DurationNS = boundedDuration(time.Since(cleanupStarted))
@@ -472,6 +479,7 @@ type finalizationObservation struct {
 }
 
 func finalizeProcessBounded(ctx context.Context, process Process) (RuntimeFinalization, error) {
+	process.BeginFinalization()
 	result := make(chan finalizationObservation, 1)
 	go func() {
 		final, err := process.Finalize(ctx)

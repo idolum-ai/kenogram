@@ -189,6 +189,15 @@ and duplicate bounds, writes them beneath `target-artifacts/`, and publishes a
 `target-inventory.json` binding the requested container root and every artifact
 digest. Unrequested runtime artifacts make the result incomplete.
 
+The Podman collector freshly re-proves the exact stopped container and resolves
+the requested container root against the longest matching runtime mount target.
+For a matched bind, it requires the source device and inode retained before
+target admission; a workspace source must additionally equal Kenogram's
+deterministic private workspace projection. It descriptor-opens that source
+inside `podman unshare`. With no matching bind it uses the stopped storage root.
+Symlink traversal and ambiguous mount boundaries fail closed. Collection never
+changes a declared mount source.
+
 The runtime evidence digest is SHA-256 over the length-prefixed exact
 `runtime-before.json` and `runtime-after.json` byte strings. The manifest
 content root is SHA-256 over its sorted entries encoded one per line as:
@@ -310,6 +319,23 @@ precreated regular file, not a writable directory. Offline verification requires
 helper and lifecycle mounts to be files, workspace mounts to be directories,
 and each declared mount type to equal the type retained in the plan. The
 admitted and retained runtime inventories share the same 512-mount bound.
+
+Before cleanup mutates descriptors, processes, provider objects, or the private
+scratch, the core joins the required finalization lifecycle. An unjoined
+Finalize worker makes cleanup incomplete and leaves its authority intact.
+Cleanup then freshly proves the exact stopped container, owner label,
+plan/declaration labels, private scratch identity, and complete workspace mount
+inventory. It writes the sorted target/source/device/inode bindings to a
+create-only mode-`0600` authority record inside the unmounted scratch root. The
+container is re-proved, destroyed by immutable ID, and proved absent. Only then
+does the exact staged Kenogram helper enter `podman unshare`, prove that same ID
+absent, authenticate the authority record, and descriptor-remove immediate
+child names from those exact workspace roots. The helper accepts no arbitrary
+deletion source and never traverses or mutates a declared writable mount. A
+failed namespace pass retains the record and scratch so a later Cleanup call
+can retry after container absence. Provider namespace helpers run in a dedicated
+process group which is killed and joined at deadline. Cleanup is complete only
+after the scratch path is explicitly proved absent. No shell participates.
 Planning, content digests, copy staging, read-only snapshotting, and writable
 source inspection share one descriptor-rooted, cancellation-aware walker capped
 at 20,000 entries, 1 GiB, depth 128, and 4,096 relative-path bytes. Writable
