@@ -858,7 +858,7 @@ func observedWorkspaceCleanupBindings(scratch string, mounts []backend.EvidenceM
 		if clean != mount.Source || !strings.HasPrefix(clean, parent) {
 			continue
 		}
-		if _, duplicate := seen[mount.Destination]; duplicate || !mount.RW || clean != layout.WorkspacePath(mount.Destination) || !mountHasCleanupOptions(mount) {
+		if _, duplicate := seen[mount.Destination]; duplicate || !mount.RW || clean != layout.WorkspacePath(mount.Destination) || !mountHasCleanupHardeningOptions(mount) {
 			return nil, errors.New("workspace cleanup mount is ambiguous or not Kenogram-owned")
 		}
 		identity, err := filesystemIdentityAt(clean)
@@ -872,16 +872,20 @@ func observedWorkspaceCleanupBindings(scratch string, mounts []backend.EvidenceM
 	return bindings, nil
 }
 
-func mountHasCleanupOptions(mount backend.EvidenceMount) bool {
+func mountHasCleanupHardeningOptions(mount backend.EvidenceMount) bool {
 	options := append([]string{}, mount.Options...)
 	options = append(options, strings.Split(mount.Mode, ",")...)
-	wanted := map[string]bool{"rw": false, "nodev": false, "nosuid": false}
+	// Podman's inspect contract exposes read/write authority through RW. Some
+	// supported releases therefore omit the redundant "rw" token from Mode
+	// and Options. Keep RW as the fail-closed authority check above and use
+	// these textual fields only for the independently required hardening bits.
+	wanted := map[string]bool{"nodev": false, "nosuid": false}
 	for _, option := range options {
 		if _, ok := wanted[strings.ToLower(strings.TrimSpace(option))]; ok {
 			wanted[strings.ToLower(strings.TrimSpace(option))] = true
 		}
 	}
-	return wanted["rw"] && wanted["nodev"] && wanted["nosuid"]
+	return wanted["nodev"] && wanted["nosuid"]
 }
 
 func clearWorkspaceContents(ctx context.Context, binding workspaceCleanupBinding) error {

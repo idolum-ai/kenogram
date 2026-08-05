@@ -1871,6 +1871,63 @@ func TestWorkspaceNamespaceCleanupIsExactAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestObservedWorkspaceCleanupBindingsAcceptPodman49ReadWriteRepresentation(t *testing.T) {
+	scratch := t.TempDir()
+	layout := worldfs.For(scratch, "ephemeral")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := layout.EnsurePortableWritableWorkspace("/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := filesystemIdentityAt(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Podman 4.9 reports read/write authority in RW and may reserve Mode and
+	// Options for the remaining mount attributes instead of duplicating "rw".
+	bindings, err := observedWorkspaceCleanupBindings(scratch, []backend.EvidenceMount{{
+		Source: workspace, Destination: "/workspace", RW: true,
+		Mode: "", Options: []string{"rbind", "rprivate", "nodev", "nosuid"},
+	}})
+	if err != nil || len(bindings) != 1 || bindings[0].Target != "/workspace" || bindings[0].Source != workspace ||
+		bindings[0].Device != identity.Device || bindings[0].Inode != identity.Inode {
+		t.Fatalf("bindings=%#v error=%v", bindings, err)
+	}
+}
+
+func TestObservedWorkspaceCleanupBindingsRejectsMissingAuthorityOrHardening(t *testing.T) {
+	scratch := t.TempDir()
+	layout := worldfs.For(scratch, "ephemeral")
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := layout.EnsurePortableWritableWorkspace("/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		rw      bool
+		options []string
+	}{
+		{name: "read-only despite textual rw", rw: false, options: []string{"rw", "nodev", "nosuid"}},
+		{name: "missing nodev", rw: true, options: []string{"nosuid"}},
+		{name: "missing nosuid", rw: true, options: []string{"nodev"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bindings, err := observedWorkspaceCleanupBindings(scratch, []backend.EvidenceMount{{
+				Source: workspace, Destination: "/workspace", RW: test.rw, Options: test.options,
+			}})
+			if err == nil || bindings != nil {
+				t.Fatalf("bindings=%#v error=%v", bindings, err)
+			}
+		})
+	}
+}
+
 func TestWorkspaceNamespaceCleanupFailureIsRetained(t *testing.T) {
 	runtime, runner, attached, invocation := runtimeFixture(t)
 	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
