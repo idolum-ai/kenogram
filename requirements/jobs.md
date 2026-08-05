@@ -1,9 +1,10 @@
 # Governed job contract
 
-Status: binding pre-implementation contract. The schemas and independent Go
-semantic validators are implemented; `kenogram job` and `kenogram verify-job`
-are deliberately unavailable until the execution and evidence-publication
-boundary earns real-runtime proof.
+Status: implemented provider-independent core. The schemas, independent Go
+semantic validators, create-only publisher, bounded executor, and offline
+verifier are implemented. `kenogram verify-job` and `kenogram version --json`
+are active. `kenogram job` has its final CLI and runtime injection boundary but
+fails closed until K5 supplies a directly attached one-shot provider.
 
 A governed job is one noninteractive, bounded target execution inside a fresh
 Kenogram generation. It is distinct from the persistent-world service model.
@@ -54,8 +55,9 @@ failure. Exit 1 means a typed `refused` or `incomplete` result was sealed. Exit
 could be established and need not emit a job result. Diagnostics use stderr
 and are never part of the machine result.
 
-Until execution lands, all three command forms remain unavailable and no
-consumer may treat the existence of these schemas as execution evidence.
+The provider-independent core is not evidence that a real provider satisfies
+the contract. A consumer must require a sealed bundle produced through the K5
+adapter and must independently run `verify-job`.
 
 ## Request authority and bounds
 
@@ -98,7 +100,10 @@ target start ───────── target exit/signal
                                            └─ cleanup ─ proof of absence
 ```
 
-The target result is exactly one of `exited`, `signaled`, or `not_started`.
+The target result is exactly one of `exited`, `signaled`, `not_started`, or
+`unknown`. `unknown` means the target was admitted but its terminal outcome was
+not observed; it is always incomplete and never invents an exit status or
+signal. `not_started` is reserved for refusal before target admission.
 Observed targets carry wall-clock start and finish times plus a monotonic
 duration. Finalization has its own timestamps and duration. Cleanup is complete
 only when the owned container, proxy, and target process group are all observed
@@ -146,6 +151,20 @@ SHA-256. The manifest separately binds the request digest, result digest, and a
 canonical content-root digest. It is at most 8 MiB and contains no more than
 10,032 entries.
 
+When artifacts are requested, the runtime returns open-once readers and
+relative paths to the core. The core validates count, aggregate byte, path,
+and duplicate bounds, writes them beneath `target-artifacts/`, and publishes a
+`target-inventory.json` binding the requested container root and every artifact
+digest. Unrequested runtime artifacts make the result incomplete.
+
+The runtime evidence digest is SHA-256 over the length-prefixed exact
+`runtime-before.json` and `runtime-after.json` byte strings. The manifest
+content root is SHA-256 over its sorted entries encoded one per line as:
+
+```text
+path NUL kind NUL decimal-size NUL sha256-digest LF
+```
+
 `verify-job` is an offline verifier. It reopens only descriptor-owned regular
 files, recomputes every entry and content-root digest, validates all four
 documents, and cross-checks job/request/result/provenance identities. It never
@@ -155,3 +174,26 @@ host-observed facts.
 Ergograph and other consumers must independently parse and verify the retained
 bytes. They do not import Kenogram packages, and Kenogram does not import their
 model, ledger, qualification, or release code.
+
+## K5 direct-provider obligation
+
+K5 must implement the `job.Runtime` / `job.Process` interface without invoking
+the persistent `App.Up`/`Destroy` lifecycle. The adapter must prove:
+
+- a fresh bounded generation and immutable observed image digest;
+- attached target admission with stdout and stderr connected directly to the
+  core's bounded writers;
+- an error without a `Process` only before admission; after admission the
+  adapter must return a `Process` even when its first observation is malformed,
+  so the core never confuses an admitted target with `not_started`;
+- an observed terminal result, or `unknown` when that observation is lost;
+- runtime-before and runtime-after JSON from independent provider inspection;
+- open-once artifact readers after the target is terminal;
+- cancellation followed by bounded forced escalation; and
+- post-cleanup absence of the container, proxy, and target process group.
+
+The core treats every returned field as untrusted: malformed target, cleanup,
+runtime, artifact, or identity evidence is refused or downgraded. Linux CI must
+exercise the adapter against a real provider before `kenogram job` is described
+as operational. Apple handoff and a contained Docker-compatible endpoint remain
+separate later work and cannot be inferred from K5.

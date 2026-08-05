@@ -30,4 +30,9 @@ if rg -n 'github.com/idolum-ai/kenogram/internal/(app|backend|proxy|worldfs|hist
   exit 1
 fi
 
+if rg -n 'github.com/idolum-ai/kenogram/internal/(backend|proxy|worldfs|history|netns)' internal/job >/dev/null 2>&1; then
+  echo "provider-independent job core imports runtime or persistent-world implementation" >&2
+  exit 1
+fi
+
 echo "architecture check passed"

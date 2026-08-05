@@ -321,7 +321,7 @@ func TestUpRejectsInvalidUTF8WorkspaceBeforeWritingAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(workspace, string([]byte{0xff})), []byte("content"), 0o600); err != nil {
-		t.Fatal(err)
+		t.Skipf("filesystem rejects invalid UTF-8 names before Kenogram can observe them: %v", err)
 	}
 	runner := &runtimeRunner{}
 	a := &App{Backend: testBackend(runner), BaseDir: base, Out: &bytes.Buffer{}, Now: time.Now, Executable: "kenogram"}

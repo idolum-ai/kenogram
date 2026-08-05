@@ -25,7 +25,7 @@
       "then": {
         "properties": {
           "reasons": {"maxItems": 0},
-          "target": {"not": {"properties": {"kind": {"const": "not_started"}}, "required": ["kind"]}},
+          "target": {"not": {"properties": {"kind": {"enum": ["not_started", "unknown"]}}, "required": ["kind"]}},
           "stdout": {"properties": {"truncated": {"const": false}}},
           "stderr": {"properties": {"truncated": {"const": false}}},
           "cleanup": {"properties": {"status": {"const": "complete"}}}
@@ -102,6 +102,12 @@
           "additionalProperties": false,
           "required": ["kind"],
           "properties": {"kind": {"const": "not_started"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {"kind": {"const": "unknown"}}
         }
       ]
     },

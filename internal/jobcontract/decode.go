@@ -53,6 +53,13 @@ func ParseProvenance(raw []byte) (Provenance, error) {
 	return value, nil
 }
 
+// ValidateJSONDocument applies the common bounded, UTF-8, duplicate-key, and
+// trailing-data rules to an otherwise provider-owned JSON observation.
+func ValidateJSONDocument(raw []byte, maximum int) error {
+	var value any
+	return decode(raw, maximum, &value)
+}
+
 func decode(raw []byte, maximum int, target any) error {
 	if len(raw) == 0 {
 		return errors.New("document is empty")

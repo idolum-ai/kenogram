@@ -4,9 +4,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 rg -q 'Status: binding contract' requirements/declaration.md
 rg -q 'Evidence and known limits' requirements/INDEX.md
-rg -Fq 'Status: binding pre-implementation contract' requirements/jobs.md requirements/provenance.md
+rg -Fq 'Status: implemented provider-independent core' requirements/jobs.md
+rg -Fq 'Status: development provenance implemented' requirements/provenance.md
 rg -Fq 'kenogram job --request' requirements/jobs.md
-rg -Fq 'does not execute a job' requirements/INDEX.md
+rg -Fq 'K5 direct one-shot provider' requirements/INDEX.md
 for posture in 'Accepted for v0.x' 'Before stable' 'Experimental'; do
   rg -Fq "${posture}" requirements/INDEX.md
 done

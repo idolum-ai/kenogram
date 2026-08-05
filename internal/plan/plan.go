@@ -106,7 +106,10 @@ func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) 
 		NetworkAllow: make([]NetworkAllow, 0, len(d.Network.Allow)), Interfaces: make([]Interface, 0, len(d.Interfaces)), Services: make([]Service, 0, len(d.Services)),
 	}
 	for _, c := range d.Copies {
-		source := resolve(dir, c.Source)
+		source, err := decl.ResolveSource(dir, c.Source)
+		if err != nil {
+			return Result{}, err
+		}
 		digest, err := DigestSource(source)
 		if err != nil {
 			return Result{}, fmt.Errorf("digest copy source %s: %w", c.Source, err)
@@ -114,7 +117,11 @@ func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) 
 		p.Copies = append(p.Copies, Copy{Source: source, SourceDigest: digest, Target: filepath.Clean(c.Target), Mode: c.Mode, Secret: c.Secret})
 	}
 	for _, m := range d.Mounts {
-		p.Mounts = append(p.Mounts, Mount{Source: resolve(dir, m.Source), Target: filepath.Clean(m.Target), Mode: m.Mode})
+		source, err := decl.ResolveSource(dir, m.Source)
+		if err != nil {
+			return Result{}, err
+		}
+		p.Mounts = append(p.Mounts, Mount{Source: source, Target: filepath.Clean(m.Target), Mode: m.Mode})
 	}
 	for _, a := range d.Network.Allow {
 		p.NetworkAllow = append(p.NetworkAllow, NetworkAllow{Host: a.Host, Port: a.Port})
@@ -186,13 +193,6 @@ func DigestSource(root string) (string, error) {
 		hash.Write([]byte{'\n'})
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func resolve(dir, source string) string {
-	if filepath.IsAbs(source) {
-		return filepath.Clean(source)
-	}
-	return filepath.Clean(filepath.Join(dir, source))
 }
 
 // Canonical returns the fixed-field JSON encoding used for the plan fingerprint.

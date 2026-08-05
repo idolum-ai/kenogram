@@ -1,8 +1,8 @@
 # Executable provenance contract
 
-Status: binding pre-implementation contract. The closed document and semantic
-validator exist; `kenogram version --json` and release-manifest publication are
-reserved for the implementation that follows.
+Status: development provenance implemented. The closed document, semantic
+validator, exact executing-file digest, and `kenogram version --json` are live.
+Release-manifest publication and external attestation remain later work.
 
 `kenogram.executable-provenance.v1` is a bounded identity report for one exact
 Kenogram executable. It contains:

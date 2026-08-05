@@ -6,7 +6,7 @@ output_dir="${2:-dist}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 version="$("${script_dir}/validate-release-version.sh" "${version}")"
 
-for command in go git; do
+for command in go git gzip; do
   command -v "${command}" >/dev/null 2>&1 || { echo "required command not found: ${command}" >&2; exit 1; }
 done
 
@@ -22,7 +22,7 @@ command -v "${tar_bin}" >/dev/null 2>&1 || { echo "required command not found: $
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "${repo_root}"
-release_commit="${RELEASE_COMMIT:-$(git rev-parse --short=12 HEAD)}"
+release_commit="${RELEASE_COMMIT:-$(git rev-parse HEAD)}"
 release_date="${RELEASE_DATE:-$(git show -s --format=%cI HEAD)}"
 source_epoch="${SOURCE_DATE_EPOCH:-$(git show -s --format=%ct HEAD)}"
 output_dir="$(mkdir -p "${output_dir}" && cd "${output_dir}" && pwd)"
@@ -46,7 +46,7 @@ for target in "${targets[@]}"; do
   cp README.md LICENSE "${package_dir}/"
   rm -f "${output_dir}/${asset}"
   "${tar_bin}" --sort=name --mtime="@${source_epoch}" --owner=0 --group=0 --numeric-owner \
-    -czf "${output_dir}/${asset}" -C "${package_dir}" kenogram README.md LICENSE
+    -cf - -C "${package_dir}" kenogram README.md LICENSE | gzip -n > "${output_dir}/${asset}"
   assets+=("${asset}")
 done
 

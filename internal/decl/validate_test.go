@@ -184,3 +184,39 @@ func TestValidateRejectsSymlinkedSource(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestValidateRejectsSymlinkedIntermediateSource(t *testing.T) {
+	d, dir := validForValidation(t)
+	if err := os.Mkdir(filepath.Join(dir, "real"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "real", "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	d.Mounts[0].Source = "linked/file"
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestResolveSourceCanonicalizesTrustedDeclarationDirectory(t *testing.T) {
+	d, dir := validForValidation(t)
+	resolved, err := ResolveSource(dir, d.Mounts[0].Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(canonicalDir, d.Mounts[0].Source)
+	if resolved != want {
+		t.Fatalf("resolved source = %q, want %q", resolved, want)
+	}
+	if err := Validate(d, dir); err != nil {
+		t.Fatalf("trusted declaration-directory alias rejected: %v", err)
+	}
+}

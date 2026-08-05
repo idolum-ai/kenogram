@@ -39,7 +39,7 @@ evaluation but outside the supported Linux runtime promise.
 | Lifecycle | Durable rollback/commit transition, persisted-runtime 15-boundary SIGKILL recovery-only matrix, stopped-commit restart, terminal transition destruction, replay-safe service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Syscall-granular power-loss testing and exhaustive non-`up` action failpoints | Before stable |
 | History | Tamper/truncated-tail unit tests plus E2E tombstone outcomes | Power-loss testing on multiple filesystems | Before stable |
 | Experimental Apple transport | Canonical shell-inert argv envelope, explicit stdin/TTY flags, remote exit-status preservation, graceful signal forwarding, Darwin/arm64 cross-build, and native macOS launcher smoke test | Real Apple machine argv/TTY/signal proof, nested rootless Podman, and the full lifecycle/network matrix | Experimental |
-| Governed jobs | Closed bounded JSON Schemas, duplicate-key rejecting stdlib semantic validators, hostile fixtures, and non-Linux fail-closed namespace tests | Attached execution, create-only evidence publication, Linux differential proof, provider service, and Apple evidence handoff are intentionally absent | Experimental |
+| Governed jobs | Closed bounded schemas and validators; provider-independent deadline/stream/cleanup core; descriptor-owned create-only evidence; offline re-verifier; Darwin descriptor-safe filesystem support | K5 direct one-shot provider, Linux real-runtime differential proof, contained provider, and Apple evidence handoff remain absent | Experimental |
 | Executable provenance | Closed release/development identity schema and semantic placeholder rejection | Machine JSON output, full-SHA release packaging, canonical release manifest, and external attestation are intentionally absent | Experimental |
 
 ### Design evidence outside the binding contract
@@ -80,8 +80,8 @@ evaluation but outside the supported Linux runtime promise.
   rootless Podman `vfs` stores before pulling. Unmeasured `vfs` lanes require an
   explicit local floor; unit contracts use fake responses and capacity probes.
 - `make architecture` checks required files and package dependency direction.
-- `go test ./internal/jobcontract` proves the governed-job and executable-
-  provenance documents reject unknown, duplicate, oversized, imprecise, and
-  semantically contradictory input. It does not execute a job.
+- `go test ./internal/jobcontract ./internal/job` proves the governed-job and
+  executable-provenance documents plus hostile publication, cancellation,
+  artifact, and offline re-verification behavior.
 - `make stdlib-only` rejects third-party Go modules.
 - `make check` runs the fast local quality gate; runtime proofs remain separate.

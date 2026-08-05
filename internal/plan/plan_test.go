@@ -37,7 +37,11 @@ func TestBuildDigestSeparatesSemanticsFromProvenance(t *testing.T) {
 	if first.DeclarationDigest == second.DeclarationDigest {
 		t.Fatal("byte provenance digest did not change")
 	}
-	if first.Plan.Mounts[0].Source != filepath.Join(filepath.Dir(path), "repo") {
+	expectedSource, err := decl.ResolveSource(filepath.Dir(path), "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Plan.Mounts[0].Source != expectedSource {
 		t.Fatalf("source not resolved: %s", first.Plan.Mounts[0].Source)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -20,6 +21,8 @@ import (
 	"github.com/idolum-ai/kenogram/internal/app"
 	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/doctor"
+	"github.com/idolum-ai/kenogram/internal/job"
+	"github.com/idolum-ai/kenogram/internal/jobcontract"
 	"github.com/idolum-ai/kenogram/internal/naming"
 	"github.com/idolum-ai/kenogram/internal/netns"
 	"github.com/idolum-ai/kenogram/internal/plan"
@@ -47,8 +50,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return run(decoded, stdout, stderr)
 	}
 	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
-		fmt.Fprintln(stdout, version.String())
-		return 0
+		return runVersion(args[1:], stdout, stderr)
+	}
+	if args[0] == "verify-job" {
+		return runVerifyJob(args[1:], stdout, stderr)
 	}
 	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		printHelp(stdout)
@@ -56,16 +61,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := operationContext(context.Background())
 	defer stop()
-	launcher, err := backend.AppleMachineFromEnvironment(runtime.GOOS, os.Getenv, nil)
-	if err != nil {
-		fmt.Fprintln(stderr, "runtime:", err)
-		return 1
-	}
-	if launcher != nil {
-		if err := launcher.Launch(ctx, args); err != nil {
-			return reportLauncherError(err, stderr)
+	if !hostLocalInvocation(args) {
+		launcher, err := backend.AppleMachineFromEnvironment(runtime.GOOS, os.Getenv, nil)
+		if err != nil {
+			fmt.Fprintln(stderr, "runtime:", err)
+			return 1
 		}
-		return 0
+		if launcher != nil {
+			if err := launcher.Launch(ctx, args); err != nil {
+				return reportLauncherError(err, stderr)
+			}
+			return 0
+		}
 	}
 	switch args[0] {
 	case "_netns-listener":
@@ -100,11 +107,142 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runWorlds(args[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(ctx, args[1:], stdout, stderr)
+	case "job":
+		return runJob(ctx, args[1:], stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "unknown command:", args[0])
 		printHelp(stderr)
 		return 2
 	}
+}
+
+// hostLocalInvocation keeps planning, help, and syntax errors available on a
+// Darwin workstation without implying that runtime mutations execute there.
+func hostLocalInvocation(args []string) bool {
+	if len(args) < 1 {
+		return true
+	}
+	if len(args) > 1 && helpRequested(args[1:]) {
+		return true
+	}
+	switch args[0] {
+	case "up":
+		for _, argument := range args[1:] {
+			if argument == "--yes" {
+				return false
+			}
+		}
+		return true
+	case "status":
+		return len(args) < 2 || (len(args) == 2 && naming.World(args[1]) != nil)
+	case "enter":
+		return len(args) < 2
+	case "worlds":
+		return len(args) > 1
+	case "down":
+		for _, argument := range args[1:] {
+			if argument == "--yes" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var governedJobRuntime func() job.Runtime
+
+func runVersion(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stdout, version.String())
+		return 0
+	}
+	if len(args) != 1 || args[0] != "--json" {
+		fmt.Fprintln(stderr, "usage: kenogram version [--json]")
+		return 2
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(stderr, "version:", err)
+		return 1
+	}
+	provenance, _, err := job.Provenance(executable, job.BuildIdentity{Version: version.Version, Commit: version.Commit, SourceDate: version.Date})
+	if err != nil {
+		fmt.Fprintln(stderr, "version:", err)
+		return 1
+	}
+	return encode(stdout, stderr, provenance)
+}
+
+func runVerifyJob(args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram verify-job --evidence-dir DIRECTORY"
+	fs := flag.NewFlagSet("verify-job", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprintln(stderr, usage) }
+	evidenceDir := fs.String("evidence-dir", "", "sealed job evidence directory")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || *evidenceDir == "" {
+		fs.Usage()
+		return 2
+	}
+	verification, err := job.Verify(*evidenceDir)
+	if err != nil {
+		fmt.Fprintln(stderr, "verify-job:", err)
+		return 1
+	}
+	return encode(stdout, stderr, verification)
+}
+
+func runJob(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	const usage = "usage: kenogram job --request REQUEST.json --evidence-dir NEW_DIRECTORY"
+	fs := flag.NewFlagSet("job", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { fmt.Fprintln(stderr, usage) }
+	requestPath := fs.String("request", "", "job request JSON")
+	evidenceDir := fs.String("evidence-dir", "", "new evidence directory")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || *requestPath == "" || *evidenceDir == "" {
+		fs.Usage()
+		return 2
+	}
+	requestRaw, err := os.ReadFile(*requestPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "job:", err)
+		return 2
+	}
+	if _, err := jobcontract.ParseRequest(requestRaw); err != nil {
+		fmt.Fprintln(stderr, "job:", err)
+		return 2
+	}
+	if !filepath.IsAbs(*evidenceDir) || filepath.Clean(*evidenceDir) != *evidenceDir {
+		fmt.Fprintln(stderr, "job: evidence directory must be an absolute clean path")
+		return 2
+	}
+	if governedJobRuntime == nil {
+		fmt.Fprintln(stderr, "job: governed runtime provider is not configured")
+		return 1
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(stderr, "job:", err)
+		return 1
+	}
+	executor := job.Executor{Runtime: governedJobRuntime(), Executable: executable, Build: job.BuildIdentity{Version: version.Version, Commit: version.Commit, SourceDate: version.Date}}
+	outcome, err := executor.Run(ctx, requestRaw, *evidenceDir)
+	if err != nil {
+		fmt.Fprintln(stderr, "job:", err)
+		return 2
+	}
+	if code := encode(stdout, stderr, outcome.Result); code != 0 {
+		return code
+	}
+	if outcome.Result.Status == "complete" {
+		return 0
+	}
+	return 1
 }
 
 const (
@@ -1094,7 +1232,9 @@ func printHelp(w io.Writer) {
   kenogram repair-history --yes <world>
   kenogram worlds [--json]
   kenogram doctor [--json]
-  kenogram version
+  kenogram job --request REQUEST.json --evidence-dir NEW_DIRECTORY
+  kenogram verify-job --evidence-dir DIRECTORY
+  kenogram version [--json]
   kenogram help
 `)
 }

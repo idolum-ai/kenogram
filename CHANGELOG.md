@@ -4,10 +4,13 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
-- Reserve a bounded noninteractive governed-job and executable-provenance
-  contract with closed schemas, strict standard-library validators, explicit
-  pre-implementation status, and native non-Linux namespace refusals; no job
-  execution command or release claim is added yet.
+- Implement the provider-independent governed-job core: closed schemas,
+  create-only evidence, bounded execution/finalization/cleanup, artifact
+  inventories, executable provenance, offline re-verification, and final CLI
+  injection points. A direct one-shot provider and release claim remain later
+  work. Raise the module API floor to Go 1.25 for the standard-library
+  descriptor-owned `os.Root` boundary used on macOS and for evidence paths;
+  the pinned build toolchain remains Go 1.26.5.
 - Add a proof-only semantic reference for transactional cutover readiness,
   including bounded provider actions, rollback, pre-commit process death,
   inherited egress, and acknowledgement-only compatibility without adding a

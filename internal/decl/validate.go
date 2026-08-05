@@ -65,7 +65,11 @@ func Validate(d Declaration, declarationDir string) error {
 			return fmt.Errorf("copies[%d].target %q overlaps a reserved path", i, c.Target)
 		}
 		if c.Secret {
-			if err := validateSecretSource(resolveSource(declarationDir, c.Source)); err != nil {
+			resolved, err := ResolveSource(declarationDir, c.Source)
+			if err != nil {
+				return fmt.Errorf("copies[%d].source: %w", i, err)
+			}
+			if err := validateSecretSource(resolved); err != nil {
 				return fmt.Errorf("copies[%d].source: %w", i, err)
 			}
 		}
@@ -142,17 +146,28 @@ func Validate(d Declaration, declarationDir string) error {
 	return nil
 }
 
-func resolveSource(dir, source string) string {
+// ResolveSource returns the canonical host path used by validation and plans.
+// For a relative source, the declaration directory is the trusted anchor: its
+// platform aliases (for example macOS /var -> /private/var) are resolved before
+// source components are inspected without following symlinks.
+func ResolveSource(dir, source string) (string, error) {
 	if filepath.IsAbs(source) {
-		return filepath.Clean(source)
+		return canonicalPlatformPath(filepath.Clean(source)), nil
 	}
-	return filepath.Join(dir, source)
+	canonicalDir, err := filepath.EvalSymlinks(filepath.Clean(dir))
+	if err != nil {
+		return "", fmt.Errorf("resolve declaration directory: %w", err)
+	}
+	return filepath.Clean(filepath.Join(canonicalDir, source)), nil
 }
 func sourceExists(dir, source string) error {
 	if source == "" {
 		return fmt.Errorf("source must not be empty")
 	}
-	resolved := resolveSource(dir, source)
+	resolved, err := ResolveSource(dir, source)
+	if err != nil {
+		return fmt.Errorf("source %q: %w", source, err)
+	}
 	info, err := os.Lstat(resolved)
 	if err != nil {
 		return fmt.Errorf("source %q: %w", source, err)
@@ -167,7 +182,7 @@ func sourceExists(dir, source string) error {
 	if err != nil {
 		return fmt.Errorf("source %q: %w", source, err)
 	}
-	if evaluated != filepath.Clean(resolved) {
+	if evaluated != canonicalPlatformPath(filepath.Clean(resolved)) {
 		return fmt.Errorf("source %q contains a symlink; symlinked host sources are not accepted", source)
 	}
 	return nil

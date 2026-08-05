@@ -120,7 +120,7 @@ func ValidateResult(value Result) error {
 	}
 	switch value.Status {
 	case "complete":
-		if len(value.Reasons) != 0 || value.Target.Kind == "not_started" || value.Stdout.Truncated || value.Stderr.Truncated || value.Cleanup.Status != "complete" {
+		if len(value.Reasons) != 0 || value.Target.Kind == "not_started" || value.Target.Kind == "unknown" || value.Stdout.Truncated || value.Stderr.Truncated || value.Cleanup.Status != "complete" {
 			return errors.New("complete job result carries incomplete evidence")
 		}
 	case "incomplete":
@@ -151,7 +151,7 @@ func validateExecutionIdentity(value ExecutionIdentity, complete bool) error {
 }
 
 func validateTarget(value TargetResult) error {
-	if !slices.Contains([]string{"exited", "signaled", "not_started"}, value.Kind) {
+	if !slices.Contains([]string{"exited", "signaled", "not_started", "unknown"}, value.Kind) {
 		return errors.New("target result kind is invalid")
 	}
 	switch value.Kind {
@@ -163,9 +163,9 @@ func validateTarget(value TargetResult) error {
 		if value.Signal == nil || *value.Signal < 1 || *value.Signal > 64 || value.ExitStatus != nil {
 			return errors.New("signaled target result has invalid signal or status")
 		}
-	case "not_started":
+	case "not_started", "unknown":
 		if value.ExitStatus != nil || value.Signal != nil || value.StartedAt != "" || value.FinishedAt != "" || value.DurationNS != nil {
-			return errors.New("not_started target result invents lifecycle evidence")
+			return fmt.Errorf("%s target result invents lifecycle evidence", value.Kind)
 		}
 		return nil
 	}
@@ -174,6 +174,10 @@ func validateTarget(value TargetResult) error {
 	}
 	return validateInterval(value.StartedAt, value.FinishedAt, *value.DurationNS)
 }
+
+// ValidateTargetResult validates a runtime observation before a producer
+// incorporates it into a signed-off result envelope.
+func ValidateTargetResult(value TargetResult) error { return validateTarget(value) }
 
 func validateStream(value StreamResult, expectedPath string) error {
 	if value.Path != expectedPath || !validDigest(value.SHA256) || value.CapturedBytes < 0 || value.TotalBytes < 0 ||
@@ -197,6 +201,10 @@ func validateCleanup(value CleanupResult) error {
 	}
 	return nil
 }
+
+// ValidateCleanupResult validates cleanup proof without trusting the provider
+// that reported it.
+func ValidateCleanupResult(value CleanupResult) error { return validateCleanup(value) }
 
 func ValidateManifest(value Manifest) error {
 	if value.Schema != ManifestSchema || !validID(value.JobID) || !validDigest(value.RequestSHA256) ||
@@ -230,6 +238,7 @@ func ValidateManifest(value Manifest) error {
 		"declaration.toml": "declaration", "plan.json": "plan", "provenance.json": "provenance",
 		"request.json": "request", "result.json": "result", "runtime-after.json": "runtime",
 		"runtime-before.json": "runtime", "stderr.bin": "stderr", "stdout.bin": "stdout",
+		"target-inventory.json": "target_inventory",
 	}
 	for _, entry := range value.Entries {
 		if expected, fixed := expectedKinds[entry.Path]; fixed && entry.Kind != expected {
@@ -288,6 +297,15 @@ func validContainerPath(value string) bool {
 func validEvidencePath(value string) bool {
 	return validOpaqueText(value, 1, maximumPathBytes) && !strings.HasPrefix(value, "/") && path.Clean(value) == value && value != "." &&
 		value != "manifest.json" && !strings.HasPrefix(value, "../") && !strings.Contains(value, "/../") && !hasDisplayControls(value)
+}
+
+// ValidateEvidenceRelativePath applies the normative retained-path boundary to
+// provider-supplied target artifact names.
+func ValidateEvidenceRelativePath(value string) error {
+	if !validEvidencePath(value) {
+		return errors.New("evidence-relative path is invalid")
+	}
+	return nil
 }
 
 func hasDisplayControls(value string) bool {
