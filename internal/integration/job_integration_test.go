@@ -33,9 +33,9 @@ func TestGovernedJobDirectPodmanEvidence(t *testing.T) {
 	}
 	imageTag := "localhost/kenogram-job-integration:" + fmt.Sprint(time.Now().UnixNano())
 	run(t, tmp, nil, "podman", "build", "-t", imageTag, "-f", containerfile, ".")
-	imageID := strings.TrimSpace(run(t, tmp, nil, "podman", "image", "inspect", "--format", "{{.Id}}", imageTag))
-	if !strings.HasPrefix(imageID, "sha256:") || len(imageID) != len("sha256:")+64 {
-		t.Fatalf("image identity=%q", imageID)
+	imageID, err := canonicalPodmanImageID(strings.TrimSpace(run(t, tmp, nil, "podman", "image", "inspect", "--format", "{{.Id}}", imageTag)))
+	if err != nil {
+		t.Fatalf("image identity: %v", err)
 	}
 	bin := filepath.Join(tmp, "kenogram")
 	run(t, root, buildEnv, "go", "build", "-buildvcs=false", "-o", bin, "./cmd/kenogram")
