@@ -2,6 +2,7 @@ package plan
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,6 +122,17 @@ func TestRenderDoesNotReadOrPrintSourceContents(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), result.Plan.Copies[0].SourceDigest) {
 		t.Fatal("JSON exposed secret digest")
+	}
+	var retained Result
+	if err := json.Unmarshal(encoded, &retained); err != nil {
+		t.Fatal(err)
+	}
+	_, evidenceDigest, err := EvidenceCanonical(retained.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.EvidenceDigest != evidenceDigest || retained.EvidenceDigest == result.PlanDigest {
+		t.Fatalf("retained evidence digest=%q operational digest=%q recomputed=%q", retained.EvidenceDigest, result.PlanDigest, evidenceDigest)
 	}
 }
 

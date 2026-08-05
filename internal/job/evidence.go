@@ -1,6 +1,7 @@
 package job
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -11,13 +12,14 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/idolum-ai/kenogram/internal/jobcontract"
 )
 
 type evidenceWriter struct {
-	path      string
 	root      *os.Root
 	entries   []jobcontract.ManifestEntry
 	afterSync func(string) error
@@ -47,7 +49,18 @@ func createEvidence(path string, afterSync func(string) error) (*evidenceWriter,
 		root.Close()
 		return nil, fmt.Errorf("evidence directory identity changed during creation")
 	}
-	return &evidenceWriter{path: path, root: root, afterSync: afterSync}, nil
+	parentDirectory, err := parentRoot.Open(".")
+	if err != nil {
+		root.Close()
+		return nil, err
+	}
+	syncErr := parentDirectory.Sync()
+	closeErr := parentDirectory.Close()
+	if syncErr != nil || closeErr != nil {
+		root.Close()
+		return nil, errors.Join(syncErr, closeErr)
+	}
+	return &evidenceWriter{root: root, afterSync: afterSync}, nil
 }
 
 func (w *evidenceWriter) Close() error { return w.root.Close() }
@@ -82,12 +95,20 @@ func (w *evidenceWriter) Stream(name, kind string, maximum int64) (*capture, err
 	return &capture{owner: w, file: file, name: name, kind: kind, maximum: maximum, hash: sha256.New()}, nil
 }
 
-func (w *evidenceWriter) WriteArtifacts(request jobcontract.ArtifactRequest, artifacts []Artifact) (artifactInventory, error) {
+func (w *evidenceWriter) WriteArtifacts(ctx context.Context, request jobcontract.ArtifactRequest, artifacts []Artifact) (inventory artifactInventory, retErr error) {
 	if int64(len(artifacts)) > request.MaxEntries {
 		return artifactInventory{}, fmt.Errorf("artifact inventory exceeds %d entries", request.MaxEntries)
 	}
+	entryStart := len(w.entries)
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		w.entries = w.entries[:entryStart]
+		_ = w.root.RemoveAll("target-artifacts")
+	}()
 	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].Path < artifacts[j].Path })
-	inventory := artifactInventory{Schema: "kenogram.target-artifact-inventory.v1", Root: request.ContainerRoot, Entries: []artifactInventoryEntry{}}
+	inventory = artifactInventory{Schema: "kenogram.target-artifact-inventory.v1", Root: request.ContainerRoot, Entries: []artifactInventoryEntry{}}
 	prior := ""
 	var total int64
 	for _, artifact := range artifacts {
@@ -95,7 +116,7 @@ func (w *evidenceWriter) WriteArtifacts(request jobcontract.ArtifactRequest, art
 			return artifactInventory{}, fmt.Errorf("artifact path %q is invalid, duplicated, or unordered", artifact.Path)
 		}
 		prior = artifact.Path
-		reader, err := artifact.Open()
+		reader, err := openArtifact(ctx, artifact.Open)
 		if err != nil {
 			return artifactInventory{}, err
 		}
@@ -111,8 +132,8 @@ func (w *evidenceWriter) WriteArtifacts(request jobcontract.ArtifactRequest, art
 		}
 		hash := sha256.New()
 		remaining := request.MaxBytes - total
-		written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(reader, remaining+1))
-		closeReadErr := reader.Close()
+		written, copyErr := copyArtifact(ctx, io.MultiWriter(file, hash), reader, remaining+1)
+		closeReadErr := closeArtifact(ctx, reader)
 		syncErr := file.Sync()
 		closeWriteErr := file.Close()
 		if copyErr != nil || closeReadErr != nil || syncErr != nil || closeWriteErr != nil {
@@ -129,6 +150,62 @@ func (w *evidenceWriter) WriteArtifacts(request jobcontract.ArtifactRequest, art
 	return inventory, nil
 }
 
+type artifactOpenResult struct {
+	reader io.ReadCloser
+	err    error
+}
+
+func openArtifact(ctx context.Context, open func() (io.ReadCloser, error)) (io.ReadCloser, error) {
+	result := make(chan artifactOpenResult, 1)
+	go func() {
+		reader, err := open()
+		result <- artifactOpenResult{reader: reader, err: err}
+	}()
+	select {
+	case observed := <-result:
+		return observed.reader, observed.err
+	case <-ctx.Done():
+		go func() {
+			observed := <-result
+			if observed.reader != nil {
+				_ = observed.reader.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
+}
+
+type artifactCopyResult struct {
+	written int64
+	err     error
+}
+
+func copyArtifact(ctx context.Context, destination io.Writer, source io.ReadCloser, maximum int64) (int64, error) {
+	result := make(chan artifactCopyResult, 1)
+	go func() {
+		written, err := io.Copy(destination, io.LimitReader(source, maximum))
+		result <- artifactCopyResult{written: written, err: err}
+	}()
+	select {
+	case observed := <-result:
+		return observed.written, observed.err
+	case <-ctx.Done():
+		go source.Close()
+		return 0, ctx.Err()
+	}
+}
+
+func closeArtifact(ctx context.Context, source io.Closer) error {
+	result := make(chan error, 1)
+	go func() { result <- source.Close() }()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (w *evidenceWriter) Seal(jobID, requestDigest, resultDigest string, at time.Time) (jobcontract.Manifest, error) {
 	sort.Slice(w.entries, func(i, j int) bool { return w.entries[i].Path < w.entries[j].Path })
 	manifest := jobcontract.Manifest{
@@ -143,6 +220,9 @@ func (w *evidenceWriter) Seal(jobID, requestDigest, resultDigest string, at time
 	if _, err := jobcontract.ParseManifest(raw); err != nil {
 		return manifest, fmt.Errorf("validate produced manifest: %w", err)
 	}
+	if err := w.syncDirectories(); err != nil {
+		return manifest, err
+	}
 	file, err := w.root.OpenFile("manifest.json", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return manifest, err
@@ -151,10 +231,25 @@ func (w *evidenceWriter) Seal(jobID, requestDigest, resultDigest string, at time
 		file.Close()
 		return manifest, err
 	}
+	if w.afterSync != nil {
+		if err := w.afterSync("manifest.json"); err != nil {
+			file.Close()
+			return manifest, err
+		}
+	}
+	published, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return manifest, err
+	}
 	if err := file.Close(); err != nil {
 		return manifest, err
 	}
-	directory, err := os.Open(w.path)
+	lookup, err := w.root.Lstat("manifest.json")
+	if err != nil || !lookup.Mode().IsRegular() || !os.SameFile(published, lookup) || lookup.Size() != int64(len(raw)) {
+		return manifest, errors.New("published manifest identity changed before directory sync")
+	}
+	directory, err := w.root.Open(".")
 	if err != nil {
 		return manifest, err
 	}
@@ -166,7 +261,46 @@ func (w *evidenceWriter) Seal(jobID, requestDigest, resultDigest string, at time
 	return manifest, closeErr
 }
 
+func (w *evidenceWriter) syncDirectories() error {
+	directories := map[string]struct{}{".": {}}
+	for _, entry := range w.entries {
+		for directory := path.Dir(entry.Path); directory != "."; directory = path.Dir(directory) {
+			directories[directory] = struct{}{}
+		}
+	}
+	ordered := make([]string, 0, len(directories))
+	for directory := range directories {
+		ordered = append(ordered, directory)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		left, right := strings.Count(ordered[i], "/"), strings.Count(ordered[j], "/")
+		if left != right {
+			return left > right
+		}
+		return ordered[i] > ordered[j]
+	})
+	for _, name := range ordered {
+		directory, err := w.root.Open(name)
+		if err != nil {
+			return err
+		}
+		info, statErr := directory.Stat()
+		lookup, lookupErr := w.root.Lstat(name)
+		syncErr := directory.Sync()
+		closeErr := directory.Close()
+		var identityErr error
+		if statErr == nil && lookupErr == nil && (!info.IsDir() || !lookup.IsDir() || lookup.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, lookup)) {
+			identityErr = errors.New("evidence directory identity changed before sync")
+		}
+		if err := errors.Join(statErr, lookupErr, syncErr, closeErr, identityErr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type capture struct {
+	mu      sync.Mutex
 	owner   *evidenceWriter
 	file    *os.File
 	name    string
@@ -179,6 +313,11 @@ type capture struct {
 }
 
 func (c *capture) Write(raw []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return 0, os.ErrClosed
+	}
 	original := len(raw)
 	if int64(original) > jobcontract.MaximumWireInteger-c.total {
 		return 0, errorsNew("stream byte count exceeds JSON wire integer")
@@ -207,6 +346,8 @@ func (c *capture) Write(raw []byte) (int, error) {
 }
 
 func (c *capture) CloseResult() (jobcontract.StreamResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.closed {
 		return jobcontract.StreamResult{}, errorsNew("stream already closed")
 	}

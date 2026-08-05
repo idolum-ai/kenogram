@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -34,7 +35,7 @@ func Verify(evidenceDir string) (Verification, error) {
 		return Verification{}, err
 	}
 	defer root.Close()
-	manifestRaw, err := readRegular(root, "manifest.json", jobcontract.MaximumManifestBytes)
+	manifestRaw, err := readRegular(root, "manifest.json", int64(jobcontract.MaximumManifestBytes))
 	if err != nil {
 		return Verification{}, fmt.Errorf("read seal: %w", err)
 	}
@@ -42,32 +43,51 @@ func Verify(evidenceDir string) (Verification, error) {
 	if err != nil {
 		return Verification{}, err
 	}
-	observed := map[string][]byte{}
-	for _, entry := range manifest.Entries {
-		if entry.Kind == "target_artifact" {
-			if err := verifyRegularDigest(root, entry); err != nil {
-				return Verification{}, err
-			}
-			continue
-		}
-		raw, err := readRegular(root, entry.Path, maximumEvidenceEntry(entry))
-		if err != nil {
-			return Verification{}, err
-		}
-		if int64(len(raw)) != entry.Size || digest(raw) != entry.SHA256 {
-			return Verification{}, fmt.Errorf("evidence entry %s has changed", entry.Path)
-		}
-		observed[entry.Path] = raw
-	}
 	if contentDigest(manifest.Entries) != manifest.ContentSHA256 {
 		return Verification{}, errors.New("manifest content root mismatch")
+	}
+	entries, artifacts, err := classifyManifest(manifest)
+	if err != nil {
+		return Verification{}, err
 	}
 	if err := verifyClosedInventory(root, manifest); err != nil {
 		return Verification{}, err
 	}
-	request, err := jobcontract.ParseRequest(observed["request.json"])
+	requestRaw, err := readSealedEntry(root, entries["request.json"], int64(jobcontract.MaximumRequestBytes))
 	if err != nil {
 		return Verification{}, err
+	}
+	request, err := jobcontract.ParseRequest(requestRaw)
+	if err != nil {
+		return Verification{}, err
+	}
+	if err := validateArtifactManifestAuthority(request, entries, artifacts); err != nil {
+		return Verification{}, err
+	}
+	limits := map[string]int64{
+		"declaration.toml":    int64(jobcontract.MaximumRequestBytes),
+		"plan.json":           int64(jobcontract.MaximumManifestBytes),
+		"provenance.json":     int64(jobcontract.MaximumProvenanceBytes),
+		"request.json":        int64(jobcontract.MaximumRequestBytes),
+		"result.json":         int64(jobcontract.MaximumResultBytes),
+		"runtime-before.json": int64(jobcontract.MaximumManifestBytes),
+		"runtime-after.json":  int64(jobcontract.MaximumManifestBytes),
+		"stdout.bin":          request.Limits.StdoutMaxBytes,
+		"stderr.bin":          request.Limits.StderrMaxBytes,
+	}
+	if request.Artifacts != nil {
+		limits["target-inventory.json"] = int64(jobcontract.MaximumManifestBytes)
+	}
+	observed := map[string][]byte{"request.json": requestRaw}
+	for name, maximum := range limits {
+		if name == "request.json" {
+			continue
+		}
+		raw, err := readSealedEntry(root, entries[name], maximum)
+		if err != nil {
+			return Verification{}, err
+		}
+		observed[name] = raw
 	}
 	result, err := jobcontract.ParseResult(observed["result.json"])
 	if err != nil {
@@ -94,8 +114,25 @@ func Verify(evidenceDir string) (Verification, error) {
 	if err := json.Unmarshal(observed["plan.json"], &retainedPlan); err != nil {
 		return Verification{}, err
 	}
-	if planDigest != prefixedDigest(retainedPlan.PlanDigest) || result.Identity.PlanSHA256 != planDigest {
+	if planDigest != prefixedDigest(retainedPlan.EvidenceDigest) || result.Identity.PlanSHA256 != planDigest {
 		return Verification{}, errors.New("plan identity mismatch")
+	}
+	if retainedPlan.DeclarationDigest != strings.TrimPrefix(request.Declaration.SHA256, "sha256:") {
+		return Verification{}, errors.New("retained plan declaration identity mismatch")
+	}
+	if err := validateSecretEnvironment(request, retainedPlan); err != nil {
+		return Verification{}, err
+	}
+	if result.Identity.ImageReference != retainedPlan.Plan.World.Base {
+		return Verification{}, errors.New("result image reference disagrees with retained plan")
+	}
+	if index := strings.LastIndex(retainedPlan.Plan.World.Base, "@sha256:"); index >= 0 && result.Identity.ImageDigest != "" && result.Identity.ImageDigest != retainedPlan.Plan.World.Base[index+1:] {
+		if result.Status == "complete" {
+			return Verification{}, errors.New("complete result carries a mismatched observed image digest")
+		}
+		if !slices.Contains(result.Reasons, "RUNTIME_START_OBSERVATION_FAILED") {
+			return Verification{}, errors.New("image digest mismatch lacks runtime observation failure")
+		}
 	}
 	if digest(observed["provenance.json"]) != result.Identity.ProvenanceSHA256 || provenance.ExecutableSHA256 == "" {
 		return Verification{}, errors.New("provenance identity mismatch")
@@ -106,11 +143,104 @@ func Verify(evidenceDir string) (Verification, error) {
 	if err := verifyArtifacts(request, manifest, observed); err != nil {
 		return Verification{}, err
 	}
+	if request.Artifacts != nil {
+		for _, entry := range artifacts {
+			if err := verifyRegularDigest(root, entry, request.Artifacts.MaxBytes); err != nil {
+				return Verification{}, err
+			}
+		}
+	}
 	if digest(observed["stdout.bin"]) != result.Stdout.SHA256 || int64(len(observed["stdout.bin"])) != result.Stdout.CapturedBytes ||
 		digest(observed["stderr.bin"]) != result.Stderr.SHA256 || int64(len(observed["stderr.bin"])) != result.Stderr.CapturedBytes {
 		return Verification{}, errors.New("stream evidence mismatch")
 	}
 	return Verification{Schema: "kenogram.job-verification.v1", JobID: manifest.JobID, Status: result.Status, Entries: len(manifest.Entries)}, nil
+}
+
+type evidenceKindBound struct {
+	kind string
+}
+
+var mandatoryEvidenceKinds = map[string]evidenceKindBound{
+	"declaration.toml":    {kind: "declaration"},
+	"plan.json":           {kind: "plan"},
+	"provenance.json":     {kind: "provenance"},
+	"request.json":        {kind: "request"},
+	"result.json":         {kind: "result"},
+	"runtime-before.json": {kind: "runtime"},
+	"runtime-after.json":  {kind: "runtime"},
+	"stdout.bin":          {kind: "stdout"},
+	"stderr.bin":          {kind: "stderr"},
+}
+
+func classifyManifest(manifest jobcontract.Manifest) (map[string]jobcontract.ManifestEntry, []jobcontract.ManifestEntry, error) {
+	entries := make(map[string]jobcontract.ManifestEntry, len(manifest.Entries))
+	artifacts := []jobcontract.ManifestEntry{}
+	for _, entry := range manifest.Entries {
+		if specification, ok := mandatoryEvidenceKinds[entry.Path]; ok {
+			if entry.Kind != specification.kind {
+				return nil, nil, fmt.Errorf("evidence entry %s has kind %q, want %q", entry.Path, entry.Kind, specification.kind)
+			}
+			entries[entry.Path] = entry
+			continue
+		}
+		if entry.Path == "target-inventory.json" {
+			if entry.Kind != "target_inventory" {
+				return nil, nil, errors.New("target artifact inventory kind is invalid")
+			}
+			entries[entry.Path] = entry
+			continue
+		}
+		if strings.HasPrefix(entry.Path, "target-artifacts/") && entry.Kind == "target_artifact" {
+			artifacts = append(artifacts, entry)
+			continue
+		}
+		return nil, nil, fmt.Errorf("evidence entry %s has an unknown path or kind", entry.Path)
+	}
+	for path := range mandatoryEvidenceKinds {
+		if _, ok := entries[path]; !ok {
+			return nil, nil, fmt.Errorf("mandatory evidence entry %s is absent", path)
+		}
+	}
+	return entries, artifacts, nil
+}
+
+func validateArtifactManifestAuthority(request jobcontract.Request, entries map[string]jobcontract.ManifestEntry, artifacts []jobcontract.ManifestEntry) error {
+	_, hasInventory := entries["target-inventory.json"]
+	if request.Artifacts == nil {
+		if hasInventory || len(artifacts) != 0 {
+			return errors.New("unrequested target artifact evidence is present")
+		}
+		return nil
+	}
+	if !hasInventory {
+		return errors.New("requested target artifact inventory is absent")
+	}
+	if int64(len(artifacts)) > request.Artifacts.MaxEntries {
+		return errors.New("target artifact manifest exceeds requested entry bound")
+	}
+	var total int64
+	for _, entry := range artifacts {
+		if entry.Size < 0 || entry.Size > request.Artifacts.MaxBytes-total {
+			return errors.New("target artifact manifest exceeds requested byte bound")
+		}
+		total += entry.Size
+	}
+	return nil
+}
+
+func readSealedEntry(root *os.Root, entry jobcontract.ManifestEntry, maximum int64) ([]byte, error) {
+	if maximum < 0 || entry.Size < 0 || entry.Size > maximum {
+		return nil, fmt.Errorf("evidence entry %s exceeds its semantic bound", entry.Path)
+	}
+	raw, err := readRegular(root, entry.Path, maximum)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) != entry.Size || digest(raw) != entry.SHA256 {
+		return nil, fmt.Errorf("evidence entry %s has changed", entry.Path)
+	}
+	return raw, nil
 }
 
 func verifyArtifacts(request jobcontract.Request, manifest jobcontract.Manifest, observed map[string][]byte) error {
@@ -158,7 +288,10 @@ func verifyArtifacts(request jobcontract.Request, manifest jobcontract.Manifest,
 	return nil
 }
 
-func verifyRegularDigest(root *os.Root, entry jobcontract.ManifestEntry) error {
+func verifyRegularDigest(root *os.Root, entry jobcontract.ManifestEntry, maximum int64) error {
+	if entry.Size < 0 || entry.Size > maximum {
+		return fmt.Errorf("target artifact %s exceeds its semantic bound", entry.Path)
+	}
 	info, err := root.Lstat(entry.Path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() != entry.Size {
 		return fmt.Errorf("target artifact %s is absent, changed, or not regular", entry.Path)
@@ -185,15 +318,7 @@ func verifyRegularDigest(root *os.Root, entry jobcontract.ManifestEntry) error {
 	return nil
 }
 
-func maximumEvidenceEntry(entry jobcontract.ManifestEntry) int {
-	maximum := entry.Size
-	if maximum > int64(^uint(0)>>1) {
-		return int(^uint(0) >> 1)
-	}
-	return int(maximum)
-}
-
-func readRegular(root *os.Root, name string, maximum int) ([]byte, error) {
+func readRegular(root *os.Root, name string, maximum int64) ([]byte, error) {
 	info, err := root.Lstat(name)
 	if err != nil {
 		return nil, err
@@ -201,7 +326,7 @@ func readRegular(root *os.Root, name string, maximum int) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("evidence entry %s is not a regular file", name)
 	}
-	if info.Size() < 0 || info.Size() > int64(maximum) {
+	if maximum < 0 || info.Size() < 0 || info.Size() > maximum {
 		return nil, fmt.Errorf("evidence entry %s exceeds its bound", name)
 	}
 	file, err := root.Open(name)
@@ -213,11 +338,11 @@ func readRegular(root *os.Root, name string, maximum int) ([]byte, error) {
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
 		return nil, fmt.Errorf("evidence entry %s changed during open", name)
 	}
-	raw, err := io.ReadAll(io.LimitReader(file, int64(maximum)+1))
+	raw, err := io.ReadAll(io.LimitReader(file, maximum+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) > maximum {
+	if int64(len(raw)) > maximum {
 		return nil, fmt.Errorf("evidence entry %s exceeds its bound", name)
 	}
 	after, err := file.Stat()
@@ -238,12 +363,18 @@ func verifyClosedInventory(root *os.Root, manifest jobcontract.Manifest) error {
 		}
 	}
 	observed := []string{}
+	visited := 0
+	maximumVisited := len(expected) + len(expectedDirectories)
 	err := fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if path == "." {
 			return nil
+		}
+		visited++
+		if visited > maximumVisited {
+			return errors.New("evidence inventory traversal exceeds sealed bounds")
 		}
 		if entry.IsDir() {
 			if !expectedDirectories[path] {

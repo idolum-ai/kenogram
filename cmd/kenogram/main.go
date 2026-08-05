@@ -234,6 +234,9 @@ func runJob(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	outcome, err := executor.Run(ctx, requestRaw, *evidenceDir)
 	if err != nil {
 		fmt.Fprintln(stderr, "job:", err)
+		if job.IsPostIdentityError(err) {
+			return 1
+		}
 		return 2
 	}
 	if code := encode(stdout, stderr, outcome.Result); code != 0 {

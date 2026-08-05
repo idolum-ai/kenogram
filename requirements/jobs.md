@@ -59,6 +59,13 @@ The provider-independent core is not evidence that a real provider satisfies
 the contract. A consumer must require a sealed bundle produced through the K5
 adapter and must independently run `verify-job`.
 
+The core wraps admission, terminal observation, finalization, artifact opens
+and reads, and cleanup in caller-owned deadlines. A provider that ignores its
+context cannot make the caller wait without bound or produce a complete result.
+Cleanup is deferred immediately before provider admission and is therefore not
+skipped by later publication or artifact failures; a late admission response
+also triggers a bounded cleanup attempt.
+
 ## Request authority and bounds
 
 The caller supplies a request no larger than 1 MiB. It contains:
@@ -83,6 +90,11 @@ request, plan, result, output metadata, or provenance.
 Target-owned stdout, stderr, and artifacts can disclose bytes available to the
 target; retaining those outputs is an explicit caller decision, not a claim
 that Kenogram can stop a target from printing its own secrets.
+
+Every `secret_file` must match exactly one copy target whose declaration marks
+it `secret = true`. The retained plan replaces that copy's source digest with
+`<redacted>` and binds the projection through `evidence_digest`; secret bytes
+and their content digests are not needed by the offline verifier.
 
 The request never inherits ambient command, environment, timeout, output, or
 artifact authority. A consumer may refuse a request it cannot implement; it
@@ -170,6 +182,22 @@ files, recomputes every entry and content-root digest, validates all four
 documents, and cross-checks job/request/result/provenance identities. It never
 starts a target, contacts a provider, or upgrades runtime-reported fields to
 host-observed facts.
+
+The verifier never adopts a manifest entry size or kind as allocation or work
+authority. It classifies the fixed inventory first, parses `request.json` under
+its schema byte bound, and only then applies fixed document limits and the
+request's stdout, stderr, artifact-count, and artifact-byte limits. Unknown
+paths and kinds fail closed before payload reads.
+
+`plan.json` cross-binds its declaration digest and recomputable public evidence
+digest. The result retains the declared image reference separately from the
+provider-observed immutable image digest. A pinned-reference mismatch is
+incomplete evidence and can never verify as complete.
+
+Before publishing the seal, Kenogram fsyncs every descriptor-opened artifact
+directory, writes and fsyncs `manifest.json` without replacement, revalidates
+that leaf against the opened file identity, and fsyncs the descriptor-owned
+evidence root. Pathname replacement cannot redirect the durability proof.
 
 Ergograph and other consumers must independently parse and verify the retained
 bytes. They do not import Kenogram packages, and Kenogram does not import their

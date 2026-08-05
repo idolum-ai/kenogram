@@ -31,6 +31,12 @@ The plan digest is lowercase SHA-256 over the canonical semantic JSON followed b
 one newline. The declaration digest is lowercase SHA-256 over the exact input
 bytes. Both are printed by dry-run and present in JSON output.
 
+Machine JSON also carries `evidence_digest`, the independently recomputable
+SHA-256 of the same plan after each secret copy's content digest is replaced by
+the literal `<redacted>`. The operational `plan_digest` continues to change
+when secret source bytes change, but an offline evidence consumer is not asked
+to guess those bytes in order to verify the retained public projection.
+
 These digests establish provenance and conservative operational equality. They
 do not define behavioral or ontological identity: different realizations may
 satisfy the same observable contracts even when their fingerprints differ.

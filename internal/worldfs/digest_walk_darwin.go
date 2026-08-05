@@ -4,6 +4,7 @@ package worldfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -35,13 +36,13 @@ func walkDigestRoot(ctx context.Context, rootPath string, limits DigestLimits) (
 	if err := state.appendMetadata(DigestEntry{Path: "", Type: "directory", Mode: uint32(opened.Mode().Perm())}); err != nil {
 		return nil, err
 	}
-	if err := walkDigestRootDirectory(ctx, root, ".", "", 0, state); err != nil {
+	if err := walkDigestRootDirectory(ctx, root, ".", "", 0, opened, state); err != nil {
 		return nil, err
 	}
 	return state.entries, nil
 }
 
-func walkDigestRootDirectory(ctx context.Context, root *os.Root, rootName, prefix string, depth int, state *digestWalkState) error {
+func walkDigestRootDirectory(ctx context.Context, root *os.Root, rootName, prefix string, depth int, expected os.FileInfo, state *digestWalkState) error {
 	if depth >= maxDigestDirectoryDepth {
 		return fmt.Errorf("workspace observation exceeds directory depth %d", maxDigestDirectoryDepth)
 	}
@@ -53,6 +54,16 @@ func walkDigestRootDirectory(ctx context.Context, root *os.Root, rootName, prefi
 		return &treeChangedError{path: prefix, cause: err}
 	}
 	defer directory.Close()
+	opened, statErr := directory.Stat()
+	afterLookup, lookupErr := root.Lstat(rootName)
+	if statErr != nil || lookupErr != nil || !opened.IsDir() || !os.SameFile(expected, opened) || !os.SameFile(opened, afterLookup) || afterLookup.Mode()&os.ModeSymlink != 0 {
+		return &treeChangedError{path: prefix, cause: errors.Join(statErr, lookupErr)}
+	}
+	if prefix != "" {
+		if err := state.appendMetadata(DigestEntry{Path: prefix, Type: "directory", Mode: uint32(opened.Mode().Perm())}); err != nil {
+			return err
+		}
+	}
 	for {
 		children, readErr := directory.Readdir(256)
 		if readErr != nil && readErr != io.EOF {
@@ -83,10 +94,7 @@ func walkDigestRootDirectory(ctx context.Context, root *os.Root, rootName, prefi
 					return err
 				}
 			case current.IsDir():
-				if err := state.appendMetadata(DigestEntry{Path: rel, Type: "directory", Mode: uint32(current.Mode().Perm())}); err != nil {
-					return err
-				}
-				if err := walkDigestRootDirectory(ctx, root, rel, rel, depth+1, state); err != nil {
+				if err := walkDigestRootDirectory(ctx, root, rel, rel, depth+1, current, state); err != nil {
 					return err
 				}
 			case current.Mode()&os.ModeSymlink != 0:

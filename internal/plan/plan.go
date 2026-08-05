@@ -71,6 +71,7 @@ type Service struct {
 // Result carries semantic intent and both required provenance digests.
 type Result struct {
 	PlanDigest        string   `json:"plan_digest"`
+	EvidenceDigest    string   `json:"evidence_digest"`
 	DeclarationDigest string   `json:"declaration_digest"`
 	Warnings          []string `json:"warnings"`
 	Plan              Plan     `json:"plan"`
@@ -79,12 +80,12 @@ type Result struct {
 func (r Result) MarshalJSON() ([]byte, error) {
 	type wire Result
 	safe := r
-	safe.Plan.Copies = append([]Copy{}, r.Plan.Copies...)
-	for i := range safe.Plan.Copies {
-		if safe.Plan.Copies[i].Secret {
-			safe.Plan.Copies[i].SourceDigest = "<redacted>"
-		}
+	redacted, digest, err := EvidenceCanonical(r.Plan)
+	if err != nil {
+		return nil, err
 	}
+	safe.Plan = redacted
+	safe.EvidenceDigest = digest
 	return json.Marshal(wire(safe))
 }
 
@@ -137,11 +138,34 @@ func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) 
 		return Result{}, err
 	}
 	planSum, declarationSum := sha256.Sum256(canonical), sha256.Sum256(declarationBytes)
-	result := Result{PlanDigest: hex.EncodeToString(planSum[:]), DeclarationDigest: hex.EncodeToString(declarationSum[:]), Warnings: []string{}, Plan: p}
+	_, evidenceDigest, err := EvidenceCanonical(p)
+	if err != nil {
+		return Result{}, err
+	}
+	result := Result{PlanDigest: hex.EncodeToString(planSum[:]), EvidenceDigest: evidenceDigest, DeclarationDigest: hex.EncodeToString(declarationSum[:]), Warnings: []string{}, Plan: p}
 	if !decl.ImagePinned(d.World.Base) {
 		result.Warnings = append(result.Warnings, "UNPINNED BASE IMAGE: reproducibility depends on mutable external state")
 	}
 	return result, nil
+}
+
+// EvidenceCanonical returns the public, independently verifiable plan
+// projection. Secret copy content digests remain operational commitments and
+// never enter retained or operator-rendered evidence.
+func EvidenceCanonical(p Plan) (Plan, string, error) {
+	redacted := p
+	redacted.Copies = append([]Copy{}, p.Copies...)
+	for index := range redacted.Copies {
+		if redacted.Copies[index].Secret {
+			redacted.Copies[index].SourceDigest = "<redacted>"
+		}
+	}
+	canonical, err := Canonical(redacted)
+	if err != nil {
+		return Plan{}, "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return redacted, hex.EncodeToString(sum[:]), nil
 }
 
 // DigestSource returns the canonical content and mode fingerprint used for a
