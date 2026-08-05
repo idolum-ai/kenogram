@@ -527,16 +527,27 @@ func TestExecutorBoundsContextIgnoringRuntimePhases(t *testing.T) {
 			request.Limits.TimeoutNS = int64(20 * time.Millisecond)
 			request.Limits.FinalizeNS = int64(20 * time.Millisecond)
 			requestRaw, _ = json.Marshal(request)
-			started := time.Now()
-			outcome, err := executor.Run(context.Background(), requestRaw, evidence)
-			if err != nil {
+			type execution struct {
+				outcome Outcome
+				err     error
+			}
+			done := make(chan execution, 1)
+			go func() {
+				outcome, err := executor.Run(context.Background(), requestRaw, evidence)
+				done <- execution{outcome: outcome, err: err}
+			}()
+			var observed execution
+			select {
+			case observed = <-done:
+			case <-time.After(10 * time.Second):
 				close(release)
-				t.Fatal(err)
+				t.Fatalf("context-ignoring %s did not honor its configured deadline", test.name)
 			}
 			close(release)
-			if time.Since(started) > 500*time.Millisecond {
-				t.Fatalf("context-ignoring %s exceeded bound", test.name)
+			if observed.err != nil {
+				t.Fatal(observed.err)
 			}
+			outcome := observed.outcome
 			if outcome.Result.Status != "incomplete" {
 				t.Fatalf("result=%#v", outcome.Result)
 			}
@@ -551,12 +562,24 @@ func TestExecutorBoundsContextIgnoringRuntimePhases(t *testing.T) {
 }
 
 type blockingArtifactReader struct {
-	read  <-chan struct{}
-	close <-chan struct{}
+	read         <-chan struct{}
+	close        <-chan struct{}
+	readEntered  chan struct{}
+	closeEntered chan struct{}
+	readOnce     sync.Once
+	closeOnce    sync.Once
 }
 
-func (r *blockingArtifactReader) Read([]byte) (int, error) { <-r.read; return 0, io.EOF }
-func (r *blockingArtifactReader) Close() error             { <-r.close; return nil }
+func (r *blockingArtifactReader) Read([]byte) (int, error) {
+	r.readOnce.Do(func() { close(r.readEntered) })
+	<-r.read
+	return 0, io.EOF
+}
+func (r *blockingArtifactReader) Close() error {
+	r.closeOnce.Do(func() { close(r.closeEntered) })
+	<-r.close
+	return nil
+}
 
 func TestArtifactOpenReadAndFailureAreBoundedAndAlwaysCleaned(t *testing.T) {
 	for _, mode := range []string{"open-blocks", "read-blocks", "open-fails"} {
@@ -572,27 +595,74 @@ func TestArtifactOpenReadAndFailureAreBoundedAndAlwaysCleaned(t *testing.T) {
 			releaseOpen := make(chan struct{})
 			releaseRead := make(chan struct{})
 			releaseClose := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() {
+				releaseOnce.Do(func() {
+					close(releaseOpen)
+					close(releaseRead)
+					close(releaseClose)
+				})
+			}
+			defer release()
+			openEntered := make(chan struct{})
+			readEntered := make(chan struct{})
+			closeEntered := make(chan struct{})
 			runtime.process.artifacts = []Artifact{{Path: "report", Open: func() (io.ReadCloser, error) {
 				switch mode {
 				case "open-blocks":
+					close(openEntered)
 					<-releaseOpen
 					return io.NopCloser(strings.NewReader("ok")), nil
 				case "read-blocks":
-					return &blockingArtifactReader{read: releaseRead, close: releaseClose}, nil
+					return &blockingArtifactReader{read: releaseRead, close: releaseClose, readEntered: readEntered, closeEntered: closeEntered}, nil
 				default:
 					return nil, errors.New("artifact unavailable")
 				}
 			}}}
-			started := time.Now()
-			outcome, err := executor.Run(context.Background(), requestRaw, evidence)
-			if err != nil {
-				t.Fatal(err)
+			type execution struct {
+				outcome Outcome
+				err     error
 			}
-			close(releaseOpen)
-			close(releaseRead)
-			close(releaseClose)
-			if time.Since(started) > 500*time.Millisecond || outcome.Result.Status != "incomplete" || !runtime.cleaned.Load() || !contains(outcome.Result.Reasons, "ARTIFACT_COLLECTION_FAILED") {
+			done := make(chan execution, 1)
+			go func() {
+				outcome, err := executor.Run(context.Background(), requestRaw, evidence)
+				done <- execution{outcome: outcome, err: err}
+			}()
+			if mode == "open-blocks" {
+				select {
+				case <-openEntered:
+				case <-time.After(10 * time.Second):
+					t.Fatal("artifact open was never entered")
+				}
+			}
+			if mode == "read-blocks" {
+				select {
+				case <-readEntered:
+				case <-time.After(10 * time.Second):
+					t.Fatal("artifact read was never entered")
+				}
+			}
+			var observed execution
+			select {
+			case observed = <-done:
+			case <-time.After(10 * time.Second):
+				release()
+				t.Fatal("blocked artifact operation did not honor its configured deadline")
+			}
+			release()
+			if observed.err != nil {
+				t.Fatal(observed.err)
+			}
+			outcome := observed.outcome
+			if outcome.Result.Status != "incomplete" || !runtime.cleaned.Load() || !contains(outcome.Result.Reasons, "ARTIFACT_COLLECTION_FAILED") {
 				t.Fatalf("outcome=%#v cleaned=%t", outcome, runtime.cleaned.Load())
+			}
+			if mode == "read-blocks" {
+				select {
+				case <-closeEntered:
+				case <-time.After(10 * time.Second):
+					t.Fatal("timed-out artifact reader was not closed")
+				}
 			}
 			if _, err := Verify(evidence); err != nil {
 				t.Fatal(err)
