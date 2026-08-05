@@ -15,8 +15,10 @@ All source-tree planning and digest work uses the shared descriptor-rooted,
 context-aware traversal boundary: at most 20,000 entries, 1 GiB of regular-file
 content, depth 128, and 4,096 bytes per relative path. Symlinks and special
 nodes fail closed. The same walker performs runtime copy and snapshot staging,
-so planning cannot admit a tree that staging silently traverses under different
-resource rules.
+and validates permissions across secret trees, so planning cannot admit a tree
+that staging silently traverses under different resource rules. Governed
+preparation threads its caller context through declaration validation and fails
+before provider preflight on cancellation or a source-tree bound violation.
 
 Named loopback interfaces are semantic plan fields. Changing a name or address
 therefore changes the plan digest and requires ordinary generation replacement.

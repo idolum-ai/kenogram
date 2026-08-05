@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +36,64 @@ type runtimeRunner struct {
 	successorPlanDigest string
 	successorDeclDigest string
 	successorNanoCPUs   int64
+}
+
+type pollingCancelContext struct {
+	context.Context
+	remaining atomic.Int64
+	cancel    context.CancelFunc
+}
+
+func (c *pollingCancelContext) Err() error {
+	if c.remaining.Add(-1) <= 0 {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestPrepareBytesContextInterruptsSecretTreeValidation(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "secret-tree")
+	if err := os.Mkdir(secret, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 2_000; index++ {
+		path := filepath.Join(secret, fmt.Sprintf("entry-%04d", index))
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw := []byte(`version = 1
+name = "cancel-secret-validation"
+[world]
+hostname = "cancel-secret-validation"
+base = "example.invalid/job@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+workdir = "/workspace"
+user = "agent"
+[resources]
+cpus = 1
+memory_bytes = 1073741824
+pids = 64
+[workspace]
+paths = ["/workspace"]
+[[copies]]
+source = "secret-tree"
+target = "/run/secret-tree"
+mode = "0600"
+secret = true
+`)
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &pollingCancelContext{Context: base, cancel: cancel}
+	ctx.remaining.Store(50)
+	started := time.Now()
+	_, err := PrepareBytesContext(ctx, raw, filepath.Join(dir, "kenogram.toml"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("PrepareBytesContext cancellation error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("secret-tree validation cancellation took %s", elapsed)
+	}
 }
 
 type destroyFailRunner struct{ runtimeRunner }

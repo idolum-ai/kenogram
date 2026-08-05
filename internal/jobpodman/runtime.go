@@ -662,6 +662,9 @@ func (p *process) extractArtifacts(ctx context.Context) ([]job.Artifact, error) 
 		if walkErr != nil {
 			return walkErr
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if path == "." || entry.IsDir() {
 			return nil
 		}

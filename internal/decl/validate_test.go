@@ -97,6 +97,37 @@ func TestValidateChecksEverySecretTreeNode(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNestedSecretSymlinkAndSpecialNode(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		d, dir := validForValidation(t)
+		secretDir := filepath.Join(dir, "secret-dir")
+		if err := os.Mkdir(secretDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(dir, "secret"), filepath.Join(secretDir, "alias")); err != nil {
+			t.Fatal(err)
+		}
+		d.Copies[0].Source = "secret-dir"
+		if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("nested secret symlink = %v", err)
+		}
+	})
+	t.Run("special node", func(t *testing.T) {
+		d, dir := validForValidation(t)
+		secretDir := filepath.Join(dir, "secret-dir")
+		if err := os.Mkdir(secretDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(filepath.Join(secretDir, "pipe"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		d.Copies[0].Source = "secret-dir"
+		if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "unsupported node") {
+			t.Fatalf("nested secret special node = %v", err)
+		}
+	})
+}
+
 func TestValidateRejectsSpecialMountSource(t *testing.T) {
 	d, dir := validForValidation(t)
 	special := filepath.Join(dir, "runtime.sock")

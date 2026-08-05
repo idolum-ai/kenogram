@@ -108,7 +108,7 @@ func BuildContext(ctx context.Context, d decl.Declaration, declarationPath strin
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve declaration directory: %w", err)
 	}
-	if err := decl.Validate(d, dir); err != nil {
+	if err := decl.ValidateContext(ctx, d, dir); err != nil {
 		return Result{}, err
 	}
 	p := Plan{

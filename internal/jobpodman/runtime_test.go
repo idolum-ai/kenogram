@@ -557,6 +557,71 @@ func TestBoundedSourceFailuresNeverCreateProviderStateAndCleanScratch(t *testing
 	}
 }
 
+func TestSecretValidationSharesSourceBoundBeforeProviderPreflight(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "secret-tree")
+	if err := os.Mkdir(secret, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for index := int64(1); index < sourcetree.MaxEntries+1; index++ {
+		file, err := os.OpenFile(filepath.Join(secret, fmt.Sprintf("entry-%05d", index)), os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	declaration := []byte(`version = 1
+name = "secret-bound"
+[world]
+hostname = "secret-bound"
+base = "example.invalid/job@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+workdir = "/workspace"
+user = "agent"
+[resources]
+cpus = 1
+memory_bytes = 1073741824
+pids = 64
+[workspace]
+paths = ["/workspace"]
+[[copies]]
+source = "secret-tree"
+target = "/run/secret-tree"
+mode = "0600"
+secret = true
+`)
+	declarationPath := filepath.Join(dir, "kenogram.toml")
+	if err := os.WriteFile(declarationPath, declaration, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requestRaw, err := json.Marshal(jobcontract.Request{
+		Schema: jobcontract.RequestSchema,
+		JobID:  "secret-bound",
+		Declaration: jobcontract.DeclarationBinding{
+			Path:   declarationPath,
+			SHA256: digestBytes(declaration),
+		},
+		Command: jobcontract.Command{Argv: []string{"/bin/true"}, WorkingDirectory: "/workspace", Environment: []jobcontract.EnvironmentItem{}},
+		Limits:  jobcontract.Limits{TimeoutNS: int64(time.Second), FinalizeNS: int64(time.Second), StdoutMaxBytes: 1024, StderrMaxBytes: 1024},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, runner, _, _ := runtimeFixture(t)
+	evidenceDir := filepath.Join(dir, "evidence")
+	_, err = (job.Executor{Runtime: runtime}).Run(context.Background(), requestRaw, evidenceDir)
+	if err == nil || !strings.Contains(err.Error(), "20000 entries") {
+		t.Fatalf("secret bound error = %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("secret bound contacted provider: %v", runner.calls)
+	}
+	if _, statErr := os.Stat(evidenceDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("pre-identity evidence path stat = %v", statErr)
+	}
+}
+
 func TestCanceledSourceRestagingNeverCreatesAndCleansPromptly(t *testing.T) {
 	runtime, runner, _, invocation := runtimeFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())

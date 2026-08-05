@@ -19,8 +19,10 @@ made about aliases the host does not make inspectable.
 
 Relative sources resolve against the declaration directory, not the caller's
 working directory. Missing sources fail validation. Every file and directory in
-a secret tree must have no group or other permission bits; failed materialization
-removes staged bytes before returning.
+a secret tree must have no group or other permission bits. Secret permission
+validation uses the same descriptor-rooted, context-aware source-tree bounds as
+planning and staging; cancellation or a bound violation fails before governed
+provider preflight. Failed materialization removes staged bytes before returning.
 
 Symlinked host source paths are rejected and copied trees reject symlink nodes.
 Declared mounts cannot contain or overlap Kenogram state or known container

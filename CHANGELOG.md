@@ -38,7 +38,9 @@ Notable user-visible and operational changes are recorded here.
   one descriptor-rooted context-aware bound; descriptor-bind job request reads;
   reject writable socket trees, accessible runtime-endpoint inode aliases, and
   ambiguous Podman mount grammar; and replace ephemeral retained mount paths
-  with independently derivable semantic source references.
+  with independently derivable semantic source references. Route secret-tree
+  permission validation through that same bounded caller context so oversized
+  or canceled preparation fails before provider preflight.
 - Add a proof-only semantic reference for transactional cutover readiness,
   including bounded provider actions, rollback, pre-commit process death,
   inherited egress, and acknowledgement-only compatibility without adding a
