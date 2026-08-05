@@ -4,6 +4,8 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+## [v0.2.0] - 2026-08-05
+
 - Implement the governed-job core and direct one-shot Podman CLI provider:
   exact-image and declaration authority, closed schemas,
   create-only evidence, bounded execution/finalization/cleanup, artifact
@@ -21,9 +23,11 @@ Notable user-visible and operational changes are recorded here.
   evidence, and seal bounded metadata-only revocation/join evidence without an
   unverifiable digest of discarded diagnostics. Invalid or
   unrequested egress output is omitted from a replayable incomplete seal.
-  Hosted Linux K6 and release-candidate replay and a release claim remain later work. Raise the module API floor to Go 1.25 for the standard-library
-  descriptor-owned `os.Root` boundary used on macOS and for evidence paths;
-  the pinned build toolchain remains Go 1.26.5.
+  Governed jobs remain an experimental Linux execution surface while the
+  persistent-world contract remains supported independently. Raise the module
+  API floor to Go 1.25 for the standard-library descriptor-owned `os.Root`
+  boundary used on macOS and for evidence paths; the pinned build toolchain
+  remains Go 1.26.5.
 - Harden the direct job provider with option-terminated strict image
   references, immutable-ID-only post-create calls, fresh canceled-create
   reconciliation, owner re-proofs before destructive operations,
