@@ -72,13 +72,17 @@ jobs:
           TAG: ${{ steps.candidate.outputs.tag }}
         run: |
           set -euo pipefail
-          commit="$(git rev-parse --short=12 HEAD)"
-          date="$(git show -s --format=%cI HEAD)"
+          commit="$(git rev-parse HEAD)"
+          date="$(date -u -d "@$(git show -s --format=%ct HEAD)" '+%Y-%m-%dT%H:%M:%SZ')"
           make release-dist VERSION="${TAG}" COMMIT="${commit}" DATE="${date}"
           mkdir candidate-smoke
           tar -xzf "dist/kenogram-${TAG}-linux-amd64.tar.gz" -C candidate-smoke kenogram
           candidate-smoke/kenogram version | tee candidate-version.txt
           grep -F "kenogram ${TAG} commit=${commit}" candidate-version.txt >/dev/null
+          candidate-smoke/kenogram version --json | tee candidate-provenance.json
+          KENOGRAM_INTEGRATION=1 \
+            KENOGRAM_INTEGRATION_BINARY="${PWD}/candidate-smoke/kenogram" \
+            go test ./internal/integration -run '^TestGovernedJobDirectPodmanEvidence$' -count=1 -timeout=5m -v
       - name: Summarize release notes
         run: cat release-notes-preview.md >> "${GITHUB_STEP_SUMMARY}"
       - name: Upload candidate evidence
@@ -88,5 +92,6 @@ jobs:
           path: |
             dist/*
             candidate-version.txt
+            candidate-provenance.json
             release-notes-preview.md
           if-no-files-found: error

@@ -77,13 +77,17 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          commit="$(git rev-parse --short=12 "${RELEASE_MERGE_SHA}")"
-          date="$(git show -s --format=%cI "${RELEASE_MERGE_SHA}")"
+          commit="$(git rev-parse "${RELEASE_MERGE_SHA}")"
+          date="$(date -u -d "@$(git show -s --format=%ct "${RELEASE_MERGE_SHA}")" '+%Y-%m-%dT%H:%M:%SZ')"
           make release-dist VERSION="${TAG}" COMMIT="${commit}" DATE="${date}"
           mkdir release-smoke
           tar -xzf "dist/kenogram-${TAG}-linux-amd64.tar.gz" -C release-smoke kenogram
           release-smoke/kenogram version | tee release-version.txt
           grep -F "kenogram ${TAG} commit=${commit}" release-version.txt >/dev/null
+          release-smoke/kenogram version --json | tee release-provenance.json
+          KENOGRAM_INTEGRATION=1 \
+            KENOGRAM_INTEGRATION_BINARY="${PWD}/release-smoke/kenogram" \
+            go test ./internal/integration -run '^TestGovernedJobDirectPodmanEvidence$' -count=1 -timeout=5m -v
       - name: Upload reviewed release bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -92,6 +96,7 @@ jobs:
             dist/*
             release-notes.md
             release-version.txt
+            release-provenance.json
           if-no-files-found: error
 
   publish:
