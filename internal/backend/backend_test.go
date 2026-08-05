@@ -265,6 +265,51 @@ func TestInspectStoppedContainerDoesNotRequireLiveProcessEvidence(t *testing.T) 
 	}
 }
 
+func TestInspectCanonicalizesPodman49BareImageIdentity(t *testing.T) {
+	hex := strings.Repeat("a", 64)
+	f := &fake{out: []byte(`[{"Image":"` + hex + `","State":{"Running":false,"Pid":0}}]`)}
+	evidence, err := New(f).Inspect(context.Background(), "job")
+	if err != nil || evidence.ImageReference != "sha256:"+hex {
+		t.Fatalf("image_reference=%q error=%v", evidence.ImageReference, err)
+	}
+	f.out = []byte(`[{"Image":"` + strings.Repeat("g", 64) + `","State":{"Running":false,"Pid":0}}]`)
+	if _, err := New(f).Inspect(context.Background(), "job"); err == nil || !strings.Contains(err.Error(), "image identity") {
+		t.Fatalf("malformed bare image identity accepted: %v", err)
+	}
+}
+
+func TestCanonicalImageIDRejectsNoncanonicalRepresentations(t *testing.T) {
+	hex := strings.Repeat("a", 64)
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "bare", value: hex, want: "sha256:" + hex},
+		{name: "prefixed", value: "sha256:" + hex, want: "sha256:" + hex},
+		{name: "short", value: hex[:63]},
+		{name: "long", value: hex + "a"},
+		{name: "nonhex", value: strings.Repeat("g", 64)},
+		{name: "uppercase", value: strings.Repeat("A", 64)},
+		{name: "wrong algorithm", value: "sha512:" + hex},
+		{name: "leading whitespace", value: " " + hex},
+		{name: "trailing whitespace", value: hex + "\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := CanonicalImageID(test.value)
+			if test.want == "" {
+				if err == nil {
+					t.Fatalf("CanonicalImageID(%q)=%q, want error", test.value, got)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("CanonicalImageID(%q)=%q, %v; want %q", test.value, got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestVerifyExactMountEvidence(t *testing.T) {
 	r := plan.Result{PlanDigest: "p", DeclarationDigest: "d", Plan: plan.Plan{Name: "w", World: plan.World{User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
 	expected := []Mount{{Source: "/state/workspace", Target: "/workspace", Mode: "rw", NoExec: true}}

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/jobcontract"
 )
 
@@ -33,7 +34,7 @@ func TestGovernedJobDirectPodmanEvidence(t *testing.T) {
 	}
 	imageTag := "localhost/kenogram-job-integration:" + fmt.Sprint(time.Now().UnixNano())
 	run(t, tmp, nil, "podman", "build", "-t", imageTag, "-f", containerfile, ".")
-	imageID, err := canonicalPodmanImageID(strings.TrimSpace(run(t, tmp, nil, "podman", "image", "inspect", "--format", "{{.Id}}", imageTag)))
+	imageID, err := backend.CanonicalImageID(strings.TrimSpace(run(t, tmp, nil, "podman", "image", "inspect", "--format", "{{.Id}}", imageTag)))
 	if err != nil {
 		t.Fatalf("image identity: %v", err)
 	}

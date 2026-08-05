@@ -468,7 +468,14 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 		return Evidence{}, fmt.Errorf("decode podman inspect: got %d documents, want 1", len(docs))
 	}
 	d := docs[0]
-	e := Evidence{ID: d.ID, Name: strings.TrimPrefix(d.Name, "/"), Running: d.State.Running, PID: d.State.Pid, ImageReference: d.Image, ImageDigest: d.ImageDigest, NetworkMode: d.HostConfig.NetworkMode, IPCMode: d.HostConfig.IpcMode, PIDMode: d.HostConfig.PidMode, UTSMode: d.HostConfig.UTSMode, UserNSMode: d.HostConfig.UsernsMode, User: d.Config.User, Hostname: d.Config.Hostname, WorkingDir: d.Config.WorkingDir, CapDrop: d.HostConfig.CapDrop, BoundingCaps: d.BoundingCaps, SecurityOpt: d.HostConfig.SecurityOpt, Devices: len(d.HostConfig.Devices), Labels: d.Config.Labels, Memory: d.HostConfig.Memory, NanoCPUs: d.HostConfig.NanoCPUs, PIDs: d.HostConfig.PidsLimit}
+	imageReference := ""
+	if d.Image != "" {
+		imageReference, err = CanonicalImageID(d.Image)
+		if err != nil {
+			return Evidence{}, fmt.Errorf("decode podman inspect image identity: %w", err)
+		}
+	}
+	e := Evidence{ID: d.ID, Name: strings.TrimPrefix(d.Name, "/"), Running: d.State.Running, PID: d.State.Pid, ImageReference: imageReference, ImageDigest: d.ImageDigest, NetworkMode: d.HostConfig.NetworkMode, IPCMode: d.HostConfig.IpcMode, PIDMode: d.HostConfig.PidMode, UTSMode: d.HostConfig.UTSMode, UserNSMode: d.HostConfig.UsernsMode, User: d.Config.User, Hostname: d.Config.Hostname, WorkingDir: d.Config.WorkingDir, CapDrop: d.HostConfig.CapDrop, BoundingCaps: d.BoundingCaps, SecurityOpt: d.HostConfig.SecurityOpt, Devices: len(d.HostConfig.Devices), Labels: d.Config.Labels, Memory: d.HostConfig.Memory, NanoCPUs: d.HostConfig.NanoCPUs, PIDs: d.HostConfig.PidsLimit}
 	if e.Running {
 		if e.PID <= 0 {
 			return Evidence{}, fmt.Errorf("runtime holder PID is absent")
@@ -529,6 +536,25 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 		return Evidence{}, fmt.Errorf("runtime holder process identity changed during inspection")
 	}
 	return e, nil
+}
+
+// CanonicalImageID accepts the two exact immutable-ID forms emitted by
+// supported Podman versions. A bare lowercase hexadecimal ID is normalized
+// without accepting tags, names, alternate algorithms, or malformed digests.
+func CanonicalImageID(value string) (string, error) {
+	digest := value
+	if strings.HasPrefix(digest, "sha256:") {
+		digest = strings.TrimPrefix(digest, "sha256:")
+	}
+	if len(digest) != 64 {
+		return "", fmt.Errorf("Podman image ID %q is not a canonical sha256 digest", value)
+	}
+	for _, character := range digest {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return "", fmt.Errorf("Podman image ID %q is not a canonical sha256 digest", value)
+		}
+	}
+	return "sha256:" + digest, nil
 }
 
 // ipcNamespaceIsolatedFromHost observes separation from Kenogram's ambient

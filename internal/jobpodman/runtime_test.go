@@ -83,6 +83,8 @@ type fakePodmanRunner struct {
 	ownerOverride   string
 	artifactSymlink bool
 	imageDigest     string
+	imageReference  string
+	omitImageDigest bool
 	containerID     string
 	cancelOnCreate  func()
 	afterStart      func()
@@ -186,9 +188,16 @@ func (f *fakePodmanRunner) inspect() []byte {
 	if imageDigest == "" {
 		imageDigest = "sha256:" + strings.Repeat("a", 64)
 	}
+	imageReference := imageDigest
+	if f.imageReference != "" {
+		imageReference = f.imageReference
+	}
+	if f.omitImageDigest {
+		imageDigest = ""
+	}
 	containerID := f.containerIDValue()
 	doc := map[string]any{
-		"Id": containerID, "Name": f.name, "Image": imageDigest, "ImageDigest": imageDigest, "BoundingCaps": []string{},
+		"Id": containerID, "Name": f.name, "Image": imageReference, "ImageDigest": imageDigest, "BoundingCaps": []string{},
 		"State":      map[string]any{"Running": f.running, "Pid": map[bool]int{true: 4242, false: 0}[f.running]},
 		"IDMappings": map[string]any{"UidMap": []map[string]any{{"ContainerID": uid, "HostID": uid, "Size": 1}}, "GidMap": []map[string]any{{"ContainerID": gid, "HostID": gid, "Size": 1}}},
 		"Config":     map[string]any{"Labels": f.labels, "User": "agent", "Hostname": "job", "WorkingDir": "/workspace"},
@@ -733,6 +742,30 @@ func TestDirectRuntimeRejectsPinnedImageSubstitutionAsAdmittedUnknown(t *testing
 	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
 	if err == nil || process == nil || !strings.Contains(err.Error(), "disagrees") {
 		t.Fatalf("process=%#v error=%v", process, err)
+	}
+	if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" || !cleanup.ContainerAbsent {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+}
+
+func TestDirectRuntimeAcceptsPodman49BareLocalImageIdentity(t *testing.T) {
+	runtime, runner, attached, invocation := runtimeFixture(t)
+	runner.imageReference = strings.Repeat("a", 64)
+	runner.omitImageDigest = true
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil || process == nil {
+		t.Fatalf("process=%#v error=%v", process, err)
+	}
+	identity, err := process.Identity(context.Background())
+	if err != nil || identity.ImageDigest != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatalf("identity=%#v error=%v", identity, err)
+	}
+	attached.finish(nil)
+	if _, err := process.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" || !cleanup.ContainerAbsent {
 		t.Fatalf("cleanup=%#v", cleanup)
