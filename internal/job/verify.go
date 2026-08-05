@@ -80,6 +80,9 @@ func Verify(evidenceDir string) (Verification, error) {
 	if request.Artifacts != nil {
 		limits["target-inventory.json"] = int64(jobcontract.MaximumManifestBytes)
 	}
+	if _, exists := entries["egress.json"]; exists {
+		limits["egress.json"] = int64(jobcontract.MaximumEgressEvidenceBytes)
+	}
 	observed := map[string][]byte{"request.json": requestRaw}
 	for name, maximum := range limits {
 		if name == "request.json" {
@@ -146,6 +149,30 @@ func Verify(evidenceDir string) (Verification, error) {
 	if runtimeEvidenceDigest(observed["runtime-before.json"], observed["runtime-after.json"]) != result.Identity.RuntimeSHA256 {
 		return Verification{}, errors.New("runtime evidence identity mismatch")
 	}
+	egressRaw, hasEgress := observed["egress.json"]
+	if len(retainedPlan.Plan.NetworkAllow) == 0 {
+		if hasEgress || result.Identity.EgressSHA256 != "" {
+			return Verification{}, errors.New("networkless job carries egress evidence")
+		}
+	} else {
+		if !hasEgress {
+			if result.Status == "complete" || result.Identity.EgressSHA256 != "" {
+				return Verification{}, errors.New("declared egress evidence is absent or inconsistently bound")
+			}
+		} else if digest(egressRaw) != result.Identity.EgressSHA256 {
+			return Verification{}, errors.New("declared egress evidence is unbound")
+		}
+		if hasEgress {
+			egress, egressErr := jobcontract.ParseEgressEvidence(egressRaw)
+			before, beforeErr := jobcontract.ParseRuntimeObservation(observed["runtime-before.json"])
+			if err := errors.Join(egressErr, beforeErr); err != nil {
+				return Verification{}, err
+			}
+			if err := verifyEgressEvidence(egress, retainedPlan, result, before); err != nil {
+				return Verification{}, err
+			}
+		}
+	}
 	if result.Status == "complete" {
 		before, beforeErr := jobcontract.ParseRuntimeObservation(observed["runtime-before.json"])
 		after, afterErr := jobcontract.ParseRuntimeObservation(observed["runtime-after.json"])
@@ -194,10 +221,17 @@ func verifyRuntimeObservations(before, after jobcontract.RuntimeObservation, res
 	if before.User != retained.Plan.World.User || before.Hostname != retained.Plan.World.Hostname || before.WorkingDirectory != request.Command.WorkingDirectory || before.MemoryBytes != retained.Plan.Resources.MemoryBytes || before.NanoCPUs != retained.Plan.Resources.CPUs*1_000_000_000 || before.PIDs != retained.Plan.Resources.PIDs {
 		return errors.New("runtime observation disagrees with retained execution authority")
 	}
+	if len(retained.Plan.NetworkAllow) == 0 && before.EgressAdmission != nil {
+		return errors.New("networkless runtime carries an egress admission")
+	}
+	if len(retained.Plan.NetworkAllow) != 0 && before.EgressAdmission == nil {
+		return errors.New("declared egress lacks an independently retained runtime admission")
+	}
 	stableBefore, stableAfter := before, after
 	stableBefore.Phase, stableAfter.Phase, stableBefore.ObservedAt, stableAfter.ObservedAt, stableBefore.Running, stableAfter.Running = "", "", "", "", false, false
 	// Live-process-only fields are deliberately absent after stop.
 	stableBefore.IPCIsolated, stableBefore.UIDIdentity, stableBefore.GIDIdentity, stableBefore.NoNewPrivileges, stableBefore.SeccompMode, stableBefore.BoundingCaps = false, false, false, false, 0, []string{}
+	stableBefore.EgressAdmission = nil
 	if !reflect.DeepEqual(stableBefore, stableAfter) {
 		return errors.New("stable runtime enforcement facts changed across phases")
 	}
@@ -280,6 +314,13 @@ func classifyManifest(manifest jobcontract.Manifest) (map[string]jobcontract.Man
 		if entry.Path == "target-inventory.json" {
 			if entry.Kind != "target_inventory" {
 				return nil, nil, errors.New("target artifact inventory kind is invalid")
+			}
+			entries[entry.Path] = entry
+			continue
+		}
+		if entry.Path == "egress.json" {
+			if entry.Kind != "egress" {
+				return nil, nil, errors.New("egress evidence kind is invalid")
 			}
 			entries[entry.Path] = entry
 			continue

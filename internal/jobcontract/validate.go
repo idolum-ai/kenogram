@@ -3,9 +3,11 @@ package jobcontract
 import (
 	"errors"
 	"fmt"
+	"net"
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -29,13 +31,15 @@ const (
 )
 
 var (
-	portableIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$`)
-	environmentName   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
-	digestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	commitPattern     = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	reasonPattern     = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
-	platformPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
-	versionPattern    = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
+	portableIDPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$`)
+	environmentName    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+	digestPattern      = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	containerIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	ownerIDPattern     = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	commitPattern      = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	reasonPattern      = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+	platformPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+	versionPattern     = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
 )
 
 func ValidateRequest(value Request) error {
@@ -74,6 +78,9 @@ func ValidateRequest(value Request) error {
 		if _, exists := seenEnvironment[item.Name]; exists {
 			return fmt.Errorf("command environment contains duplicate name %q", item.Name)
 		}
+		if reservedProxyEnvironment(item.Name) {
+			return errors.New("command environment cannot override governed proxy variables")
+		}
 		seenEnvironment[item.Name] = struct{}{}
 	}
 	if value.Limits.TimeoutNS < minimumTimeoutNS || value.Limits.TimeoutNS > maximumTimeoutNS ||
@@ -88,6 +95,15 @@ func ValidateRequest(value Request) error {
 		return errors.New("artifact request is outside the normative bounds")
 	}
 	return nil
+}
+
+func reservedProxyEnvironment(name string) bool {
+	switch strings.ToUpper(name) {
+	case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY":
+		return true
+	default:
+		return false
+	}
 }
 
 func ValidateResult(value Result) error {
@@ -141,6 +157,7 @@ func validateExecutionIdentity(value ExecutionIdentity, complete bool) error {
 		!validOpaqueText(value.ImageReference, 1, maximumPathBytes) ||
 		(value.ImageDigest != "" && !validDigest(value.ImageDigest)) ||
 		(value.RuntimeSHA256 != "" && !validDigest(value.RuntimeSHA256)) ||
+		(value.EgressSHA256 != "" && !validDigest(value.EgressSHA256)) ||
 		!validDigest(value.ProvenanceSHA256) {
 		return errors.New("execution identity is invalid")
 	}
@@ -219,7 +236,7 @@ func ValidateManifest(value Manifest) error {
 	prior := ""
 	for _, entry := range value.Entries {
 		if !validEvidencePath(entry.Path) || entry.Path <= prior ||
-			!slices.Contains([]string{"request", "declaration", "plan", "provenance", "runtime", "stdout", "stderr", "result", "target_inventory", "target_artifact"}, entry.Kind) ||
+			!slices.Contains([]string{"request", "declaration", "plan", "provenance", "runtime", "egress", "stdout", "stderr", "result", "target_inventory", "target_artifact"}, entry.Kind) ||
 			entry.Size < 0 || entry.Size > MaximumWireInteger || !validDigest(entry.SHA256) {
 			return errors.New("job evidence manifest entry is invalid, duplicated, or unordered")
 		}
@@ -241,6 +258,7 @@ func ValidateManifest(value Manifest) error {
 		"declaration.toml": "declaration", "plan.json": "plan", "provenance.json": "provenance",
 		"request.json": "request", "result.json": "result", "runtime-after.json": "runtime",
 		"runtime-before.json": "runtime", "stderr.bin": "stderr", "stdout.bin": "stdout",
+		"egress.json":           "egress",
 		"target-inventory.json": "target_inventory",
 	}
 	for _, entry := range value.Entries {
@@ -250,6 +268,44 @@ func ValidateManifest(value Manifest) error {
 	}
 	return nil
 }
+
+func ValidateEgressEvidence(value EgressEvidence) error {
+	if value.Schema != EgressEvidenceSchema || !slices.Contains([]string{"complete", "incomplete"}, value.Status) ||
+		!validDigest(value.AllowlistSHA256) || !validDigest(value.DiagnosticsSHA256) ||
+		!containerIDPattern.MatchString(value.ContainerID) || !ownerIDPattern.MatchString(value.OwnerID) || value.Generation < 1 || value.Generation > MaximumWireInteger ||
+		value.PID < 1 || value.PID > MaximumWireInteger || !validOpaqueText(value.ProcessStart, 1, 256) || !validTimestamp(value.ReadyAt) ||
+		!validNamespaceIdentity(value.UserNamespace) || !validNamespaceIdentity(value.NetworkNamespace) ||
+		!validWireCount(value.Accepted) || !validWireCount(value.Refused) || !validWireCount(value.DialFailed) || !validWireCount(value.Omitted) ||
+		!validReasons(value.Reasons) {
+		return errors.New("egress evidence envelope is invalid")
+	}
+	host, portText, err := net.SplitHostPort(value.ListenerAddress)
+	port, portErr := strconv.Atoi(portText)
+	if err != nil || portErr != nil || host != "127.0.0.1" || port < 1 || port > 65535 || net.JoinHostPort(host, strconv.Itoa(port)) != value.ListenerAddress {
+		return errors.New("egress listener is not a canonical loopback address")
+	}
+	wantKeys := []string{"ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "https_proxy", "http_proxy"}
+	if !slices.Equal(value.EnvironmentKeys, wantKeys) {
+		return errors.New("egress environment key inventory is invalid")
+	}
+	if value.RevokedAt == "" || !validTimestamp(value.RevokedAt) {
+		return errors.New("egress revocation timestamp is invalid")
+	}
+	if value.Status == "complete" {
+		if !value.ListenerClosed || !value.ActiveConnectionsZero || !value.Joined || len(value.Reasons) != 0 {
+			return errors.New("complete egress evidence lacks revocation and join proof")
+		}
+	} else if len(value.Reasons) == 0 {
+		return errors.New("incomplete egress evidence lacks a reason")
+	}
+	return nil
+}
+
+func validNamespaceIdentity(value NamespaceIdentity) bool {
+	return value.Device <= uint64(MaximumWireInteger) && value.Inode > 0 && value.Inode <= uint64(MaximumWireInteger)
+}
+
+func validWireCount(value int64) bool { return value >= 0 && value <= MaximumWireInteger }
 
 func ValidateProvenance(value Provenance) error {
 	if value.Schema != ProvenanceSchema || !slices.Contains([]string{"development", "release"}, value.BuildKind) ||

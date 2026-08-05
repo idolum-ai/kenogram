@@ -54,6 +54,7 @@ type RuntimeIdentity struct {
 
 type RuntimeFinalization struct {
 	After     []byte
+	Egress    []byte
 	Artifacts []Artifact
 }
 
@@ -207,7 +208,7 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 	if startErr == nil && process == nil {
 		startErr = errors.New("runtime returned no process observation")
 	}
-	var runtimeBefore, runtimeAfter []byte
+	var runtimeBefore, runtimeAfter, egressRaw []byte
 	artifactInventoryWritten := false
 	if startErr == nil {
 		identity, identityErr := identityProcessBounded(executionCtx, process)
@@ -256,6 +257,7 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 		finalFinished := e.Now().UTC()
 		result.Finalization = interval(finalStarted, finalFinished, time.Since(finalMonotonic))
 		runtimeAfter = final.After
+		egressRaw = final.Egress
 		if runtimeErr := jobcontract.ValidateJSONDocument(runtimeAfter, jobcontract.MaximumManifestBytes); runtimeErr != nil {
 			finalErr = errors.Join(finalErr, runtimeErr)
 		}
@@ -345,6 +347,30 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 		result.Status = "incomplete"
 		result.Reasons = appendReason(result.Reasons, "CLEANUP_INCOMPLETE")
 	}
+	if len(prepared.Result.Plan.NetworkAllow) != 0 {
+		if len(egressRaw) == 0 {
+			result.Status = "incomplete"
+			result.Reasons = appendReason(result.Reasons, "EGRESS_EVIDENCE_MISSING")
+		} else {
+			egress, egressErr := jobcontract.ParseEgressEvidence(egressRaw)
+			before, beforeErr := jobcontract.ParseRuntimeObservation(runtimeBefore)
+			egressErr = errors.Join(egressErr, beforeErr)
+			if egressErr == nil {
+				egressErr = verifyEgressEvidence(egress, prepared.Result, result, before)
+			}
+			if egressErr != nil {
+				result.Status = "incomplete"
+				result.Reasons = appendReason(result.Reasons, "EGRESS_EVIDENCE_INVALID")
+				egressRaw = nil
+			} else {
+				result.Identity.EgressSHA256 = digest(egressRaw)
+			}
+		}
+	} else if len(egressRaw) != 0 {
+		result.Status = "incomplete"
+		result.Reasons = appendReason(result.Reasons, "UNREQUESTED_EGRESS_EVIDENCE")
+		egressRaw = nil
+	}
 	if startErr != nil && result.Cleanup.Status == "complete" {
 		if admitted {
 			result.Status = "incomplete"
@@ -368,6 +394,11 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 	}
 	if err := evidence.Write("runtime-after.json", "runtime", runtimeAfter); err != nil {
 		return Outcome{}, err
+	}
+	if len(egressRaw) != 0 {
+		if err := evidence.Write("egress.json", "egress", egressRaw); err != nil {
+			return Outcome{}, err
+		}
 	}
 	result.Stdout, err = stdout.CloseResult()
 	if err != nil {

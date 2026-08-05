@@ -142,6 +142,9 @@ func validate(ctx context.Context, d Declaration, declarationDir string, inspect
 		}
 	}
 	seenNetwork := map[string]bool{}
+	if len(d.Network.Allow) > 256 {
+		return fmt.Errorf("network.allow exceeds 256 destinations")
+	}
 	for i, allow := range d.Network.Allow {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -152,7 +155,7 @@ func validate(ctx context.Context, d Declaration, declarationDir string, inspect
 		if allow.Port < 1 || allow.Port > 65535 {
 			return fmt.Errorf("network.allow[%d].port must be between 1 and 65535", i)
 		}
-		key := strings.ToLower(allow.Host) + ":" + strconv.FormatInt(allow.Port, 10)
+		key := strings.ToLower(strings.TrimSuffix(allow.Host, ".")) + ":" + strconv.FormatInt(allow.Port, 10)
 		if seenNetwork[key] {
 			return fmt.Errorf("duplicate network allowance %s", key)
 		}

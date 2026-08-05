@@ -3,10 +3,13 @@
 package integration
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -114,6 +117,46 @@ secret = true
 
 	t.Run("keep-id user consumes the complete private read-only projection", func(t *testing.T) {
 		runPrivateReadOnlyJob(t, tmp, bin, imageID, fmt.Sprint(os.Getuid()), "direct-provider-keep-id-read-only")
+	})
+
+	t.Run("scoped egress retains network-none and replays", func(t *testing.T) {
+		jobID := "direct-provider-egress"
+		cleanupJobContainers(t, jobID)
+		upstream, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer upstream.Close()
+		go func() {
+			connection, acceptErr := upstream.Accept()
+			if acceptErr != nil {
+				return
+			}
+			defer connection.Close()
+			reader := bufio.NewReader(connection)
+			buffer := make([]byte, 4)
+			if _, readErr := io.ReadFull(reader, buffer); readErr == nil && string(buffer) == "ping" {
+				_, _ = connection.Write([]byte("pong"))
+			}
+		}()
+		port := upstream.Addr().(*net.TCPAddr).Port
+		declarationPath, declarationRaw := writeJobDeclaration(t, tmp, imageID, fmt.Sprintf("[[network.allow]]\nhost = \"localhost\"\nport = %d\n", port))
+		request := governedRequest(jobID, declarationPath, declarationRaw, []string{"/usr/local/bin/job-target", "--egress", fmt.Sprintf("localhost:%d", port)})
+		result, evidenceDir := runGovernedJob(t, tmp, bin, request, false)
+		if result.Status != "complete" || result.Identity.EgressSHA256 == "" || !result.Cleanup.ProxyAbsent {
+			t.Fatalf("result=%#v", result)
+		}
+		assertVerifiedJob(t, tmp, bin, evidenceDir, "complete")
+		egressRaw, err := os.ReadFile(filepath.Join(evidenceDir, "egress.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		egress, err := jobcontract.ParseEgressEvidence(egressRaw)
+		if err != nil || egress.Accepted != 1 || egress.Refused != 1 || !egress.ActiveConnectionsZero || !egress.Joined {
+			t.Fatalf("egress=%#v error=%v", egress, err)
+		}
+		assertSecretAbsentFromEvidence(t, evidenceDir, []byte("egress-secret-canary"))
+		assertNoOwnedContainers(t, tmp, jobID)
 	})
 
 	t.Run("timeout kills orphan and seals unknown", func(t *testing.T) {

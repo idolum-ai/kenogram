@@ -67,8 +67,16 @@ monotonic duration in an HMAC-authenticated lifecycle file whose key is passed
 only over the bounded launcher stdin protocol. A missing, modified, or
 provider-only observation is `unknown`.
 
-The current direct provider enforces `network=none`. A declaration containing
-`network.allow` is refused until a job-scoped egress proxy has its own proof.
+The direct provider always retains `network=none`. A finite `network.allow`
+creates a descriptor-transferred loopback listener in the exact verified
+holder namespaces and a host-owned exact-destination proxy. Kenogram injects
+the proxy environment only after readiness, revokes it at target termination,
+and seals bounded metadata-only `kenogram.job-egress-evidence.v1` lifecycle
+evidence. The pre-target runtime observation independently binds the proxy
+owner, listener, PID/start identity, allowlist, and pinned user/network
+namespace identities. Missing, unjoined, contradictory, invalid, or
+unrequested egress evidence cannot complete; invalid/unrequested candidate
+bytes are omitted so the incomplete seal remains replayable.
 Commands must be absolute container paths, and the requested working directory
 must equal the declared world workdir so provider inspection can bind it.
 Read-only/read-write mounts, world

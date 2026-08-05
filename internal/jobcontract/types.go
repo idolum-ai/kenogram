@@ -9,13 +9,15 @@ const (
 	ManifestSchema           = "kenogram.job-evidence-manifest.v1"
 	ProvenanceSchema         = "kenogram.executable-provenance.v1"
 	RuntimeObservationSchema = "kenogram.podman-runtime-observation.v1"
+	EgressEvidenceSchema     = "kenogram.job-egress-evidence.v1"
 
-	MaximumRequestBytes    = 1 << 20
-	MaximumResultBytes     = 1 << 20
-	MaximumManifestBytes   = 8 << 20
-	MaximumProvenanceBytes = 64 << 10
-	MaximumWireInteger     = int64(9_007_199_254_740_991)
-	MaxRuntimeMounts       = 512
+	MaximumRequestBytes        = 1 << 20
+	MaximumResultBytes         = 1 << 20
+	MaximumManifestBytes       = 8 << 20
+	MaximumProvenanceBytes     = 64 << 10
+	MaximumEgressEvidenceBytes = 64 << 10
+	MaximumWireInteger         = int64(9_007_199_254_740_991)
+	MaxRuntimeMounts           = 512
 )
 
 type Request struct {
@@ -83,6 +85,7 @@ type ExecutionIdentity struct {
 	RuntimeSHA256     string `json:"runtime_evidence_sha256"`
 	ProvenanceSHA256  string `json:"provenance_sha256"`
 	RuntimeProvider   string `json:"runtime_provider"`
+	EgressSHA256      string `json:"egress_sha256,omitempty"`
 }
 
 type TargetResult struct {
@@ -183,6 +186,7 @@ type RuntimeObservation struct {
 	NanoCPUs          int64                     `json:"nano_cpus"`
 	PIDs              int64                     `json:"pids"`
 	Mounts            []RuntimeMountObservation `json:"mounts"`
+	EgressAdmission   *RuntimeEgressAdmission   `json:"egress_admission,omitempty"`
 }
 
 type RuntimeMountObservation struct {
@@ -198,4 +202,51 @@ type RuntimeMountObservation struct {
 	FileType         string `json:"file_type"`
 	SHA256           string `json:"sha256,omitempty"`
 	IdentityVerified bool   `json:"identity_verified"`
+}
+
+// RuntimeEgressAdmission binds the independently inspected process and pinned
+// namespace authority that existed before a target received proxy variables.
+// Later egress lifecycle evidence must reproduce this exact admission.
+type RuntimeEgressAdmission struct {
+	AllowlistSHA256  string            `json:"allowlist_sha256"`
+	ListenerAddress  string            `json:"listener_address"`
+	OwnerID          string            `json:"owner_id"`
+	PID              int64             `json:"pid"`
+	ProcessStart     string            `json:"process_start"`
+	UserNamespace    NamespaceIdentity `json:"user_namespace"`
+	NetworkNamespace NamespaceIdentity `json:"network_namespace"`
+}
+
+// EgressEvidence is the bounded metadata-only proof for one governed-job
+// proxy lifecycle. It never contains request headers, payloads, resolved
+// addresses, secret values, or tunnel bytes.
+type EgressEvidence struct {
+	Schema                string            `json:"schema"`
+	Status                string            `json:"status"`
+	AllowlistSHA256       string            `json:"allowlist_sha256"`
+	ListenerAddress       string            `json:"listener_address"`
+	OwnerID               string            `json:"owner_id"`
+	ContainerID           string            `json:"container_id"`
+	Generation            int64             `json:"generation"`
+	PID                   int64             `json:"pid"`
+	ProcessStart          string            `json:"process_start"`
+	UserNamespace         NamespaceIdentity `json:"user_namespace"`
+	NetworkNamespace      NamespaceIdentity `json:"network_namespace"`
+	ReadyAt               string            `json:"ready_at"`
+	EnvironmentKeys       []string          `json:"environment_keys"`
+	Accepted              int64             `json:"accepted"`
+	Refused               int64             `json:"refused"`
+	DialFailed            int64             `json:"dial_failed"`
+	Omitted               int64             `json:"omitted"`
+	DiagnosticsSHA256     string            `json:"diagnostics_sha256"`
+	RevokedAt             string            `json:"revoked_at"`
+	ListenerClosed        bool              `json:"listener_closed"`
+	ActiveConnectionsZero bool              `json:"active_connections_zero"`
+	Joined                bool              `json:"joined"`
+	Reasons               []string          `json:"reasons"`
+}
+
+type NamespaceIdentity struct {
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
 }

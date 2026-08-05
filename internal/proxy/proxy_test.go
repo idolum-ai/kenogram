@@ -93,6 +93,41 @@ func (pipeDialer) DialContext(context.Context, string, string) (net.Conn, error)
 	return client, nil
 }
 
+type changingResolver struct{ calls int }
+
+func (r *changingResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	r.calls++
+	return []net.IPAddr{{IP: net.ParseIP(fmt.Sprintf("192.0.2.%d", r.calls))}}, nil
+}
+
+type recordingDialer struct{ addresses []string }
+
+func (d *recordingDialer) DialContext(_ context.Context, _, address string) (net.Conn, error) {
+	d.addresses = append(d.addresses, address)
+	client, server := net.Pipe()
+	go func() { defer server.Close(); _, _ = io.Copy(server, server) }()
+	return client, nil
+}
+
+func TestDeclaredHostnameResolvesForEveryConnectionWithoutBroadeningAuthority(t *testing.T) {
+	resolver := &changingResolver{}
+	dialer := &recordingDialer{}
+	p := New([]Destination{{Host: "allowed.example", Port: 443}}, Options{Resolver: resolver, Dialer: dialer})
+	for range 2 {
+		client, server := net.Pipe()
+		go p.handle(server)
+		_, _ = io.WriteString(client, "CONNECT allowed.example:443 HTTP/1.1\r\nHost: allowed.example:443\r\n\r\n")
+		line, err := bufio.NewReader(client).ReadString('\n')
+		client.Close()
+		if err != nil || !strings.Contains(line, "200") {
+			t.Fatalf("CONNECT line=%q error=%v", line, err)
+		}
+	}
+	if resolver.calls != 2 || len(dialer.addresses) != 2 || dialer.addresses[0] != "192.0.2.1:443" || dialer.addresses[1] != "192.0.2.2:443" {
+		t.Fatalf("resolver_calls=%d addresses=%v", resolver.calls, dialer.addresses)
+	}
+}
+
 type blockingDialer struct {
 	entered chan struct{}
 	release chan struct{}
@@ -385,5 +420,41 @@ func TestParseDestinationRequiresCanonicalAuthority(t *testing.T) {
 		if got, err := ParseDestination(raw); err == nil {
 			t.Fatalf("ParseDestination(%q) = %#v", raw, got)
 		}
+	}
+}
+
+func TestRevokeAllClosesPreHeaderConnectionAndJoinsActivity(t *testing.T) {
+	p := New([]Destination{{Host: "allowed.example", Port: 443}}, Options{})
+	client, server := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		p.handle(server)
+		close(done)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for p.Summary().ActiveConnections != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("pre-header connection was not tracked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	p.RevokeAll()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := p.WaitIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("proxy handler did not join after revocation")
+	}
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := client.Read(make([]byte, 1)); err == nil {
+		t.Fatal("revoked pre-header connection remained readable")
+	}
+	summary := p.Summary()
+	if summary.ActiveConnections != 0 || !strings.HasPrefix(summary.DiagnosticsSHA256, "sha256:") {
+		t.Fatalf("summary=%#v", summary)
 	}
 }

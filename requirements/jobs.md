@@ -3,8 +3,8 @@
 Status: implemented provider-independent core and direct Linux provider. The
 schemas, independent Go semantic validators, create-only publisher, bounded
 executor, offline verifier, and direct one-shot Podman CLI adapter are active.
-The adapter deliberately refuses declared egress until a job-scoped proxy can
-be proven. Darwin either hands the exact invocation to an explicitly configured
+Finite declared egress is implemented through a namespace-pinned, host-owned
+job proxy while the container retains `network=none`. Darwin either hands the exact invocation to an explicitly configured
 Linux Apple container machine or fails closed without namespace claims.
 
 A governed job is one noninteractive, bounded target execution inside a fresh
@@ -24,7 +24,10 @@ The versioned language-neutral documents are:
 - `kenogram.executable-provenance.v1`, which identifies the Kenogram executable
   that produced the observation; and
 - `kenogram.podman-runtime-observation.v1`, which closes the public K5 runtime
-  proof over immutable container, image, enforcement, and mount identities.
+  proof over immutable container, image, enforcement, and mount identities; and
+- `kenogram.job-egress-evidence.v1`, which conditionally binds the declared
+  allowlist, pinned namespace listener, bounded metadata counters, revocation,
+  active-tunnel closure, and proxy join.
 
 Their JSON Schemas are under [`../schemas/`](../schemas/). The schemas are
 closed and collection/value bounded. Kenogram additionally limits the encoded
@@ -107,6 +110,11 @@ Target-owned stdout, stderr, and artifacts can disclose bytes available to the
 target; retaining those outputs is an explicit caller decision, not a claim
 that Kenogram can stop a target from printing its own secrets.
 
+Request authority cannot set any case variant of `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, or `NO_PROXY`. For declared egress Kenogram injects the upper- and
+lowercase proxy variables itself only after the exact listener is ready;
+`NO_PROXY` is never injected into the target.
+
 Every `secret_file` must match exactly one copy target whose declaration marks
 it `secret = true`. The retained plan replaces that copy's source digest with
 `<redacted>` and binds the projection through `evidence_digest`; secret bytes
@@ -149,7 +157,7 @@ uppercase reason codes; `complete` carries none. A refusal cannot invent a
 target start.
 
 The result binds declaration, plan, generation, declared and observed image,
-runtime-evidence, and executable-provenance identities. Missing observed
+runtime-evidence, optional egress-evidence, and executable-provenance identities. Missing observed
 identity is permitted only on a refusal or incomplete execution and must remain
 empty rather than being copied from declaration authority.
 
@@ -175,6 +183,14 @@ stdout.bin
 stderr.bin
 manifest.json          # written last; does not list itself
 ```
+
+`egress.json` is mandatory for a complete result when the independently
+reprojected plan has a nonempty allowlist and forbidden for a networkless plan.
+A refusal before proxy identity exists may omit it; that absence can never be
+upgraded to complete. Invalid or unrequested runtime egress output is not
+retained as `egress.json`; the sealed result is incomplete with a stable reason
+and remains independently replayable. When present, the artifact's digest is
+bound by the result identity and manifest content root.
 
 Optional target artifacts are copied into the host-owned evidence tree only
 after target execution has ended. Manifest entries are unique and strictly
@@ -207,14 +223,21 @@ path NUL kind NUL decimal-size NUL sha256-digest LF
 ```
 
 `verify-job` is an offline verifier. It reopens only descriptor-owned regular
-files, recomputes every entry and content-root digest, validates all four
-documents, and cross-checks job/request/result/provenance identities. It never
+files, recomputes every entry and content-root digest, validates every
+versioned document, and cross-checks job/request/result/provenance identities. It never
 starts a target, contacts a provider, or upgrades runtime-reported fields to
-host-observed facts. For a complete K5 result it strictly decodes both runtime
+host-observed facts. For a complete result it strictly decodes both runtime
 phases, requires `before` running and `after` stopped, re-derives containment
 and resource constraints, cross-binds plan/result/provider identity, and
 requires stable facts and mount identities to agree across phases. Generic
-JSON cannot substitute for the K5 contract.
+JSON cannot substitute for the runtime contract. For declared egress it also
+re-derives the canonical allowlist digest, binds the immutable container and
+generation, and cross-checks the listener, proxy owner, PID/start identity, and
+pinned user/network namespace device and inode identities against the distinct
+pre-target runtime admission. It requires the exact system environment key
+inventory and `network=none`, and checks readiness/revocation against target
+and finalization intervals. Runtime claims cannot strengthen an incomplete
+proxy lifecycle into a complete result.
 
 The verifier never adopts a manifest entry size or kind as allocation or work
 authority. It classifies the fixed inventory first, parses `request.json` under
@@ -284,8 +307,15 @@ under the requested count, byte, traversal, and caller deadline bounds. It
 always attempts an unmount before returning. The adapter does not use an
 unbounded `podman cp` as artifact authority.
 
-Every container uses `network=none`; a request with `network.allow` is refused
-rather than silently broadened. The target command is absolute and its requested
+Every container uses `network=none`. For a nonempty `network.allow`, Kenogram
+pins the verified holder's user and network namespace descriptors, revalidates
+the immutable ID, owner, PID, and process-start identity, creates one loopback
+listener through that pinned authority, and serves it from a host-owned exact
+destination proxy. Policy is checked before per-connection DNS resolution;
+direct destination routes remain absent. At target termination the proxy policy
+is revoked, the listener and active tunnels are closed, and the serve loop joins
+before output/artifact finalization. Missing or contradictory `egress.json`
+cannot verify a complete result. The target command is absolute and its requested
 working directory must equal the declared world workdir, keeping the inspected
 configuration and execution authority identical. Declared bind mounts have
 their file-or-directory type retained in the plan. Every declared read-only

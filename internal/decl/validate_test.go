@@ -1,6 +1,7 @@
 package decl
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,9 +161,25 @@ func TestValidateRejectsDuplicateNetworkAndServices(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 	d, dir = validForValidation(t)
+	d.Network.Allow = []NetworkAllow{{Host: "example.com", Port: 443}, {Host: "example.com.", Port: 443}}
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "duplicate network") {
+		t.Fatalf("trailing-dot duplicate = %v", err)
+	}
+	d, dir = validForValidation(t)
 	d.Services = append(d.Services, d.Services[0])
 	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "duplicate service") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestValidateBoundsGovernedNetworkDestinations(t *testing.T) {
+	d, dir := validForValidation(t)
+	d.Network.Allow = make([]NetworkAllow, 257)
+	for index := range d.Network.Allow {
+		d.Network.Allow[index] = NetworkAllow{Host: fmt.Sprintf("host-%03d.example", index), Port: 443}
+	}
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "256") {
+		t.Fatalf("network destination bound = %v", err)
 	}
 }
 

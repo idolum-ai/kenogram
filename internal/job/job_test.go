@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -72,6 +73,8 @@ type fakeProcess struct {
 	waitMu         sync.Mutex
 	waitDone       chan struct{}
 	waitClosed     bool
+	egress         bool
+	egressMutate   func(*jobcontract.EgressEvidence)
 }
 
 func (f *fakeProcess) BeginWait() {
@@ -188,7 +191,21 @@ func (f *fakeProcess) Finalize(context.Context) (RuntimeFinalization, error) {
 	if after == nil {
 		after = fakeRuntimeObservation(f.invocation, "after")
 	}
-	return RuntimeFinalization{After: after, Artifacts: f.artifacts}, f.finalErr
+	var egress []byte
+	if f.egress {
+		value := jobcontract.EgressEvidence{
+			Schema: jobcontract.EgressEvidenceSchema, Status: "complete", AllowlistSHA256: EgressAllowlistDigest(f.invocation.Prepared.Result.Plan.NetworkAllow),
+			ListenerAddress: "127.0.0.1:3128", OwnerID: strings.Repeat("d", 32), ContainerID: strings.Repeat("c", 64), Generation: 1,
+			PID: 42, ProcessStart: "start", UserNamespace: jobcontract.NamespaceIdentity{Device: 1, Inode: 2}, NetworkNamespace: jobcontract.NamespaceIdentity{Device: 3, Inode: 4},
+			ReadyAt: "2026-08-05T11:59:59Z", EnvironmentKeys: append([]string{}, EgressEnvironmentKeys...), DiagnosticsSHA256: testDigest(),
+			RevokedAt: "2026-08-05T12:00:01Z", ListenerClosed: true, ActiveConnectionsZero: true, Joined: true, Reasons: []string{},
+		}
+		if f.egressMutate != nil {
+			f.egressMutate(&value)
+		}
+		egress, _ = json.Marshal(value)
+	}
+	return RuntimeFinalization{After: after, Egress: egress, Artifacts: f.artifacts}, f.finalErr
 }
 
 func fakeRuntimeObservation(invocation Invocation, phase string) []byte {
@@ -227,6 +244,12 @@ func fakeRuntimeObservation(invocation Invocation, phase string) []byte {
 	}
 	if running {
 		value.IPCIsolated, value.UIDIdentity, value.GIDIdentity, value.NoNewPrivileges, value.SeccompMode = true, true, true, true, 2
+		if len(invocation.Prepared.Result.Plan.NetworkAllow) != 0 {
+			value.EgressAdmission = &jobcontract.RuntimeEgressAdmission{
+				AllowlistSHA256: EgressAllowlistDigest(invocation.Prepared.Result.Plan.NetworkAllow), ListenerAddress: "127.0.0.1:3128", OwnerID: strings.Repeat("d", 32),
+				PID: 42, ProcessStart: "start", UserNamespace: jobcontract.NamespaceIdentity{Device: 1, Inode: 2}, NetworkNamespace: jobcontract.NamespaceIdentity{Device: 3, Inode: 4},
+			}
+		}
 	}
 	raw, _ := json.Marshal(value)
 	return raw
@@ -254,6 +277,161 @@ func TestExecutorSealsAndVerifierRederivesEvidence(t *testing.T) {
 	if _, err := Verify(evidence); err == nil || !(strings.Contains(err.Error(), "changed") || strings.Contains(err.Error(), "bound")) {
 		t.Fatalf("substitution verification error=%v", err)
 	}
+}
+
+func TestExecutorSealsAndReplaysScopedEgressEvidence(t *testing.T) {
+	outcome, evidence := runScopedEgressFixture(t, nil)
+	if !outcome.Sealed || outcome.Result.Status != "complete" || outcome.Result.Identity.EgressSHA256 == "" {
+		t.Fatalf("outcome=%#v", outcome)
+	}
+	egressRaw, err := os.ReadFile(filepath.Join(evidence, "egress.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jobcontract.ParseEgressEvidence(egressRaw); err != nil {
+		t.Fatal(err)
+	}
+	verification, err := Verify(evidence)
+	if err != nil || verification.Status != "complete" {
+		t.Fatalf("verification=%#v error=%v", verification, err)
+	}
+	resealEgressMutation(t, evidence, func(egress *jobcontract.EgressEvidence) {
+		egress.AllowlistSHA256 = "sha256:" + strings.Repeat("b", 64)
+	})
+	if _, err := Verify(evidence); err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("cross-bound egress substitution error=%v", err)
+	}
+}
+
+func TestVerifierRejectsResealedEgressAdmissionIdentitySubstitution(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*jobcontract.EgressEvidence)
+	}{
+		{name: "listener address", mutate: func(value *jobcontract.EgressEvidence) { value.ListenerAddress = "127.0.0.1:3129" }},
+		{name: "owner identity", mutate: func(value *jobcontract.EgressEvidence) { value.OwnerID = strings.Repeat("e", 32) }},
+		{name: "pid", mutate: func(value *jobcontract.EgressEvidence) { value.PID++ }},
+		{name: "process start", mutate: func(value *jobcontract.EgressEvidence) { value.ProcessStart = "replacement" }},
+		{name: "user namespace device", mutate: func(value *jobcontract.EgressEvidence) { value.UserNamespace.Device++ }},
+		{name: "user namespace inode", mutate: func(value *jobcontract.EgressEvidence) { value.UserNamespace.Inode++ }},
+		{name: "network namespace device", mutate: func(value *jobcontract.EgressEvidence) { value.NetworkNamespace.Device++ }},
+		{name: "network namespace inode", mutate: func(value *jobcontract.EgressEvidence) { value.NetworkNamespace.Inode++ }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, evidence := runScopedEgressFixture(t, nil)
+			resealEgressMutation(t, evidence, test.mutate)
+			if _, err := Verify(evidence); err == nil || !strings.Contains(err.Error(), "runtime admission") {
+				t.Fatalf("resealed %s substitution error=%v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestExecutorOmitsInvalidOrUnrequestedEgressFromVerifiableIncompleteSeal(t *testing.T) {
+	t.Run("wrong allowlist", func(t *testing.T) {
+		outcome, evidence := runScopedEgressFixture(t, func(value *jobcontract.EgressEvidence) {
+			value.AllowlistSHA256 = "sha256:" + strings.Repeat("b", 64)
+		})
+		if !outcome.Sealed || outcome.Result.Status != "incomplete" || !slices.Contains(outcome.Result.Reasons, "EGRESS_EVIDENCE_INVALID") || outcome.Result.Identity.EgressSHA256 != "" {
+			t.Fatalf("outcome=%#v", outcome)
+		}
+		if _, err := os.Stat(filepath.Join(evidence, "egress.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("invalid egress artifact remains: %v", err)
+		}
+		verification, err := Verify(evidence)
+		if err != nil || verification.Status != "incomplete" {
+			t.Fatalf("verification=%#v error=%v", verification, err)
+		}
+	})
+
+	t.Run("networkless runtime output", func(t *testing.T) {
+		executor, requestRaw, evidence, runtime := fixture(t)
+		runtime.process.egress = true
+		outcome, err := executor.Run(context.Background(), requestRaw, evidence)
+		if err != nil || !outcome.Sealed || outcome.Result.Status != "incomplete" || !slices.Contains(outcome.Result.Reasons, "UNREQUESTED_EGRESS_EVIDENCE") || outcome.Result.Identity.EgressSHA256 != "" {
+			t.Fatalf("outcome=%#v error=%v", outcome, err)
+		}
+		if _, err := os.Stat(filepath.Join(evidence, "egress.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unrequested egress artifact remains: %v", err)
+		}
+		verification, err := Verify(evidence)
+		if err != nil || verification.Status != "incomplete" {
+			t.Fatalf("verification=%#v error=%v", verification, err)
+		}
+	})
+}
+
+func runScopedEgressFixture(t *testing.T, mutate func(*jobcontract.EgressEvidence)) (Outcome, string) {
+	t.Helper()
+	executor, requestRaw, evidence, runtime := fixture(t)
+	request, err := jobcontract.ParseRequest(requestRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration, err := os.ReadFile(request.Declaration.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration = append(declaration, []byte("\n[[network.allow]]\nhost = \"example.test\"\nport = 443\n")...)
+	if err := os.WriteFile(request.Declaration.Path, declaration, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request.Declaration.SHA256 = digest(declaration)
+	requestRaw, err = json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.process.egress = true
+	runtime.process.egressMutate = mutate
+	outcome, err := executor.Run(context.Background(), requestRaw, evidence)
+	if err != nil {
+		t.Fatalf("outcome=%#v error=%v", outcome, err)
+	}
+	return outcome, evidence
+}
+
+func resealEgressMutation(t *testing.T, evidence string, mutate func(*jobcontract.EgressEvidence)) {
+	t.Helper()
+	egressRaw, err := os.ReadFile(filepath.Join(evidence, "egress.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	egress, err := jobcontract.ParseEgressEvidence(egressRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&egress)
+	egressRaw, _ = json.Marshal(egress)
+	if err := os.WriteFile(filepath.Join(evidence, "egress.json"), egressRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resultPath := filepath.Join(evidence, "result.json")
+	resultRaw, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := jobcontract.ParseResult(resultRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Identity.EgressSHA256 = digest(egressRaw)
+	resultRaw, _ = json.Marshal(result)
+	if err := os.WriteFile(resultPath, resultRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rewriteManifest(t, evidence, func(manifest *jobcontract.Manifest) {
+		manifest.ResultSHA256 = digest(resultRaw)
+		for index := range manifest.Entries {
+			switch manifest.Entries[index].Path {
+			case "egress.json":
+				manifest.Entries[index].Size = int64(len(egressRaw))
+				manifest.Entries[index].SHA256 = digest(egressRaw)
+			case "result.json":
+				manifest.Entries[index].Size = int64(len(resultRaw))
+				manifest.Entries[index].SHA256 = digest(resultRaw)
+			}
+		}
+	})
 }
 
 func TestRequestFileReadIsDescriptorBoundedRegularAndCancelable(t *testing.T) {

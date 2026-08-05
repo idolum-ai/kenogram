@@ -18,6 +18,10 @@ func TestNamespaceOperationsFailClosedOutsideLinux(t *testing.T) {
 			_, err := AcquireListener(context.Background(), 1, "127.0.0.1:1")
 			return err
 		}},
+		{name: "acquire bound listener", run: func() error {
+			_, _, err := AcquireBoundListener(context.Background(), 1, "start", "127.0.0.1:1", func() error { return nil })
+			return err
+		}},
 		{name: "send listener", run: func() error { return SendListener(3, "/tmp/control") }},
 		{name: "acquire connection", run: func() error {
 			_, err := AcquireConnection(context.Background(), 1, "start", "127.0.0.1:1", func() error { return nil })

@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	MaximumItems      = 128
+	MaximumItems      = 136 // 128 request-owned values plus governed system values.
 	MaximumValueBytes = 16 << 10
 	maximumNameBytes  = 255
 	magic             = "KENOGRAM_JOB_ENV_V1\x00"

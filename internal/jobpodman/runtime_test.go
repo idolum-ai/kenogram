@@ -1,6 +1,7 @@
 package jobpodman
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -27,6 +28,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/jobcontract"
 	"github.com/idolum-ai/kenogram/internal/jobenv"
 	"github.com/idolum-ai/kenogram/internal/joblifecycle"
+	"github.com/idolum-ai/kenogram/internal/netns"
 	"github.com/idolum-ai/kenogram/internal/plan"
 	"github.com/idolum-ai/kenogram/internal/sourcetree"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
@@ -36,6 +38,41 @@ type fakeAttachedStarter struct {
 	process *fakeAttachedProcess
 	args    []string
 	stdin   []byte
+}
+
+type stuckListener struct {
+	release chan struct{}
+}
+
+type crashingListener struct {
+	trigger chan struct{}
+	crashed chan struct{}
+	once    sync.Once
+}
+
+func (l *stuckListener) Accept() (net.Conn, error) { <-l.release; return nil, net.ErrClosed }
+func (l *stuckListener) Close() error              { return errors.New("injected listener close failure") }
+func (l *stuckListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3128}
+}
+
+func (l *crashingListener) Accept() (net.Conn, error) {
+	<-l.trigger
+	close(l.crashed)
+	return nil, errors.New("injected proxy listener crash")
+}
+
+func (l *crashingListener) Close() error {
+	l.once.Do(func() { close(l.trigger) })
+	return nil
+}
+
+func (l *crashingListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3128}
+}
+
+func (l *crashingListener) Crash() {
+	l.once.Do(func() { close(l.trigger) })
 }
 
 func (f *fakeAttachedStarter) BindLifecycle(path string, key []byte) {
@@ -94,6 +131,8 @@ type fakePodmanRunner struct {
 	containerID          string
 	cancelOnCreate       func()
 	afterStart           func()
+	pid                  int
+	processStart         string
 }
 
 func (f *fakePodmanRunner) Run(ctx context.Context, _ string, args ...string) ([]byte, error) {
@@ -230,7 +269,7 @@ func (f *fakePodmanRunner) inspect() []byte {
 	containerID := f.containerIDValue()
 	doc := map[string]any{
 		"Id": containerID, "Name": f.name, "Image": imageReference, "ImageDigest": imageDigest, "BoundingCaps": []string{},
-		"State":      map[string]any{"Running": f.running, "Pid": map[bool]int{true: 4242, false: 0}[f.running]},
+		"State":      map[string]any{"Running": f.running, "Pid": map[bool]int{true: f.pid, false: 0}[f.running]},
 		"IDMappings": map[string]any{"UidMap": []map[string]any{{"ContainerID": uid, "HostID": uid, "Size": 1}}, "GidMap": []map[string]any{{"ContainerID": gid, "HostID": gid, "Size": 1}}},
 		"Config":     map[string]any{"Labels": f.labels, "User": "agent", "Hostname": "job", "WorkingDir": "/workspace"},
 		"HostConfig": map[string]any{"NetworkMode": "none", "IpcMode": "private", "PidMode": "private", "UTSMode": "private", "UsernsMode": "keep-id", "Memory": 1073741824, "NanoCpus": 1000000000, "PidsLimit": 64, "CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges"}, "Devices": []any{}},
@@ -285,6 +324,14 @@ func TestDirectRuntimeOwnsAttachedLifecycleAndCleanupProof(t *testing.T) {
 
 func TestDirectRuntimeCancellationEscalatesAndReportsUnknown(t *testing.T) {
 	runtime, runner, attached, invocation := runtimeFixture(t)
+	invocation.Prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "example.test", Port: 443}}
+	runtime.listener = func(_ context.Context, _ int, _, address string, revalidate func() error) (net.Listener, netns.NamespaceIdentity, error) {
+		if err := revalidate(); err != nil {
+			return nil, netns.NamespaceIdentity{}, err
+		}
+		listener, err := net.Listen("tcp4", address)
+		return listener, netns.NamespaceIdentity{UserInode: 1, NetworkInode: 2}, err
+	}
 	runner.onStop = func() { attached.finish(errors.New("container stopped")) }
 	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
 	if err != nil {
@@ -297,7 +344,7 @@ func TestDirectRuntimeCancellationEscalatesAndReportsUnknown(t *testing.T) {
 		t.Fatalf("target=%#v err=%v", target, err)
 	}
 	cleanup := runtime.Cleanup(context.Background(), invocation)
-	if cleanup.Status != "complete" || !cleanup.ContainerAbsent {
+	if cleanup.Status != "complete" || !cleanup.ContainerAbsent || !cleanup.ProxyAbsent {
 		t.Fatalf("cleanup=%#v", cleanup)
 	}
 	if !hasCall(runner.calls, "stop", "--time", "1") {
@@ -338,14 +385,19 @@ func TestDirectRuntimeRefusesUnsupportedAuthorityBeforeCreation(t *testing.T) {
 		name string
 		edit func(*job.Invocation)
 	}{
-		{name: "network", edit: func(value *job.Invocation) {
-			value.Prepared.Result.Plan.NetworkAllow = append(value.Prepared.Result.Plan.NetworkAllow, plan.NetworkAllow{Host: "example.test", Port: 443})
-		}},
 		{name: "relative command", edit: func(value *job.Invocation) {
 			value.Request.Command.Argv[0] = "probe"
 		}},
 		{name: "helper workspace overlap", edit: func(value *job.Invocation) {
 			value.Prepared.Result.Plan.Workspace = []string{"/etc"}
+		}},
+		{name: "reserved proxy environment", edit: func(value *job.Invocation) {
+			proxy := "http://attacker.invalid:8080"
+			value.Request.Command.Environment = append(value.Request.Command.Environment, jobcontract.EnvironmentItem{Name: "hTtP_pRoXy", PublicValue: &proxy})
+		}},
+		{name: "reserved no proxy environment", edit: func(value *job.Invocation) {
+			bypass := "*"
+			value.Request.Command.Environment = append(value.Request.Command.Environment, jobcontract.EnvironmentItem{Name: "no_proxy", PublicValue: &bypass})
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -358,6 +410,266 @@ func TestDirectRuntimeRefusesUnsupportedAuthorityBeforeCreation(t *testing.T) {
 				t.Fatalf("container created: %v", runner.calls)
 			}
 		})
+	}
+}
+
+func TestGovernedEgressAllowsExactConnectAndRetainsBoundedLifecycle(t *testing.T) {
+	upstream, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upstream.Close()
+	upstreamDone := make(chan error, 1)
+	go func() {
+		connection, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			upstreamDone <- acceptErr
+			return
+		}
+		defer connection.Close()
+		buffer := make([]byte, 4)
+		_, readErr := io.ReadFull(connection, buffer)
+		if readErr == nil && string(buffer) == "ping" {
+			_, readErr = connection.Write([]byte("pong"))
+		}
+		upstreamDone <- readErr
+	}()
+
+	runtime, runner, attached, invocation := runtimeFixture(t)
+	port := int64(upstream.Addr().(*net.TCPAddr).Port)
+	invocation.Prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "127.0.0.1", Port: port}}
+	runtime.listener = func(ctx context.Context, pid int, processStart, address string, revalidate func() error) (net.Listener, netns.NamespaceIdentity, error) {
+		if pid != 4242 || processStart != "start" || address != "127.0.0.1:0" {
+			return nil, netns.NamespaceIdentity{}, errors.New("wrong namespace authority")
+		}
+		if err := revalidate(); err != nil {
+			return nil, netns.NamespaceIdentity{}, err
+		}
+		listener, err := net.Listen("tcp4", address)
+		return listener, netns.NamespaceIdentity{UserDevice: 1, UserInode: 2, NetworkDevice: 3, NetworkInode: 4}, err
+	}
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := process.Identity(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := jobcontract.ParseRuntimeObservation(identity.Before)
+	if err != nil || before.EgressAdmission == nil || before.EgressAdmission.PID != 4242 || before.EgressAdmission.ProcessStart != "start" || before.EgressAdmission.AllowlistSHA256 != job.EgressAllowlistDigest(invocation.Prepared.Result.Plan.NetworkAllow) {
+		t.Fatalf("runtime egress admission=%#v error=%v", before.EgressAdmission, err)
+	}
+	items, _, err := jobenv.DecodeLaunch(bytes.NewReader(runtime.starter.(*fakeAttachedStarter).stdin))
+	if err != nil || len(items) != 7 {
+		t.Fatalf("target environment=%#v err=%v", items, err)
+	}
+	values := map[string]string{}
+	for _, item := range items {
+		values[item.Name] = string(item.Value)
+	}
+	proxyURL := values["HTTPS_PROXY"]
+	if proxyURL == "" || values["HTTP_PROXY"] != proxyURL || values["ALL_PROXY"] != proxyURL || values["https_proxy"] != proxyURL || values["http_proxy"] != proxyURL || values["all_proxy"] != proxyURL {
+		t.Fatalf("system proxy environment=%#v", values)
+	}
+	if _, exists := values["NO_PROXY"]; exists {
+		t.Fatalf("NO_PROXY unexpectedly injected: %#v", values)
+	}
+	proxyAddress := strings.TrimPrefix(proxyURL, "http://")
+	client, err := net.Dial("tcp4", proxyAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(client)
+	if _, err := fmt.Fprintf(client, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", upstream.Addr(), upstream.Addr()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := reader.ReadString('\n')
+	if err != nil || !strings.Contains(status, "200") {
+		t.Fatalf("CONNECT status=%q err=%v", status, err)
+	}
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	if _, err := client.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, 4)
+	if _, err := io.ReadFull(reader, response); err != nil || string(response) != "pong" {
+		t.Fatalf("tunnel response=%q err=%v", response, err)
+	}
+	client.Close()
+	if err := <-upstreamDone; err != nil {
+		t.Fatal(err)
+	}
+	holdDone := make(chan error, 1)
+	go func() {
+		connection, acceptErr := upstream.Accept()
+		if acceptErr != nil {
+			holdDone <- acceptErr
+			return
+		}
+		defer connection.Close()
+		_, readErr := connection.Read(make([]byte, 1))
+		holdDone <- readErr
+	}()
+	active, err := net.Dial("tcp4", proxyAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeReader := bufio.NewReader(active)
+	if _, err := fmt.Fprintf(active, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", upstream.Addr(), upstream.Addr()); err != nil {
+		t.Fatal(err)
+	}
+	activeStatus, _ := activeReader.ReadString('\n')
+	if !strings.Contains(activeStatus, "200") {
+		t.Fatalf("active CONNECT status=%q", activeStatus)
+	}
+	for {
+		line, readErr := activeReader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	refused, err := net.Dial("tcp4", proxyAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(refused, "CONNECT example.invalid:443 HTTP/1.1\r\nHost: example.invalid:443\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	refusedStatus, _ := bufio.NewReader(refused).ReadString('\n')
+	refused.Close()
+	if !strings.Contains(refusedStatus, "403") {
+		t.Fatalf("undeclared CONNECT status=%q", refusedStatus)
+	}
+	attached.finish(nil)
+	if _, err := process.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_ = active.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := active.Read(make([]byte, 1)); err == nil {
+		t.Fatal("active tunnel survived target completion")
+	}
+	active.Close()
+	if err := <-holdDone; err != nil && !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	final, err := process.Finalize(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	egress, err := jobcontract.ParseEgressEvidence(final.Egress)
+	if err != nil || egress.Status != "complete" || egress.Accepted != 2 || egress.Refused != 1 || !egress.ActiveConnectionsZero || !egress.Joined {
+		t.Fatalf("egress=%#v err=%v", egress, err)
+	}
+	cleanup := runtime.Cleanup(context.Background(), invocation)
+	if cleanup.Status != "complete" || !cleanup.ProxyAbsent {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+	if !hasCall(runner.calls, "create", "--name") || !hasCall(runner.calls, "--network", "none") {
+		t.Fatalf("network-none provider calls=%v", runner.calls)
+	}
+}
+
+func TestGovernedEgressRejectsReplacedRuntimeDuringNamespacePin(t *testing.T) {
+	runtime, runner, _, invocation := runtimeFixture(t)
+	invocation.Prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "example.test", Port: 443}}
+	runtime.listener = func(_ context.Context, _ int, _, _ string, revalidate func() error) (net.Listener, netns.NamespaceIdentity, error) {
+		runner.mu.Lock()
+		runner.pid = 4343
+		runner.processStart = "replacement"
+		runner.mu.Unlock()
+		return nil, netns.NamespaceIdentity{}, revalidate()
+	}
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if process == nil || err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("process=%#v error=%v", process, err)
+	}
+	if len(runtime.starter.(*fakeAttachedStarter).args) != 0 {
+		t.Fatalf("target started after namespace replacement: %v", runtime.starter.(*fakeAttachedStarter).args)
+	}
+	cleanup := runtime.Cleanup(context.Background(), invocation)
+	if cleanup.Status != "complete" || !cleanup.ContainerAbsent {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+}
+
+func TestGovernedEgressJoinAndListenerFailureRemainIncomplete(t *testing.T) {
+	runtime, _, _, invocation := runtimeFixture(t)
+	invocation.Prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "example.test", Port: 443}}
+	listener := &stuckListener{release: make(chan struct{})}
+	runtime.listener = func(_ context.Context, _ int, _, _ string, revalidate func() error) (net.Listener, netns.NamespaceIdentity, error) {
+		if err := revalidate(); err != nil {
+			return nil, netns.NamespaceIdentity{}, err
+		}
+		return listener, netns.NamespaceIdentity{UserInode: 1, NetworkInode: 2}, nil
+	}
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil || process == nil {
+		t.Fatalf("process=%#v error=%v", process, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	raw, stopErr := runtime.stopEgress(ctx)
+	cancel()
+	close(listener.release)
+	if stopErr == nil {
+		t.Fatal("unjoined proxy lifecycle was accepted")
+	}
+	egress, parseErr := jobcontract.ParseEgressEvidence(raw)
+	if parseErr != nil || egress.Status != "incomplete" || egress.Joined || egress.ListenerClosed || len(egress.Reasons) == 0 {
+		t.Fatalf("egress=%#v parse_error=%v stop_error=%v", egress, parseErr, stopErr)
+	}
+	cleanup := runtime.Cleanup(context.Background(), invocation)
+	if cleanup.Status != "incomplete" || cleanup.ProxyAbsent {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+}
+
+func TestGovernedEgressProxyCrashCannotBecomeComplete(t *testing.T) {
+	runtime, _, attached, invocation := runtimeFixture(t)
+	invocation.Prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "example.test", Port: 443}}
+	listener := &crashingListener{trigger: make(chan struct{}), crashed: make(chan struct{})}
+	runtime.listener = func(_ context.Context, _ int, _, _ string, revalidate func() error) (net.Listener, netns.NamespaceIdentity, error) {
+		if err := revalidate(); err != nil {
+			return nil, netns.NamespaceIdentity{}, err
+		}
+		return listener, netns.NamespaceIdentity{UserInode: 1, NetworkInode: 2}, nil
+	}
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil || process == nil {
+		t.Fatalf("process=%#v error=%v", process, err)
+	}
+	listener.Crash()
+	select {
+	case <-listener.crashed:
+	case <-time.After(time.Second):
+		t.Fatal("proxy listener did not crash")
+	}
+	attached.finish(nil)
+	if target, waitErr := process.Wait(context.Background()); waitErr == nil || target.Kind != "unknown" {
+		t.Fatalf("target=%#v error=%v", target, waitErr)
+	}
+	final, finalErr := process.Finalize(context.Background())
+	if finalErr == nil {
+		t.Fatal("proxy crash produced a complete finalization")
+	}
+	egress, parseErr := jobcontract.ParseEgressEvidence(final.Egress)
+	if parseErr != nil || egress.Status != "incomplete" || !egress.ListenerClosed || !egress.ActiveConnectionsZero || !egress.Joined || !slices.Contains(egress.Reasons, "PROXY_SERVE_FAILED") {
+		t.Fatalf("egress=%#v parse_error=%v final_error=%v", egress, parseErr, finalErr)
+	}
+	cleanup := runtime.Cleanup(context.Background(), invocation)
+	if cleanup.Status != "incomplete" || cleanup.ProxyAbsent {
+		t.Fatalf("cleanup=%#v", cleanup)
 	}
 }
 
@@ -2044,10 +2356,14 @@ paths = ["/workspace"]
 		t.Fatal(err)
 	}
 	invocation.Provenance = provenance
-	runner := &fakePodmanRunner{}
+	runner := &fakePodmanRunner{pid: 4242, processStart: "start"}
 	podman := backend.New(runner)
 	podman.ReadProcStatus = func(int) ([]byte, error) { return []byte("Seccomp:\t2\n"), nil }
-	podman.ReadProcessStart = func(int) string { return "start" }
+	podman.ReadProcessStart = func(int) string {
+		runner.mu.Lock()
+		defer runner.mu.Unlock()
+		return runner.processStart
+	}
 	podman.MountIdentity = func(int, string, string) (bool, error) { return true, nil }
 	podman.IPCIsolatedFromHost = func(int) (bool, error) { return true, nil }
 	attached := newFakeAttached()

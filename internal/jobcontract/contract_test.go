@@ -90,6 +90,19 @@ func TestRuntimeObservationMountBoundAccepts512AndRejects513(t *testing.T) {
 	if err := ValidateRuntimeObservation(makeObservation(MaxRuntimeMounts + 1)); err == nil || !strings.Contains(err.Error(), "inventory") {
 		t.Fatalf("513 mounts accepted: %v", err)
 	}
+	withEgress := makeObservation(1)
+	withEgress.EgressAdmission = &RuntimeEgressAdmission{
+		AllowlistSHA256: testDigest, ListenerAddress: "127.0.0.1:3128", OwnerID: strings.Repeat("d", 32), PID: 42, ProcessStart: "start",
+		UserNamespace: NamespaceIdentity{Device: 1, Inode: 2}, NetworkNamespace: NamespaceIdentity{Device: 3, Inode: 4},
+	}
+	if err := ValidateRuntimeObservation(withEgress); err != nil {
+		t.Fatalf("valid before-phase egress admission rejected: %v", err)
+	}
+	withEgress.Phase = "after"
+	withEgress.Running = false
+	if err := ValidateRuntimeObservation(withEgress); err == nil || !strings.Contains(err.Error(), "live egress admission") {
+		t.Fatalf("after-phase egress admission accepted: %v", err)
+	}
 }
 
 func TestRuntimeMountSourcesBindAuthorityOrImmutableContent(t *testing.T) {
@@ -302,6 +315,45 @@ func TestRequestRejectsAuthorityAndBoundViolations(t *testing.T) {
 	}
 }
 
+func TestRequestReservesGovernedProxyEnvironment(t *testing.T) {
+	for _, name := range []string{"HTTP_PROXY", "https_proxy", "All_Proxy", "NO_PROXY", "no_proxy"} {
+		t.Run(name, func(t *testing.T) {
+			value := validRequest()
+			public := "http://attacker.invalid"
+			value.Command.Environment = append(value.Command.Environment, EnvironmentItem{Name: name, PublicValue: &public})
+			if err := ValidateRequest(value); err == nil || !strings.Contains(err.Error(), "proxy") {
+				t.Fatalf("reserved environment accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestEgressEvidenceRequiresBoundedCompleteLifecycle(t *testing.T) {
+	value := EgressEvidence{
+		Schema: EgressEvidenceSchema, Status: "complete", AllowlistSHA256: testDigest,
+		ListenerAddress: "127.0.0.1:3128", OwnerID: strings.Repeat("d", 32), ContainerID: strings.Repeat("c", 64), Generation: 1,
+		PID: 42, ProcessStart: "start", UserNamespace: NamespaceIdentity{Device: 1, Inode: 2}, NetworkNamespace: NamespaceIdentity{Device: 3, Inode: 4},
+		ReadyAt: "2026-08-05T12:00:00Z", EnvironmentKeys: []string{"ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "https_proxy", "http_proxy"},
+		DiagnosticsSHA256: testDigest, RevokedAt: "2026-08-05T12:00:02Z", ListenerClosed: true, ActiveConnectionsZero: true, Joined: true, Reasons: []string{},
+	}
+	if err := ValidateEgressEvidence(value); err != nil {
+		t.Fatal(err)
+	}
+	for _, edit := range []func(*EgressEvidence){
+		func(v *EgressEvidence) { v.ListenerAddress = "0.0.0.0:3128" },
+		func(v *EgressEvidence) { v.NetworkNamespace.Inode = 0 },
+		func(v *EgressEvidence) { v.EnvironmentKeys[0] = "NO_PROXY" },
+		func(v *EgressEvidence) { v.Joined = false },
+	} {
+		changed := value
+		changed.EnvironmentKeys = append([]string{}, value.EnvironmentKeys...)
+		edit(&changed)
+		if err := ValidateEgressEvidence(changed); err == nil {
+			t.Fatalf("invalid egress evidence accepted: %#v", changed)
+		}
+	}
+}
+
 func TestRequestRetainsOnlySecretFileReference(t *testing.T) {
 	t.Parallel()
 	value := validRequest()
@@ -409,6 +461,7 @@ func TestPublishedSchemasAreClosedJSONDocuments(t *testing.T) {
 		"kenogram.job-evidence-manifest.v1.schema.json":      ManifestSchema,
 		"kenogram.executable-provenance.v1.schema.json":      ProvenanceSchema,
 		"kenogram.podman-runtime-observation.v1.schema.json": RuntimeObservationSchema,
+		"kenogram.job-egress-evidence.v1.schema.json":        EgressEvidenceSchema,
 	}
 	for name, identifier := range tests {
 		t.Run(name, func(t *testing.T) {

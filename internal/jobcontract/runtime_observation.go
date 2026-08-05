@@ -3,9 +3,11 @@ package jobcontract
 import (
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -57,6 +59,20 @@ func ValidateRuntimeObservation(value RuntimeObservation) error {
 	}
 	if len(value.Mounts) == 0 || len(value.Mounts) > MaxRuntimeMounts || !sort.SliceIsSorted(value.Mounts, func(i, j int) bool { return value.Mounts[i].Target < value.Mounts[j].Target }) {
 		return errors.New("runtime mount inventory is empty or unsorted")
+	}
+	if value.Phase == "after" && value.EgressAdmission != nil {
+		return errors.New("stopped runtime observation cannot claim a live egress admission")
+	}
+	if value.EgressAdmission != nil {
+		admission := value.EgressAdmission
+		host, portText, splitErr := net.SplitHostPort(admission.ListenerAddress)
+		port, portErr := strconv.Atoi(portText)
+		if !validDigest(admission.AllowlistSHA256) || !ownerIDPattern.MatchString(admission.OwnerID) ||
+			admission.PID < 1 || admission.PID > MaximumWireInteger || !validOpaqueText(admission.ProcessStart, 1, 256) ||
+			!validNamespaceIdentity(admission.UserNamespace) || !validNamespaceIdentity(admission.NetworkNamespace) ||
+			splitErr != nil || portErr != nil || host != "127.0.0.1" || port < 1 || port > 65535 || net.JoinHostPort(host, strconv.Itoa(port)) != admission.ListenerAddress {
+			return errors.New("runtime egress admission is invalid")
+		}
 	}
 	return nil
 }

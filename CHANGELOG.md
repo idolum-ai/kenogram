@@ -14,8 +14,13 @@ Notable user-visible and operational changes are recorded here.
   exact container removal. Bound context-ignoring provider and artifact operations,
   make cleanup unavoidable after admission, keep verifier work independent of
   manifest claims, cross-bind secret-safe plan and runtime image identity, and
-  make seal durability descriptor-rooted. Declared job egress, a hosted Linux
-  release-candidate replay, and a release claim remain later work. Raise the module API floor to Go 1.25 for the standard-library
+  make seal durability descriptor-rooted. Add K6 scoped governed-job egress:
+  keep `network=none`, descriptor-pin and revalidate the exact holder namespaces,
+  inject only system-owned proxy variables, enforce exact host/port policy with
+  per-connection DNS, independently bind admission identity in pre-target runtime
+  evidence, and seal bounded metadata-only revocation/join evidence. Invalid or
+  unrequested egress output is omitted from a replayable incomplete seal.
+  Hosted Linux K6 and release-candidate replay and a release claim remain later work. Raise the module API floor to Go 1.25 for the standard-library
   descriptor-owned `os.Root` boundary used on macOS and for evidence paths;
   the pinned build toolchain remains Go 1.26.5.
 - Harden the direct job provider with option-terminated strict image

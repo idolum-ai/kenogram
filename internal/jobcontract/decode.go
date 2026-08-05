@@ -64,6 +64,17 @@ func ParseRuntimeObservation(raw []byte) (RuntimeObservation, error) {
 	return value, nil
 }
 
+func ParseEgressEvidence(raw []byte) (EgressEvidence, error) {
+	var value EgressEvidence
+	if err := decode(raw, MaximumEgressEvidenceBytes, &value); err != nil {
+		return value, fmt.Errorf("decode egress evidence: %w", err)
+	}
+	if err := ValidateEgressEvidence(value); err != nil {
+		return value, err
+	}
+	return value, nil
+}
+
 // ValidateJSONDocument applies the common bounded, UTF-8, duplicate-key, and
 // trailing-data rules to an otherwise provider-owned JSON observation.
 func ValidateJSONDocument(raw []byte, maximum int) error {

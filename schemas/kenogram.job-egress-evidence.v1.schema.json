@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://idolum.ai/kenogram/schemas/kenogram.job-egress-evidence.v1.schema.json",
+  "title": "Kenogram governed job egress evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "allowlist_sha256", "listener_address", "owner_id", "container_id", "generation", "pid", "process_start", "user_namespace", "network_namespace", "ready_at", "environment_keys", "accepted", "refused", "dial_failed", "omitted", "diagnostics_sha256", "revoked_at", "listener_closed", "active_connections_zero", "joined", "reasons"],
+  "properties": {
+    "schema": {"const": "kenogram.job-egress-evidence.v1"},
+    "status": {"enum": ["complete", "incomplete"]},
+    "allowlist_sha256": {"$ref": "#/$defs/digest"},
+    "listener_address": {"type": "string", "pattern": "^127\\.0\\.0\\.1:[1-9][0-9]{0,4}$", "maxLength": 21},
+    "owner_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "container_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "generation": {"$ref": "#/$defs/positive"},
+    "pid": {"$ref": "#/$defs/positive"},
+    "process_start": {"type": "string", "minLength": 1, "maxLength": 256},
+    "user_namespace": {"$ref": "#/$defs/namespace"},
+    "network_namespace": {"$ref": "#/$defs/namespace"},
+    "ready_at": {"type": "string", "format": "date-time", "maxLength": 64},
+    "environment_keys": {"type": "array", "minItems": 6, "maxItems": 6, "uniqueItems": true, "prefixItems": [{"const": "ALL_PROXY"}, {"const": "HTTPS_PROXY"}, {"const": "HTTP_PROXY"}, {"const": "all_proxy"}, {"const": "https_proxy"}, {"const": "http_proxy"}], "items": false},
+    "accepted": {"$ref": "#/$defs/nonnegative"},
+    "refused": {"$ref": "#/$defs/nonnegative"},
+    "dial_failed": {"$ref": "#/$defs/nonnegative"},
+    "omitted": {"$ref": "#/$defs/nonnegative"},
+    "diagnostics_sha256": {"$ref": "#/$defs/digest"},
+    "revoked_at": {"type": "string", "format": "date-time", "maxLength": 64},
+    "listener_closed": {"type": "boolean"},
+    "active_connections_zero": {"type": "boolean"},
+    "joined": {"type": "boolean"},
+    "reasons": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"}}
+  },
+  "allOf": [{"if": {"properties": {"status": {"const": "complete"}}, "required": ["status"]}, "then": {"properties": {"listener_closed": {"const": true}, "active_connections_zero": {"const": true}, "joined": {"const": true}, "reasons": {"maxItems": 0}}}, "else": {"properties": {"reasons": {"minItems": 1}}}}],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "positive": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "nonnegative": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "namespace": {"type": "object", "additionalProperties": false, "required": ["device", "inode"], "properties": {"device": {"$ref": "#/$defs/nonnegative"}, "inode": {"$ref": "#/$defs/positive"}}}
+  }
+}

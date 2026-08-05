@@ -12,6 +12,10 @@ func AcquireListener(context.Context, int, string) (net.Listener, error) {
 	return nil, fmt.Errorf("Kenogram network namespace doors require Linux; use the Apple container-machine launcher on macOS")
 }
 
+func AcquireBoundListener(context.Context, int, string, string, func() error) (net.Listener, NamespaceIdentity, error) {
+	return nil, NamespaceIdentity{}, fmt.Errorf("Kenogram network namespace doors require Linux; use the Apple container-machine launcher on macOS")
+}
+
 func SendListener(int, string) error {
 	return fmt.Errorf("Kenogram network namespace doors require Linux")
 }

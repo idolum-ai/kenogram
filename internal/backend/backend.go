@@ -233,7 +233,10 @@ func (p *Podman) CreateGovernedJob(ctx context.Context, name string, result plan
 }
 
 func (p *Podman) createNamedWithLabels(ctx context.Context, name string, result plan.Result, generation int64, mounts []Mount, labels map[string]string, entrypoint string, command []string, returnID bool) (string, error) {
-	args := []string{"create", "--name", name, "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--image-volume", "ignore", "--hostname", result.Plan.World.Hostname, "--user", result.Plan.World.User, "--workdir", result.Plan.World.Workdir, "--cpus", strconv.FormatInt(result.Plan.Resources.CPUs, 10), "--memory", strconv.FormatInt(result.Plan.Resources.MemoryBytes, 10), "--pids-limit", strconv.FormatInt(result.Plan.Resources.PIDs, 10), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=" + result.Plan.Name, "--label", "io.kenogram.generation=" + strconv.FormatInt(generation, 10), "--label", "io.kenogram.plan-digest=" + result.PlanDigest, "--label", "io.kenogram.declaration-digest=" + result.DeclarationDigest, "--env", "NO_PROXY=localhost,127.0.0.1"}
+	args := []string{"create", "--name", name, "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--image-volume", "ignore", "--hostname", result.Plan.World.Hostname, "--user", result.Plan.World.User, "--workdir", result.Plan.World.Workdir, "--cpus", strconv.FormatInt(result.Plan.Resources.CPUs, 10), "--memory", strconv.FormatInt(result.Plan.Resources.MemoryBytes, 10), "--pids-limit", strconv.FormatInt(result.Plan.Resources.PIDs, 10), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=" + result.Plan.Name, "--label", "io.kenogram.generation=" + strconv.FormatInt(generation, 10), "--label", "io.kenogram.plan-digest=" + result.PlanDigest, "--label", "io.kenogram.declaration-digest=" + result.DeclarationDigest}
+	if !returnID {
+		args = append(args, "--env", "NO_PROXY=localhost,127.0.0.1")
+	}
 	labelNames := make([]string, 0, len(labels))
 	for key := range labels {
 		labelNames = append(labelNames, key)
@@ -242,7 +245,7 @@ func (p *Podman) createNamedWithLabels(ctx context.Context, name string, result 
 	for _, key := range labelNames {
 		args = append(args, "--label", key+"="+labels[key])
 	}
-	if len(result.Plan.NetworkAllow) > 0 {
+	if len(result.Plan.NetworkAllow) > 0 && !returnID {
 		args = append(args, "--env", "HTTP_PROXY=http://127.0.0.1:3128", "--env", "HTTPS_PROXY=http://127.0.0.1:3128")
 	}
 	for _, m := range mounts {

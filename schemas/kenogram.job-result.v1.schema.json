@@ -68,6 +68,7 @@
         "image_reference": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000]+$"},
         "image_digest": {"oneOf": [{"const": ""}, {"$ref": "#/$defs/digest"}]},
         "runtime_evidence_sha256": {"oneOf": [{"const": ""}, {"$ref": "#/$defs/digest"}]},
+        "egress_sha256": {"$ref": "#/$defs/digest"},
         "provenance_sha256": {"$ref": "#/$defs/digest"},
         "runtime_provider": {"type": "string", "enum": ["", "podman-cli"]}
       }

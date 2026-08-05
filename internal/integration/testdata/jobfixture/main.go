@@ -3,17 +3,20 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
 
 func main() {
-	if len(os.Args) != 2 {
+	if len(os.Args) < 2 {
 		os.Exit(40)
 	}
 	switch os.Args[1] {
@@ -23,6 +26,11 @@ func main() {
 		runProof()
 	case "--read-only":
 		runReadOnly()
+	case "--egress":
+		if len(os.Args) != 3 {
+			os.Exit(40)
+		}
+		runEgress(os.Args[2])
 	case "--hang-orphan":
 		child := exec.Command(os.Args[0], "--child")
 		if err := child.Start(); err != nil {
@@ -97,6 +105,64 @@ func probePortableWorkspace(exitCode int) {
 		fmt.Fprintln(os.Stderr, "portable workspace directory could not be removed")
 		os.Exit(exitCode + 5)
 	}
+}
+
+func runEgress(target string) {
+	proxyURL := os.Getenv("HTTPS_PROXY")
+	for _, name := range []string{"HTTP_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
+		if os.Getenv(name) != proxyURL || proxyURL == "" {
+			fmt.Fprintln(os.Stderr, "governed proxy environment mismatch")
+			os.Exit(60)
+		}
+	}
+	if os.Getenv("NO_PROXY") != "" || os.Getenv("no_proxy") != "" {
+		fmt.Fprintln(os.Stderr, "governed target received NO_PROXY")
+		os.Exit(61)
+	}
+	proxyAddress := strings.TrimPrefix(proxyURL, "http://")
+	connection, err := net.DialTimeout("tcp", proxyAddress, time.Second)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "governed proxy door unavailable")
+		os.Exit(62)
+	}
+	reader := bufio.NewReader(connection)
+	_, _ = fmt.Fprintf(connection, "CONNECT %s HTTP/1.1\r\nHost: %s\r\nX-Canary: egress-secret-canary\r\n\r\n", target, target)
+	status, err := reader.ReadString('\n')
+	if err != nil || !strings.Contains(status, "200") {
+		fmt.Fprintln(os.Stderr, "declared CONNECT failed")
+		os.Exit(63)
+	}
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			os.Exit(63)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	_, _ = connection.Write([]byte("ping"))
+	response := make([]byte, 4)
+	if _, err := io.ReadFull(reader, response); err != nil || string(response) != "pong" {
+		os.Exit(64)
+	}
+	connection.Close()
+	denied, err := net.DialTimeout("tcp", proxyAddress, time.Second)
+	if err != nil {
+		os.Exit(65)
+	}
+	_, _ = io.WriteString(denied, "CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\n\r\n")
+	deniedStatus, _ := bufio.NewReader(denied).ReadString('\n')
+	denied.Close()
+	if !strings.Contains(deniedStatus, "403") {
+		os.Exit(66)
+	}
+	direct, err := net.DialTimeout("tcp", target, 250*time.Millisecond)
+	if err == nil {
+		direct.Close()
+		os.Exit(67)
+	}
+	fmt.Println("governed egress complete")
 }
 
 func runProof() {

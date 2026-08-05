@@ -13,12 +13,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,7 +31,9 @@ import (
 	"github.com/idolum-ai/kenogram/internal/jobcontract"
 	"github.com/idolum-ai/kenogram/internal/jobenv"
 	"github.com/idolum-ai/kenogram/internal/joblifecycle"
+	"github.com/idolum-ai/kenogram/internal/netns"
 	"github.com/idolum-ai/kenogram/internal/plan"
+	"github.com/idolum-ai/kenogram/internal/proxy"
 	"github.com/idolum-ai/kenogram/internal/sourcetree"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
@@ -106,6 +110,7 @@ type Runtime struct {
 	goos       string
 	token      func() (string, error)
 	executable func() (string, error)
+	listener   func(context.Context, int, string, string, func() error) (net.Listener, netns.NamespaceIdentity, error)
 
 	mu                sync.Mutex
 	name              string
@@ -125,6 +130,7 @@ type Runtime struct {
 	lifecycleID       joblifecycle.FileIdentity
 	forced            bool
 	started           bool
+	egress            *egressRuntime
 }
 
 type FilesystemIdentity struct {
@@ -194,11 +200,31 @@ func WorkspaceCleanupExitCode(err error) int {
 	}
 }
 
+type egressRuntime struct {
+	listener     net.Listener
+	proxy        *proxy.Proxy
+	done         chan error
+	address      string
+	ownerID      string
+	containerID  string
+	pid          int
+	processStart string
+	namespaces   netns.NamespaceIdentity
+	allowDigest  string
+	readyAt      time.Time
+
+	mu       sync.Mutex
+	stopping bool
+	stopped  chan struct{}
+	raw      []byte
+	err      error
+}
+
 func New(podman *backend.Podman) *Runtime {
 	if podman == nil {
 		podman = backend.New(nil)
 	}
-	return &Runtime{Podman: podman, starter: execStarter{}, tempDir: os.MkdirTemp, now: time.Now, goos: runtime.GOOS, token: randomToken, executable: runningExecutable}
+	return &Runtime{Podman: podman, starter: execStarter{}, tempDir: os.MkdirTemp, now: time.Now, goos: runtime.GOOS, token: randomToken, executable: runningExecutable, listener: netns.AcquireBoundListener}
 }
 
 func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, stderr io.Writer) (job.Process, error) {
@@ -214,9 +240,6 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if len(invocation.Prepared.Result.Plan.NetworkAllow) != 0 {
-		return nil, errors.New("direct governed jobs do not yet implement a network proxy")
 	}
 	if !pathIsAbsoluteCommand(invocation.Request.Command.Argv[0]) {
 		return nil, errors.New("direct governed jobs require an absolute target command")
@@ -277,7 +300,7 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if _, err := rand.Read(lifecycleKey); err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
-	environmentRaw, err := targetEnvironment(invocation, lifecycleKey)
+	environmentItems, err := targetEnvironmentItems(invocation)
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
@@ -384,7 +407,21 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if err := validateWritableBackendMounts(ctx, mounts); err != nil {
 		return r.admittedFailure(invocation, fmt.Errorf("reinspect runtime-writable mounts before target admission: %w", err))
 	}
-	before, err := runtimeEvidence("before", r.now().UTC(), evidence, invocation, imageDigest, mountFacts)
+	proxyAddress := ""
+	var egressAdmission *jobcontract.RuntimeEgressAdmission
+	if len(invocation.Prepared.Result.Plan.NetworkAllow) != 0 {
+		var admission jobcontract.RuntimeEgressAdmission
+		proxyAddress, admission, err = r.startEgress(ctx, invocation, evidence, providerPlan, name, mounts)
+		if err != nil {
+			return r.admittedFailure(invocation, err)
+		}
+		egressAdmission = &admission
+	}
+	before, err := runtimeEvidence("before", r.now().UTC(), evidence, invocation, imageDigest, mountFacts, egressAdmission)
+	if err != nil {
+		return r.admittedFailure(invocation, err)
+	}
+	environmentRaw, err := encodeTargetEnvironment(environmentItems, lifecycleKey, proxyAddress)
 	if err != nil {
 		return r.admittedFailure(invocation, err)
 	}
@@ -451,6 +488,160 @@ func (r *Runtime) proveOwned(ctx context.Context) (backend.Evidence, error) {
 	return evidence, nil
 }
 
+func (r *Runtime) startEgress(ctx context.Context, invocation job.Invocation, observed backend.Evidence, providerPlan plan.Result, name string, mounts []backend.Mount) (string, jobcontract.RuntimeEgressAdmission, error) {
+	if observed.PID <= 0 || observed.ProcessStart == "" {
+		return "", jobcontract.RuntimeEgressAdmission{}, errors.New("runtime process identity is absent before proxy setup")
+	}
+	ownerID, err := r.token()
+	if err != nil || !ownerTokenPattern.MatchString(ownerID) {
+		return "", jobcontract.RuntimeEgressAdmission{}, errors.New("create egress owner identity")
+	}
+	revalidate := func() error {
+		current, err := r.Podman.Inspect(ctx, observed.ID)
+		if err != nil || current.ID != observed.ID || current.Name != name || current.PID != observed.PID || current.ProcessStart != observed.ProcessStart || current.Labels["io.kenogram.job-owner"] != r.ownerToken {
+			return errors.New("runtime identity changed while pinning egress namespaces")
+		}
+		return backend.VerifyNamed(current, providerPlan, generation, name, mounts)
+	}
+	listener, namespaces, err := r.listener(ctx, observed.PID, observed.ProcessStart, "127.0.0.1:0", revalidate)
+	if err != nil {
+		return "", jobcontract.RuntimeEgressAdmission{}, fmt.Errorf("acquire governed egress listener: %w", err)
+	}
+	address := listener.Addr().String()
+	host, portText, splitErr := net.SplitHostPort(address)
+	port, portErr := strconv.Atoi(portText)
+	if splitErr != nil || portErr != nil || host != "127.0.0.1" || port < 1 || port > 65535 || net.JoinHostPort(host, strconv.Itoa(port)) != address {
+		listener.Close()
+		return "", jobcontract.RuntimeEgressAdmission{}, errors.New("governed egress listener is not canonical loopback")
+	}
+	destinations := make([]proxy.Destination, 0, len(invocation.Prepared.Result.Plan.NetworkAllow))
+	for _, allow := range invocation.Prepared.Result.Plan.NetworkAllow {
+		destinations = append(destinations, proxy.Destination{Host: allow.Host, Port: int(allow.Port)})
+	}
+	p := proxy.New(destinations, proxy.Options{Generation: generation, Now: r.now})
+	egress := &egressRuntime{
+		listener: listener, proxy: p, done: make(chan error, 1), stopped: make(chan struct{}), address: address,
+		ownerID: ownerID, containerID: observed.ID, pid: observed.PID, processStart: observed.ProcessStart,
+		namespaces: namespaces, allowDigest: job.EgressAllowlistDigest(invocation.Prepared.Result.Plan.NetworkAllow), readyAt: r.now().UTC(),
+	}
+	r.mu.Lock()
+	r.egress = egress
+	r.mu.Unlock()
+	go func() { egress.done <- p.Serve(listener) }()
+	select {
+	case serveErr := <-egress.done:
+		egress.done <- serveErr
+		listener.Close()
+		return "", jobcontract.RuntimeEgressAdmission{}, fmt.Errorf("governed egress proxy exited before target admission: %w", serveErr)
+	default:
+	}
+	return address, jobcontract.RuntimeEgressAdmission{
+		AllowlistSHA256: egress.allowDigest, ListenerAddress: address, OwnerID: ownerID,
+		PID: int64(observed.PID), ProcessStart: observed.ProcessStart,
+		UserNamespace:    jobcontract.NamespaceIdentity{Device: namespaces.UserDevice, Inode: namespaces.UserInode},
+		NetworkNamespace: jobcontract.NamespaceIdentity{Device: namespaces.NetworkDevice, Inode: namespaces.NetworkInode},
+	}, nil
+}
+
+func (r *Runtime) stopEgress(ctx context.Context) ([]byte, error) {
+	r.mu.Lock()
+	egress := r.egress
+	r.mu.Unlock()
+	if egress == nil {
+		return nil, nil
+	}
+	egress.mu.Lock()
+	if egress.stopping {
+		done := egress.stopped
+		egress.mu.Unlock()
+		select {
+		case <-done:
+			egress.mu.Lock()
+			raw, err := append([]byte{}, egress.raw...), egress.err
+			egress.mu.Unlock()
+			return raw, err
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		}
+	}
+	egress.stopping = true
+	egress.mu.Unlock()
+
+	reasons := []string{}
+	egress.proxy.RevokeAll()
+	listenerClosed := true
+	if err := egress.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		listenerClosed = false
+		reasons = append(reasons, "PROXY_LISTENER_CLOSE_FAILED")
+	}
+	joined := false
+	select {
+	case serveErr := <-egress.done:
+		joined = true
+		if serveErr != nil && !errors.Is(serveErr, net.ErrClosed) {
+			reasons = append(reasons, "PROXY_SERVE_FAILED")
+		}
+	case <-ctx.Done():
+		reasons = append(reasons, "PROXY_JOIN_FAILED")
+	}
+	if err := egress.proxy.WaitIdle(ctx); err != nil {
+		reasons = append(reasons, "PROXY_ACTIVE_CONNECTIONS")
+	}
+	summary := egress.proxy.Summary()
+	activeZero := summary.ActiveConnections == 0
+	if !activeZero {
+		reasons = append(reasons, "PROXY_ACTIVE_CONNECTIONS")
+	}
+	reasons = sortedUniqueStrings(reasons)
+	status := "complete"
+	if len(reasons) != 0 {
+		status = "incomplete"
+	}
+	observation := jobcontract.EgressEvidence{
+		Schema: jobcontract.EgressEvidenceSchema, Status: status, AllowlistSHA256: egress.allowDigest,
+		ListenerAddress: egress.address, OwnerID: egress.ownerID, ContainerID: egress.containerID, Generation: generation,
+		PID: int64(egress.pid), ProcessStart: egress.processStart,
+		UserNamespace:    jobcontract.NamespaceIdentity{Device: egress.namespaces.UserDevice, Inode: egress.namespaces.UserInode},
+		NetworkNamespace: jobcontract.NamespaceIdentity{Device: egress.namespaces.NetworkDevice, Inode: egress.namespaces.NetworkInode},
+		ReadyAt:          egress.readyAt.Format(time.RFC3339Nano),
+		EnvironmentKeys:  append([]string{}, job.EgressEnvironmentKeys...),
+		Accepted:         boundedCounter(summary.Accepted), Refused: boundedCounter(summary.Refused), DialFailed: boundedCounter(summary.DialFailed), Omitted: boundedCounter(summary.Omitted),
+		DiagnosticsSHA256: summary.DiagnosticsSHA256, RevokedAt: r.now().UTC().Format(time.RFC3339Nano),
+		ListenerClosed: listenerClosed, ActiveConnectionsZero: activeZero, Joined: joined, Reasons: reasons,
+	}
+	raw, marshalErr := json.Marshal(observation)
+	if marshalErr == nil {
+		marshalErr = jobcontract.ValidateEgressEvidence(observation)
+	}
+	resultErr := marshalErr
+	if status != "complete" {
+		resultErr = errors.Join(resultErr, errors.New("governed egress lifecycle is incomplete"))
+	}
+	egress.mu.Lock()
+	egress.raw, egress.err = append([]byte{}, raw...), resultErr
+	close(egress.stopped)
+	egress.mu.Unlock()
+	return raw, resultErr
+}
+
+func boundedCounter(value uint64) int64 {
+	if value > uint64(jobcontract.MaximumWireInteger) {
+		return jobcontract.MaximumWireInteger
+	}
+	return int64(value)
+}
+
+func sortedUniqueStrings(values []string) []string {
+	sort.Strings(values)
+	result := values[:0]
+	for _, value := range values {
+		if len(result) == 0 || result[len(result)-1] != value {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
 func (r *Runtime) admittedFailure(invocation job.Invocation, cause error) (job.Process, error) {
 	done := make(chan struct{})
 	close(done)
@@ -476,20 +667,20 @@ func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcon
 			return jobcontract.CleanupResult{
 				Status:            "incomplete",
 				ContainerAbsent:   false,
-				ProxyAbsent:       true,
+				ProxyAbsent:       false,
 				ProcessGroupEmpty: false,
 				DurationNS:        int64(time.Since(started)),
-				Reasons:           []string{"SCRATCH_RETAINED_FOR_ACTIVE_WAIT", "WAIT_WORKER_PRESENT"},
+				Reasons:           []string{"PROXY_CLEANUP_INCOMPLETE", "SCRATCH_RETAINED_FOR_ACTIVE_WAIT", "WAIT_WORKER_PRESENT"},
 			}
 		}
 		if err := process.JoinFinalization(ctx); err != nil {
 			return jobcontract.CleanupResult{
 				Status:            "incomplete",
 				ContainerAbsent:   false,
-				ProxyAbsent:       true,
+				ProxyAbsent:       false,
 				ProcessGroupEmpty: false,
 				DurationNS:        int64(time.Since(started)),
-				Reasons:           []string{"FINALIZATION_WORKER_PRESENT", "SCRATCH_RETAINED_FOR_ACTIVE_FINALIZATION"},
+				Reasons:           []string{"FINALIZATION_WORKER_PRESENT", "PROXY_CLEANUP_INCOMPLETE", "SCRATCH_RETAINED_FOR_ACTIVE_FINALIZATION"},
 			}
 		}
 	}
@@ -507,6 +698,11 @@ func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcon
 			invocation.Prepared.Result.DeclarationDigest, scratchID,
 			workspaceBindings, workspaceBindingsDigest,
 		)
+	}
+	proxyAbsent := true
+	if _, err := r.stopEgress(ctx); err != nil {
+		proxyAbsent = false
+		reasons = append(reasons, "PROXY_CLEANUP_INCOMPLETE")
 	}
 	if process != nil && process.attached != nil && !process.finished() {
 		forced = true
@@ -630,7 +826,7 @@ func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcon
 		status = "incomplete"
 	}
 	sort.Strings(reasons)
-	return jobcontract.CleanupResult{Status: status, ContainerAbsent: containerAbsent, ProxyAbsent: true, ProcessGroupEmpty: containerAbsent, Forced: forced, DurationNS: int64(time.Since(started)), Reasons: reasons}
+	return jobcontract.CleanupResult{Status: status, ContainerAbsent: containerAbsent, ProxyAbsent: proxyAbsent, ProcessGroupEmpty: containerAbsent, Forced: forced, DurationNS: int64(time.Since(started)), Reasons: reasons}
 }
 
 func prepareReadOnlySnapshotsRemoval(ctx context.Context, snapshots map[string]readOnlySnapshot) error {
@@ -1060,8 +1256,9 @@ func (p *process) Wait(ctx context.Context) (jobcontract.TargetResult, error) {
 	case <-ctx.Done():
 	}
 	controlCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	_, egressErr := p.runtime.stopEgress(controlCtx)
 	_, ownershipErr := p.runtime.proveOwned(controlCtx)
-	stopErr := ownershipErr
+	stopErr := errors.Join(egressErr, ownershipErr)
 	if stopErr == nil {
 		stopErr = p.runtime.Podman.StopWithin(controlCtx, p.runtime.containerID, 1)
 	}
@@ -1091,6 +1288,15 @@ func (p *process) recordTerminal(err error) (jobcontract.TargetResult, error) {
 		p.waited, p.waitErr = true, err
 		p.mu.Unlock()
 		return jobcontract.TargetResult{Kind: "unknown"}, err
+	}
+	egressCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_, egressErr := p.runtime.stopEgress(egressCtx)
+	cancel()
+	if egressErr != nil {
+		p.mu.Lock()
+		p.waited, p.waitErr = true, egressErr
+		p.mu.Unlock()
+		return jobcontract.TargetResult{Kind: "unknown"}, egressErr
 	}
 	record, readErr := joblifecycle.ReadSlot(p.runtime.lifecycleFile, p.runtime.lifecycleKey, p.runtime.lifecycleID)
 	if readErr != nil {
@@ -1126,8 +1332,12 @@ func (p *process) Finalize(ctx context.Context) (job.RuntimeFinalization, error)
 	if !p.finished() {
 		return job.RuntimeFinalization{}, errors.New("target terminal observation is absent")
 	}
+	egressRaw, egressErr := p.runtime.stopEgress(ctx)
+	if egressErr != nil {
+		return job.RuntimeFinalization{Egress: egressRaw}, egressErr
+	}
 	if _, err := p.runtime.proveOwned(ctx); err != nil {
-		return job.RuntimeFinalization{}, err
+		return job.RuntimeFinalization{Egress: egressRaw}, err
 	}
 	if err := p.runtime.Podman.StopWithin(ctx, p.runtime.containerID, 1); err != nil {
 		if _, proofErr := p.runtime.proveOwned(ctx); proofErr != nil {
@@ -1161,7 +1371,7 @@ func (p *process) Finalize(ctx context.Context) (job.RuntimeFinalization, error)
 			return job.RuntimeFinalization{}, fmt.Errorf("target-local lifecycle changed before finalization: %w", err)
 		}
 	}
-	after, err := runtimeEvidence("after", p.runtime.now().UTC(), evidence, p.invocation, p.identity.ImageDigest, p.runtime.mountFacts)
+	after, err := runtimeEvidence("after", p.runtime.now().UTC(), evidence, p.invocation, p.identity.ImageDigest, p.runtime.mountFacts, nil)
 	if err != nil {
 		return job.RuntimeFinalization{}, err
 	}
@@ -1169,7 +1379,7 @@ func (p *process) Finalize(ctx context.Context) (job.RuntimeFinalization, error)
 	if err != nil {
 		return job.RuntimeFinalization{After: after}, err
 	}
-	return job.RuntimeFinalization{After: after, Artifacts: artifacts}, nil
+	return job.RuntimeFinalization{After: after, Egress: egressRaw, Artifacts: artifacts}, nil
 }
 
 func verifyStoppedEvidence(evidence backend.Evidence, result plan.Result, name, containerID, ownerToken, imageDigest string) error {
@@ -1184,9 +1394,12 @@ func verifyStoppedEvidence(evidence backend.Evidence, result plan.Result, name, 
 	return nil
 }
 
-func targetEnvironment(invocation job.Invocation, lifecycleKey []byte) ([]byte, error) {
+func targetEnvironmentItems(invocation job.Invocation) ([]jobenv.Item, error) {
 	items := make([]jobenv.Item, 0, len(invocation.Request.Command.Environment))
 	for _, requested := range invocation.Request.Command.Environment {
+		if reservedProxyEnvironment(requested.Name) {
+			return nil, errors.New("target environment cannot override governed proxy variables")
+		}
 		if requested.PublicValue != nil {
 			items = append(items, jobenv.Item{Name: requested.Name, Value: []byte(*requested.PublicValue)})
 			continue
@@ -1210,7 +1423,27 @@ func targetEnvironment(invocation job.Invocation, lifecycleKey []byte) ([]byte, 
 		}
 		items = append(items, jobenv.Item{Name: requested.Name, Value: value})
 	}
+	return items, nil
+}
+
+func encodeTargetEnvironment(items []jobenv.Item, lifecycleKey []byte, proxyAddress string) ([]byte, error) {
+	items = append([]jobenv.Item{}, items...)
+	if proxyAddress != "" {
+		value := []byte("http://" + proxyAddress)
+		for _, name := range job.EgressEnvironmentKeys {
+			items = append(items, jobenv.Item{Name: name, Value: append([]byte{}, value...)})
+		}
+	}
 	return jobenv.EncodeLaunch(items, lifecycleKey)
+}
+
+func reservedProxyEnvironment(name string) bool {
+	switch strings.ToUpper(name) {
+	case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY":
+		return true
+	default:
+		return false
+	}
 }
 
 func readSecretSource(copy plan.Copy) ([]byte, error) {
@@ -1550,7 +1783,7 @@ func collectArtifactRoot(ctx context.Context, sourceRoot *os.Root, destination s
 	})
 }
 
-func runtimeEvidence(phase string, observed time.Time, evidence backend.Evidence, invocation job.Invocation, imageDigest string, mounts []jobcontract.RuntimeMountObservation) ([]byte, error) {
+func runtimeEvidence(phase string, observed time.Time, evidence backend.Evidence, invocation job.Invocation, imageDigest string, mounts []jobcontract.RuntimeMountObservation, egressAdmission *jobcontract.RuntimeEgressAdmission) ([]byte, error) {
 	observation := jobcontract.RuntimeObservation{
 		Schema: jobcontract.RuntimeObservationSchema, Phase: phase, ObservedAt: observed.Format(time.RFC3339Nano), Provider: "podman-cli",
 		ContainerID: evidence.ID, ContainerName: evidence.Name, Running: evidence.Running,
@@ -1561,7 +1794,7 @@ func runtimeEvidence(phase string, observed time.Time, evidence backend.Evidence
 		Hostname: evidence.Hostname, WorkingDirectory: evidence.WorkingDir, BoundingCaps: append([]string{}, evidence.BoundingCaps...),
 		NoNewPrivileges: containsFold(evidence.SecurityOpt, "no-new-privileges"), SeccompMode: int64(evidence.SeccompMode), Devices: int64(evidence.Devices),
 		UIDIdentity: mapsHostIdentity(evidence.UIDMap, int64(os.Getuid())), GIDIdentity: mapsHostIdentity(evidence.GIDMap, int64(os.Getgid())),
-		MemoryBytes: evidence.Memory, NanoCPUs: evidence.NanoCPUs, PIDs: evidence.PIDs, Mounts: append([]jobcontract.RuntimeMountObservation{}, mounts...),
+		MemoryBytes: evidence.Memory, NanoCPUs: evidence.NanoCPUs, PIDs: evidence.PIDs, Mounts: append([]jobcontract.RuntimeMountObservation{}, mounts...), EgressAdmission: egressAdmission,
 	}
 	if phase == "after" {
 		// These properties require a live process to inspect. Preserve their

@@ -12,7 +12,9 @@ The normative acceptance invariants are:
 2. Exterior connects are genuinely unroutable except for an explicit
    host-operator `connect` to a named declared loopback interface.
 3. No resolver answers and no UDP leaves.
-4. With destinations, the only non-world-authored socket is `127.0.0.1:3128`.
+4. With destinations, the only non-world-authored socket is the retained
+   loopback proxy door (`127.0.0.1:3128` for persistent worlds; a retained
+   ephemeral loopback port for governed jobs).
 5. CONNECT succeeds only for exact declared host-and-port pairs.
 6. Each outward address is resolved by the proxy for that connection.
 7. Direct dialing an allowed destination's IP remains unroutable.
@@ -30,11 +32,15 @@ makes no claim of equivalence beyond that contract. This engineering criterion
 is informed by Kenogram's conceptual lineage; it is not a claim to implement
 formal morphic bisimulation.
 
-The mechanism uses a short-lived `nsenter` helper to create the listener inside
+The persistent-world and governed-job mechanisms use a short-lived `nsenter` helper to create the listener inside
 the world's user and network namespaces and transfer its descriptor over an
 `AF_UNIX` socketpair. The helper exits; the host proxy retains the listener. The
 proxy resolves per connection, bounds rate and concurrency, logs metadata only,
-and closes connections when their grant is removed or expires.
+and closes connections when their grant is removed or expires. Governed jobs
+pin namespace descriptors and process-start identity before the helper launch,
+revalidate immutable container authority, retain `network=none`, and revoke and
+join the in-process proxy before finalization. Their target receives only
+system-owned proxy variables and never receives `NO_PROXY`.
 
 The explicitly invoked `network-diagnostics` view distinguishes exact-policy
 `refused` from admitted `dial_failed` attempts for the current proxy generation.
