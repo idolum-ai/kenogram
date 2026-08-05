@@ -74,7 +74,12 @@ func TestRuntimeObservationMountBoundAccepts512AndRejects513(t *testing.T) {
 	makeObservation := func(count int) RuntimeObservation {
 		mounts := make([]RuntimeMountObservation, 0, count)
 		for index := 0; index < count; index++ {
-			mounts = append(mounts, RuntimeMountObservation{Role: "workspace", Source: fmt.Sprintf("/tmp/source-%03d", index), Target: fmt.Sprintf("/workspace/%03d", index), Mode: "rw", Device: 1, Inode: uint64(index + 1), FileType: "directory", IdentityVerified: true})
+			target := fmt.Sprintf("/workspace/%03d", index)
+			source, err := RuntimeMountSource("workspace", target, "rw", "", "")
+			if err != nil {
+				panic(err)
+			}
+			mounts = append(mounts, RuntimeMountObservation{Role: "workspace", Source: source, Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 1), FileType: "directory", IdentityVerified: true})
 		}
 		return RuntimeObservation{Schema: RuntimeObservationSchema, Phase: "before", ObservedAt: "2026-08-05T12:00:00Z", Provider: "podman-cli", ContainerID: strings.Repeat("c", 64), ContainerName: "job", Running: true, ImageReference: "example.invalid/job@" + testDigest, ImageDigest: testDigest, PlanSHA256: testDigest, DeclarationSHA256: testDigest, Generation: 1, NetworkMode: "none", IPCMode: "private", PIDMode: "private", UTSMode: "private", UserNSMode: "keep-id", User: "agent", Hostname: "job", WorkingDirectory: "/workspace", BoundingCaps: []string{}, MemoryBytes: 1, NanoCPUs: 1, PIDs: 1, Mounts: mounts}
 	}
@@ -83,6 +88,24 @@ func TestRuntimeObservationMountBoundAccepts512AndRejects513(t *testing.T) {
 	}
 	if err := ValidateRuntimeObservation(makeObservation(MaxRuntimeMounts + 1)); err == nil || !strings.Contains(err.Error(), "inventory") {
 		t.Fatalf("513 mounts accepted: %v", err)
+	}
+}
+
+func TestRuntimeMountSourcesBindAuthorityOrImmutableContent(t *testing.T) {
+	readonly, err := RuntimeMountSource("declared", "/input", "ro", "/host/input", testDigest)
+	if err != nil || readonly != "kenogram-snapshot:"+testDigest {
+		t.Fatalf("readonly=%q error=%v", readonly, err)
+	}
+	writable, err := RuntimeMountSource("declared", "/output", "rw", "/host/output", "")
+	if err != nil || writable != "/host/output" {
+		t.Fatalf("writable=%q error=%v", writable, err)
+	}
+	workspace, err := RuntimeMountSource("workspace", "/workspace", "rw", "", "")
+	if err != nil || !strings.HasPrefix(workspace, "kenogram-workspace:sha256:") {
+		t.Fatalf("workspace=%q error=%v", workspace, err)
+	}
+	if _, err := RuntimeMountSource("declared", "/output", "rw", "/host/output", testDigest); err == nil {
+		t.Fatal("writable source accepted a content-derived substitute")
 	}
 }
 

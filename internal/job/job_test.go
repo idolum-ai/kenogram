@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -112,19 +112,27 @@ func (f *fakeProcess) Finalize(context.Context) (RuntimeFinalization, error) {
 }
 
 func fakeRuntimeObservation(invocation Invocation, phase string) []byte {
+	source := func(role, target, mode, authority, content string) string {
+		value, err := jobcontract.RuntimeMountSource(role, target, mode, authority, content)
+		if err != nil {
+			panic(err)
+		}
+		return value
+	}
 	running := phase == "before"
 	mounts := []jobcontract.RuntimeMountObservation{
-		{Role: "helper", Source: "/tmp/kenogram-test-helper", Target: "/etc/kenogram/job-exec", Mode: "ro", Device: 1, Inode: 1, FileType: "file", SHA256: invocation.Provenance.ExecutableSHA256, IdentityVerified: true},
-		{Role: "lifecycle", Source: "/tmp/kenogram-test-lifecycle", Target: "/etc/kenogram/job-lifecycle", Mode: "rw", Device: 1, Inode: 2, FileType: "directory", IdentityVerified: true},
+		{Role: "helper", Source: source("helper", "/etc/kenogram/job-exec", "ro", "", invocation.Provenance.ExecutableSHA256), Target: "/etc/kenogram/job-exec", Mode: "ro", Device: 1, Inode: 1, FileType: "file", SHA256: invocation.Provenance.ExecutableSHA256, IdentityVerified: true},
+		{Role: "lifecycle", Source: source("lifecycle", "/etc/kenogram/job-lifecycle", "rw", "", ""), Target: "/etc/kenogram/job-lifecycle", Mode: "rw", Device: 1, Inode: 2, FileType: "directory", IdentityVerified: true},
 	}
 	for index, target := range invocation.Prepared.Result.Plan.Workspace {
-		mounts = append(mounts, jobcontract.RuntimeMountObservation{Role: "workspace", Source: fmt.Sprintf("/tmp/kenogram-test-workspace-%d", index), Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 3), FileType: "directory", IdentityVerified: true})
+		mounts = append(mounts, jobcontract.RuntimeMountObservation{Role: "workspace", Source: source("workspace", target, "rw", "", ""), Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 3), FileType: "directory", IdentityVerified: true})
 	}
 	for index, mount := range invocation.Prepared.Result.Plan.Mounts {
-		fact := jobcontract.RuntimeMountObservation{Role: "declared", AuthoritySource: mount.Source, Source: fmt.Sprintf("/tmp/kenogram-test-snapshot-%d", index), Target: mount.Target, Mode: mount.Mode, Device: 2, Inode: uint64(index + 100), FileType: mount.SourceType, IdentityVerified: true}
+		fact := jobcontract.RuntimeMountObservation{Role: "declared", AuthoritySource: mount.Source, Target: mount.Target, Mode: mount.Mode, Device: 2, Inode: uint64(index + 100), FileType: mount.SourceType, IdentityVerified: true}
 		if mount.Mode == "ro" {
 			fact.SHA256 = testDigest()
 		}
+		fact.Source = source(fact.Role, fact.Target, fact.Mode, fact.AuthoritySource, fact.SHA256)
 		mounts = append(mounts, fact)
 	}
 	sort.Slice(mounts, func(i, j int) bool { return mounts[i].Target < mounts[j].Target })
@@ -166,6 +174,71 @@ func TestExecutorSealsAndVerifierRederivesEvidence(t *testing.T) {
 	}
 }
 
+func TestRequestFileReadIsDescriptorBoundedRegularAndCancelable(t *testing.T) {
+	t.Run("exact bound", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "request.json")
+		if err := os.WriteFile(path, bytes.Repeat([]byte{' '}, jobcontract.MaximumRequestBytes), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := ReadRequestFile(context.Background(), path)
+		if err != nil || len(raw) != jobcontract.MaximumRequestBytes {
+			t.Fatalf("bytes=%d error=%v", len(raw), err)
+		}
+	})
+	t.Run("over bound", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "request.json")
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(jobcontract.MaximumRequestBytes + 1); err != nil {
+			t.Fatal(err)
+		}
+		file.Close()
+		if _, err := ReadRequestFile(context.Background(), path); err == nil || !strings.Contains(err.Error(), "bounded regular") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("special input", func(t *testing.T) {
+		root, err := os.MkdirTemp("/tmp", "kenogram-request-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(root)
+		path := filepath.Join(root, "request.sock")
+		listener, err := net.Listen("unix", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		if _, err := ReadRequestFile(context.Background(), path); err == nil || !strings.Contains(err.Error(), "bounded regular") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := ReadRequestFile(ctx, filepath.Join(t.TempDir(), "absent")); !errors.Is(err, context.Canceled) {
+			t.Fatalf("error=%v", err)
+		}
+	})
+}
+
+func TestExecutorCancellationPrecedesPreparationAndRuntimeAdmission(t *testing.T) {
+	executor, requestRaw, evidence, runtime := fixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := executor.Run(ctx, requestRaw, evidence); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+	if runtime.process.invocation.Request.JobID != "" {
+		t.Fatalf("runtime received canceled invocation: %#v", runtime.process.invocation)
+	}
+	if _, err := os.Lstat(evidence); !os.IsNotExist(err) {
+		t.Fatalf("canceled preparation created evidence: %v", err)
+	}
+}
+
 func TestVerifierRejectsGenericJSONSubstitutedForPodmanRuntimeContract(t *testing.T) {
 	executor, requestRaw, evidence, runtime := fixture(t)
 	runtime.process.provider = "podman-cli"
@@ -196,6 +269,7 @@ func TestRuntimeVerifierCrossBindsDeclaredMountSourcesAndRuntimeRoles(t *testing
 		t.Fatal(err)
 	}
 	prepared.Result.Plan.Mounts = append(prepared.Result.Plan.Mounts, plan.Mount{Source: "/retained/input", SourceType: "directory", Target: "/input", Mode: "ro"})
+	prepared.Result.Plan.Mounts = append(prepared.Result.Plan.Mounts, plan.Mount{Source: "/retained/output", SourceType: "directory", Target: "/output", Mode: "rw"})
 	provenance, _, err := Provenance("", BuildIdentity{})
 	if err != nil {
 		t.Fatal(err)
@@ -221,6 +295,20 @@ func TestRuntimeVerifierCrossBindsDeclaredMountSourcesAndRuntimeRoles(t *testing
 				}
 			}
 		}, want: "undeclared"},
+		{name: "identical two-phase semantic source substitution", mutate: func(value *jobcontract.RuntimeObservation) {
+			for index := range value.Mounts {
+				if value.Mounts[index].Role == "declared" {
+					value.Mounts[index].Source = "kenogram-snapshot:sha256:" + strings.Repeat("b", 64)
+				}
+			}
+		}, want: "semantic source"},
+		{name: "identical two-phase writable source substitution", mutate: func(value *jobcontract.RuntimeObservation) {
+			for index := range value.Mounts {
+				if value.Mounts[index].Role == "declared" && value.Mounts[index].Mode == "rw" {
+					value.Mounts[index].Source = "/retained/substitute"
+				}
+			}
+		}, want: "semantic source"},
 		{name: "workspace role substitution", mutate: func(value *jobcontract.RuntimeObservation) {
 			for index := range value.Mounts {
 				if value.Mounts[index].Role == "workspace" {

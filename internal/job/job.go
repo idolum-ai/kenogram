@@ -103,6 +103,9 @@ func IsPostIdentityError(err error) bool {
 }
 
 func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string) (outcome Outcome, retErr error) {
+	if err := ctx.Err(); err != nil {
+		return Outcome{}, err
+	}
 	identityEstablished := false
 	defer func() {
 		if retErr != nil && identityEstablished && !IsPostIdentityError(retErr) {
@@ -119,14 +122,14 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 	if e.Now == nil {
 		e.Now = time.Now
 	}
-	declarationRaw, err := readBoundRegular(request.Declaration.Path, jobcontract.MaximumRequestBytes)
+	declarationRaw, err := readBoundRegular(ctx, request.Declaration.Path, jobcontract.MaximumRequestBytes)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("read bound declaration: %w", err)
 	}
 	if digest(declarationRaw) != request.Declaration.SHA256 {
 		return Outcome{}, errors.New("declaration digest does not match job request")
 	}
-	prepared, err := app.PrepareBytes(declarationRaw, request.Declaration.Path)
+	prepared, err := app.PrepareBytesContext(ctx, declarationRaw, request.Declaration.Path)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("prepare bound declaration: %w", err)
 	}
@@ -138,7 +141,7 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 	if err != nil {
 		return Outcome{}, err
 	}
-	provenance, provenanceRaw, err := executableProvenance(e.Executable, e.Build)
+	provenance, provenanceRaw, err := executableProvenanceContext(ctx, e.Executable, e.Build)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -605,6 +608,10 @@ func marshalDocument(value any) ([]byte, error) {
 }
 
 func executableProvenance(executable string, build BuildIdentity) (jobcontract.Provenance, []byte, error) {
+	return executableProvenanceContext(context.Background(), executable, build)
+}
+
+func executableProvenanceContext(ctx context.Context, executable string, build BuildIdentity) (jobcontract.Provenance, []byte, error) {
 	if executable == "" {
 		var err error
 		executable, err = os.Executable()
@@ -612,7 +619,7 @@ func executableProvenance(executable string, build BuildIdentity) (jobcontract.P
 			return jobcontract.Provenance{}, nil, err
 		}
 	}
-	raw, err := readBoundRegular(executable, 1<<30)
+	raw, err := readBoundRegular(ctx, executable, 1<<30)
 	if err != nil {
 		return jobcontract.Provenance{}, nil, fmt.Errorf("read executing file: %w", err)
 	}
@@ -651,7 +658,16 @@ func planContentDigest(raw []byte) (plan.Result, string, error) {
 	return result, prefixedDigest(evidenceDigest), nil
 }
 
-func readBoundRegular(path string, maximum int) ([]byte, error) {
+// ReadRequestFile descriptor-binds and bounds the operator-supplied job request
+// before it enters semantic parsing.
+func ReadRequestFile(ctx context.Context, path string) ([]byte, error) {
+	return readBoundRegular(ctx, path, jobcontract.MaximumRequestBytes)
+}
+
+func readBoundRegular(ctx context.Context, path string, maximum int) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	before, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -668,7 +684,7 @@ func readBoundRegular(path string, maximum int) ([]byte, error) {
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
 		return nil, fmt.Errorf("%s changed during open", path)
 	}
-	raw, err := io.ReadAll(io.LimitReader(file, int64(maximum)+1))
+	raw, err := io.ReadAll(&contextReader{ctx: ctx, reader: io.LimitReader(file, int64(maximum)+1)})
 	if err != nil {
 		return nil, err
 	}
@@ -680,4 +696,16 @@ func readBoundRegular(path string, maximum int) ([]byte, error) {
 		return nil, fmt.Errorf("%s changed during read", path)
 	}
 	return raw, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
 }

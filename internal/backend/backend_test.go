@@ -144,6 +144,24 @@ func TestCreateExactArgv(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsAmbiguousMountGrammarBeforeRunnerContact(t *testing.T) {
+	for _, mount := range []Mount{
+		{Source: "/host,alias", Target: "/workspace", Mode: "ro"},
+		{Source: "/host", Target: "/workspace=alias", Mode: "ro"},
+		{Source: "/host\\alias", Target: "/workspace", Mode: "ro"},
+	} {
+		f := &fake{}
+		p := New(f)
+		r := plan.Result{Plan: plan.Plan{Name: "w", World: plan.World{Base: "base@sha256:x", Hostname: "h", User: "agent", Workdir: "/workspace"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 1, PIDs: 1}}}
+		if _, err := p.CreateGovernedJob(context.Background(), "job", r, 1, []Mount{mount}, nil, "/helper"); err == nil || !strings.Contains(err.Error(), "--mount") {
+			t.Fatalf("mount=%#v error=%v", mount, err)
+		}
+		if len(f.calls) != 0 {
+			t.Fatalf("ambiguous mount contacted runner: %v", f.calls)
+		}
+	}
+}
+
 func TestCreateGovernedJobUsesOnlyCallerOwnedHelper(t *testing.T) {
 	f := &fake{out: []byte(strings.Repeat("c", 64) + "\n")}
 	p := New(f)

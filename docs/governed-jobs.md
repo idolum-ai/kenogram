@@ -35,6 +35,9 @@ write a request conforming to `kenogram.job-request.v1`:
 }
 ```
 
+The request path must be a regular file. Kenogram descriptor-binds it and reads
+no more than the contract's 1 MiB limit plus one oversize-detection byte.
+
 `secret_file` must equal exactly one declaration copy target marked
 `secret = true`. Kenogram opens that regular source once, verifies the planned
 copy digest from the exact bounded descriptor bytes and mode, and sends those
@@ -80,9 +83,16 @@ workspace, staged helper, or lifecycle channel. The verifier cross-binds every
 declared authority source, target, mode, and retained file-or-directory type.
 Before provider use, each declared read-only source is copied under bounded
 entry and byte limits into Kenogram-owned scratch. Only that isolated snapshot
-is mounted and content-attested; mutating the original host path afterward does
-not change target-observed bytes. Read-only and writable declared sources may
-not share an inode or overlap canonically. Target-writable directories retain
+is mounted and content-attested; retained evidence names it with a digest-bound
+semantic source instead of a deleted temporary path. Declared writable evidence
+uses the exact retained authority source. Mutating the original read-only host
+path afterward does not change target-observed bytes. Read-only and writable
+declared sources may not share an inode or overlap canonically. Writable source
+trees are bounded and recursively inspected before creation: any socket or
+other special descendant fails closed, and accessible known runtime endpoint
+device/inode aliases are rejected. This does not claim detection of inaccessible
+host bind aliases. Paths with Podman's `--mount` grammar metacharacters are
+refused before provider contact. Target-writable directories retain
 identity only and are never recursively hashed after the target has run. The
 complete runtime inventory, including helper and lifecycle mounts, is bounded
 to 512 entries at admission and during independent validation.

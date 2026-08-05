@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/idolum-ai/kenogram/internal/lockfile"
+	"github.com/idolum-ai/kenogram/internal/mountpath"
 	"github.com/idolum-ai/kenogram/internal/plan"
 )
 
@@ -207,6 +208,12 @@ func (p *Podman) createNamedWithLabels(ctx context.Context, name string, result 
 		args = append(args, "--env", "HTTP_PROXY=http://127.0.0.1:3128", "--env", "HTTPS_PROXY=http://127.0.0.1:3128")
 	}
 	for _, m := range mounts {
+		if err := ValidateMountArgumentPath(m.Source); err != nil {
+			return "", fmt.Errorf("invalid mount source: %w", err)
+		}
+		if err := ValidateMountArgumentPath(m.Target); err != nil {
+			return "", fmt.Errorf("invalid mount target: %w", err)
+		}
 		options := m.Mode + ",nodev,nosuid"
 		if m.NoExec {
 			options += ",noexec"
@@ -238,6 +245,13 @@ func (p *Podman) createNamedWithLabels(ctx context.Context, name string, result 
 		return id, nil
 	}
 	return name, nil
+}
+
+// ValidateMountArgumentPath rejects bytes that the Podman --mount key/value
+// grammar can reinterpret as field separators, assignments, quoting, or
+// escaping. Each accepted path remains one unambiguous structured argv value.
+func ValidateMountArgumentPath(value string) error {
+	return mountpath.Validate(value)
 }
 func (p *Podman) Copy(ctx context.Context, container, source, target string) error {
 	_, err := p.Runner.Run(ctx, p.Binary, "cp", source, container+":"+target)

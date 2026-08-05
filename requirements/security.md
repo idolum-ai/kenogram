@@ -9,6 +9,14 @@ plan; live mounts are not. Secret bytes and their digests are never emitted in
 plan output, logs, history, or generated projections. Host-private recovery
 state may retain a source digest, but never copied bytes.
 
+For governed one-shot jobs, declared read-only mounts are a narrower case: the
+runtime snapshots them into Kenogram-owned scratch under the shared bounded
+source-tree walker and retains a digest-derived semantic source. Declared
+writable source trees are descriptor-root inspected and reject every socket or
+other special descendant before provider creation. Device/inode comparison also
+rejects aliases of accessible known container-runtime endpoints; no claim is
+made about aliases the host does not make inspectable.
+
 Relative sources resolve against the declaration directory, not the caller's
 working directory. Missing sources fail validation. Every file and directory in
 a secret tree must have no group or other permission bits; failed materialization

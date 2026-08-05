@@ -220,6 +220,10 @@ func verifyRuntimeObservations(before, after jobcontract.RuntimeObservation, res
 		if !exists || authority.mode != mount.Mode || authority.role != mount.Role || (authority.source != "" && authority.source != mount.AuthoritySource) {
 			return fmt.Errorf("runtime mount %q is undeclared or has the wrong mode", mount.Target)
 		}
+		expectedSource, sourceErr := jobcontract.RuntimeMountSource(mount.Role, mount.Target, mount.Mode, mount.AuthoritySource, mount.SHA256)
+		if sourceErr != nil || mount.Source != expectedSource {
+			return fmt.Errorf("runtime mount %q semantic source is invalid", mount.Target)
+		}
 		switch mount.Role {
 		case "helper":
 			if mount.FileType != "file" {

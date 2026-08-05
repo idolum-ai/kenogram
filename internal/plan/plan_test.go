@@ -65,6 +65,29 @@ func TestDigestRegularCopyBytesMatchesCanonicalSourceDigest(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsAmbiguousMountGrammar(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		edit func(*decl.Declaration, string)
+	}{
+		{name: "source", edit: func(value *decl.Declaration, directory string) {
+			if err := os.Rename(filepath.Join(directory, "repo"), filepath.Join(directory, "repo,alias")); err != nil {
+				t.Fatal(err)
+			}
+			value.Mounts[0].Source = "repo,alias"
+		}},
+		{name: "target", edit: func(value *decl.Declaration, _ string) { value.Mounts[0].Target = "/workspace/repo,alias" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			declaration, path, raw := fixture(t, "")
+			test.edit(&declaration, filepath.Dir(path))
+			if _, err := Build(declaration, path, raw); err == nil || !strings.Contains(err.Error(), "--mount") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
 func TestBuildWarnsForExplicitlyAllowedUnpinnedImage(t *testing.T) {
 	d, path, data := fixture(t, "")
 	d.World.Base = "ubuntu:latest"

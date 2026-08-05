@@ -34,6 +34,11 @@ Notable user-visible and operational changes are recorded here.
   to retained authority paths and source types, enforce one 512-entry runtime
   mount bound, and deliver secrets from the exact descriptor bytes whose
   canonical plan-copy digest was verified.
+- Unify planning, digest, staging, snapshot, and writable-source traversal under
+  one descriptor-rooted context-aware bound; descriptor-bind job request reads;
+  reject writable socket trees, accessible runtime-endpoint inode aliases, and
+  ambiguous Podman mount grammar; and replace ephemeral retained mount paths
+  with independently derivable semantic source references.
 - Add a proof-only semantic reference for transactional cutover readiness,
   including bounded provider actions, rollback, pre-commit process death,
   inherited egress, and acknowledgement-only compatibility without adding a

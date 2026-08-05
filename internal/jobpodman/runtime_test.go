@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/jobenv"
 	"github.com/idolum-ai/kenogram/internal/joblifecycle"
 	"github.com/idolum-ai/kenogram/internal/plan"
+	"github.com/idolum-ai/kenogram/internal/sourcetree"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
 
@@ -474,6 +476,192 @@ func TestMixedReadOnlyWritableSourceAliasesAreRejected(t *testing.T) {
 	})
 }
 
+func TestBoundedSourceFailuresNeverCreateProviderStateAndCleanScratch(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(*testing.T) string
+		want  string
+	}{
+		{name: "20001 entries", want: "20000 entries", build: func(t *testing.T) string {
+			root := t.TempDir()
+			for index := int64(1); index < sourcetree.MaxEntries+1; index++ {
+				file, err := os.OpenFile(filepath.Join(root, fmt.Sprintf("entry-%05d", index)), os.O_CREATE|os.O_EXCL, 0o600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return root
+		}},
+		{name: "over byte bound", want: "bytes", build: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "sparse")
+			file, err := os.Create(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Truncate(sourcetree.MaxBytes + 1); err != nil {
+				t.Fatal(err)
+			}
+			file.Close()
+			return path
+		}},
+		{name: "special node", want: "special node", build: func(t *testing.T) string {
+			root, err := os.MkdirTemp("/tmp", "kenogram-job-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(root) })
+			listener, err := net.Listen("unix", filepath.Join(root, "innocuous.sock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { listener.Close() })
+			return root
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, runner, _, invocation := runtimeFixture(t)
+			originalTempDir := runtime.tempDir
+			var scratch string
+			runtime.tempDir = func(directory, pattern string) (string, error) {
+				var err error
+				scratch, err = originalTempDir(directory, pattern)
+				return scratch, err
+			}
+			source := test.build(t)
+			info, err := os.Lstat(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceType := "file"
+			if info.IsDir() {
+				sourceType = "directory"
+			}
+			invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: source, SourceType: sourceType, Target: "/bounded", Mode: "ro"})
+			if process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err == nil || process != nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("process=%#v error=%v", process, err)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("bounded failure contacted provider: %v", runner.calls)
+			}
+			if scratch == "" {
+				t.Fatal("bounded failure did not reach owned scratch")
+			}
+			if _, err := os.Lstat(scratch); !os.IsNotExist(err) {
+				t.Fatalf("scratch remains after refusal: %v", err)
+			}
+		})
+	}
+}
+
+func TestCanceledSourceRestagingNeverCreatesAndCleansPromptly(t *testing.T) {
+	runtime, runner, _, invocation := runtimeFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	originalTempDir := runtime.tempDir
+	var scratch string
+	runtime.tempDir = func(directory, pattern string) (string, error) {
+		var err error
+		scratch, err = originalTempDir(directory, pattern)
+		cancel()
+		return scratch, err
+	}
+	source := filepath.Join(t.TempDir(), "input")
+	if err := os.WriteFile(source, []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: source, SourceType: "file", Target: "/cancel", Mode: "ro"})
+	started := time.Now()
+	if process, err := runtime.Start(ctx, invocation, io.Discard, io.Discard); !errors.Is(err, context.Canceled) || process != nil {
+		t.Fatalf("process=%#v error=%v", process, err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatalf("canceled staging cleanup was not prompt: %s", time.Since(started))
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("canceled staging contacted provider: %v", runner.calls)
+	}
+	if _, err := os.Lstat(scratch); !os.IsNotExist(err) {
+		t.Fatalf("scratch remains after cancellation: %v", err)
+	}
+}
+
+func TestWritableSourceTreesRejectSocketsAndRuntimeEndpointAliasesBeforeProviderContact(t *testing.T) {
+	t.Run("innocuous socket descendant", func(t *testing.T) {
+		runtime, runner, _, invocation := runtimeFixture(t)
+		root, err := os.MkdirTemp("/tmp", "kenogram-job-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(root)
+		listener, err := net.Listen("unix", filepath.Join(root, "callback.sock"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: root, SourceType: "directory", Target: "/writable", Mode: "rw"})
+		if _, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "socket node") {
+			t.Fatalf("error=%v", err)
+		}
+		if len(runner.calls) != 0 {
+			t.Fatalf("socket-bearing source contacted provider: %v", runner.calls)
+		}
+	})
+	t.Run("known endpoint inode alias", func(t *testing.T) {
+		runtime, runner, _, invocation := runtimeFixture(t)
+		endpoint := filepath.Join(t.TempDir(), "podman.sock")
+		if err := os.WriteFile(endpoint, []byte("identity"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("CONTAINER_HOST", "unix://"+endpoint)
+		root := t.TempDir()
+		if err := os.Link(endpoint, filepath.Join(root, "innocuous")); err != nil {
+			t.Fatal(err)
+		}
+		invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: root, SourceType: "directory", Target: "/writable", Mode: "rw"})
+		if _, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "runtime-endpoint identity") {
+			t.Fatalf("error=%v", err)
+		}
+		if len(runner.calls) != 0 {
+			t.Fatalf("endpoint alias contacted provider: %v", runner.calls)
+		}
+	})
+}
+
+func TestMountArgumentMetacharactersFailBeforeProviderContact(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source bool
+	}{
+		{name: "source comma", source: true},
+		{name: "target comma"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, runner, _, invocation := runtimeFixture(t)
+			source := filepath.Join(t.TempDir(), "input")
+			if test.source {
+				source = filepath.Join(t.TempDir(), "input,alias")
+			}
+			if err := os.WriteFile(source, []byte("value"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			target := "/input"
+			if !test.source {
+				target = "/input,alias"
+			}
+			invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: source, SourceType: "file", Target: target, Mode: "ro"})
+			if _, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "--mount") {
+				t.Fatalf("error=%v", err)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("ambiguous mount contacted provider: %v", runner.calls)
+			}
+		})
+	}
+}
+
 func TestDirectRuntimeRejectsPinnedImageSubstitutionAsAdmittedUnknown(t *testing.T) {
 	runtime, runner, _, invocation := runtimeFixture(t)
 	runner.imageDigest = "sha256:" + strings.Repeat("b", 64)
@@ -641,12 +829,7 @@ func TestMountInodeReplacementInvalidatesFinalization(t *testing.T) {
 	if _, err := process.Wait(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	var workspace string
-	for _, fact := range runtime.mountFacts {
-		if fact.Target == "/workspace" {
-			workspace = fact.Source
-		}
-	}
+	workspace := mountedSource(runtime, "/workspace")
 	old := workspace + ".old"
 	if err := os.Rename(workspace, old); err != nil {
 		t.Fatal(err)
@@ -669,10 +852,9 @@ func TestWritableMountContentIsNeverTraversedDuringFinalization(t *testing.T) {
 	if _, err := process.Wait(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	var workspace string
+	workspace := mountedSource(runtime, "/workspace")
 	for _, fact := range runtime.mountFacts {
 		if fact.Target == "/workspace" {
-			workspace = fact.Source
 			if fact.SHA256 != "" {
 				t.Fatalf("writable fact claims content=%q", fact.SHA256)
 			}
@@ -701,12 +883,7 @@ func TestStagedReadOnlyMountContentIsRevalidatedAtFinalization(t *testing.T) {
 	if _, err := process.Wait(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	var staged string
-	for _, fact := range runtime.mountFacts {
-		if fact.Target == "/readonly" {
-			staged = fact.Source
-		}
-	}
+	staged := mountedSource(runtime, "/readonly")
 	if staged == "" || staged == readonly {
 		t.Fatalf("read-only source was not staged: %q", staged)
 	}
@@ -730,10 +907,10 @@ func TestHostMutationAfterReadOnlySnapshotCannotChangeTargetBytes(t *testing.T) 
 	if err != nil || process == nil {
 		t.Fatalf("process=%#v error=%v", process, err)
 	}
-	var staged string
+	staged := mountedSource(runtime, "/readonly")
 	for _, fact := range runtime.mountFacts {
-		if fact.Target == "/readonly" {
-			staged = fact.Source
+		if fact.Target == "/readonly" && (!strings.HasPrefix(fact.Source, "kenogram-snapshot:sha256:") || fact.Source == staged || filepath.IsAbs(fact.Source)) {
+			t.Fatalf("retained semantic source leaked or aliased staging path: fact=%q staged=%q", fact.Source, staged)
 		}
 	}
 	raw, readErr := os.ReadFile(staged)
@@ -990,6 +1167,15 @@ func hasCall(calls [][]string, parts ...string) bool {
 		}
 	}
 	return false
+}
+
+func mountedSource(runtime *Runtime, target string) string {
+	for _, mount := range runtime.mounts {
+		if mount.Target == target {
+			return mount.Source
+		}
+	}
+	return ""
 }
 
 func hasReason(reasons []string, wanted string) bool {

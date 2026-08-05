@@ -73,7 +73,9 @@ also triggers a bounded cleanup attempt.
 
 ## Request authority and bounds
 
-The caller supplies a request no larger than 1 MiB. It contains:
+The caller supplies a request no larger than 1 MiB. The CLI opens that path as
+a regular-file descriptor, reads at most 1 MiB plus one detection byte, and
+rejects directories and special inputs before semantic parsing. It contains:
 
 - a 1–63 byte portable job identifier;
 - an absolute declaration path and exact lowercase SHA-256 binding;
@@ -273,8 +275,12 @@ configuration and execution authority identical. Declared bind mounts have
 their file-or-directory type retained in the plan. Every declared read-only
 source is copied under bounded entry and byte limits into a create-only,
 Kenogram-owned scratch snapshot before provider use. Provider mounts and runtime
-content facts refer to that snapshot; a separate `authority_source` binds it to
-the declaration path. The original and snapshot digests must agree across the
+content facts refer to that snapshot through a stable
+`kenogram-snapshot:sha256:...` semantic source rather than its mutable temporary
+host pathname; a separate `authority_source` binds it to the declaration path.
+Declared writable mount `source` equals that exact authority path. Workspace
+and lifecycle sources use deterministic Kenogram-owned semantic references.
+The original and snapshot digests must agree across the
 copy, and the snapshot is revalidated immediately before target admission and
 again before finalization. A declared writable source may not be the same inode
 as, or canonically overlap, any declared read-only source. Target-writable
@@ -284,8 +290,18 @@ requires helper mounts to be files, workspace and lifecycle mounts to be
 directories, and each declared mount type to equal the type retained in the
 plan. The admitted and retained runtime inventories share the same 512-mount
 bound.
+Planning, content digests, copy staging, read-only snapshotting, and writable
+source inspection share one descriptor-rooted, cancellation-aware walker capped
+at 20,000 entries, 1 GiB, depth 128, and 4,096 relative-path bytes. Writable
+source directories are recursively inspected before provider creation and fail
+closed on every socket or other special node. For accessible known Podman and
+Docker endpoint paths, device/inode aliases are also rejected. Kenogram does not
+claim it can detect an inaccessible bind alias that the host does not expose;
+the stronger enforceable policy is that no socket descendant is admitted.
 Mounts retain their exact read-only/read-write mode and cannot overlap known
-Podman or Docker control sockets. Runtime memory, CPU, PID, user, namespace, capability,
+Podman or Docker control sockets. Source and target paths containing comma,
+equals, quote, or backslash `--mount` grammar metacharacters are refused before
+provider contact. Runtime memory, CPU, PID, user, namespace, capability,
 seccomp, image, mount, and ownership facts are independently inspected before
 target admission. Cleanup re-inspects both the immutable container ID and the
 random ownership label before every destructive stop, kill, unmount, or

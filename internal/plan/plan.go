@@ -3,18 +3,19 @@ package plan
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"github.com/idolum-ai/kenogram/internal/decl"
+	"github.com/idolum-ai/kenogram/internal/mountpath"
+	"github.com/idolum-ai/kenogram/internal/sourcetree"
 )
 
 // Plan is the fully resolved, canonical provisioning intent at M1.
@@ -94,6 +95,15 @@ func (r Result) MarshalJSON() ([]byte, error) {
 
 // Build validates and resolves a declaration relative to its file location.
 func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) (Result, error) {
+	return BuildContext(context.Background(), d, declarationPath, declarationBytes)
+}
+
+// BuildContext is Build with cancellation threaded through bounded source-tree
+// digest work.
+func BuildContext(ctx context.Context, d decl.Declaration, declarationPath string, declarationBytes []byte) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	dir, err := filepath.Abs(filepath.Dir(declarationPath))
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve declaration directory: %w", err)
@@ -109,18 +119,29 @@ func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) 
 		Copies:    make([]Copy, 0, len(d.Copies)), Mounts: make([]Mount, 0, len(d.Mounts)),
 		NetworkAllow: make([]NetworkAllow, 0, len(d.Network.Allow)), Interfaces: make([]Interface, 0, len(d.Interfaces)), Services: make([]Service, 0, len(d.Services)),
 	}
+	for _, target := range p.Workspace {
+		if err := mountpath.Validate(target); err != nil {
+			return Result{}, fmt.Errorf("workspace target %s: %w", target, err)
+		}
+	}
 	for _, c := range d.Copies {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
 		source, err := decl.ResolveSource(dir, c.Source)
 		if err != nil {
 			return Result{}, err
 		}
-		digest, err := DigestSource(source)
+		digest, err := DigestSourceContext(ctx, source)
 		if err != nil {
 			return Result{}, fmt.Errorf("digest copy source %s: %w", c.Source, err)
 		}
 		p.Copies = append(p.Copies, Copy{Source: source, SourceDigest: digest, Target: filepath.Clean(c.Target), Mode: c.Mode, Secret: c.Secret})
 	}
 	for _, m := range d.Mounts {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
 		source, err := decl.ResolveSource(dir, m.Source)
 		if err != nil {
 			return Result{}, err
@@ -129,7 +150,14 @@ func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) 
 		if err != nil {
 			return Result{}, fmt.Errorf("inspect mount source %s: %w", m.Source, err)
 		}
-		p.Mounts = append(p.Mounts, Mount{Source: source, SourceType: sourceType, Target: filepath.Clean(m.Target), Mode: m.Mode})
+		target := filepath.Clean(m.Target)
+		if err := mountpath.Validate(source); err != nil {
+			return Result{}, fmt.Errorf("mount source %s: %w", m.Source, err)
+		}
+		if err := mountpath.Validate(target); err != nil {
+			return Result{}, fmt.Errorf("mount target %s: %w", m.Target, err)
+		}
+		p.Mounts = append(p.Mounts, Mount{Source: source, SourceType: sourceType, Target: target, Mode: m.Mode})
 	}
 	for _, a := range d.Network.Allow {
 		p.NetworkAllow = append(p.NetworkAllow, NetworkAllow{Host: a.Host, Port: a.Port})
@@ -197,6 +225,11 @@ func ProjectEvidence(d decl.Declaration, declarationPath string, declarationByte
 		Copies:    make([]Copy, 0, len(d.Copies)), Mounts: make([]Mount, 0, len(d.Mounts)),
 		NetworkAllow: make([]NetworkAllow, 0, len(d.Network.Allow)), Services: make([]Service, 0, len(d.Services)),
 	}
+	for _, target := range p.Workspace {
+		if err := mountpath.Validate(target); err != nil {
+			return Result{}, fmt.Errorf("workspace target %s: %w", target, err)
+		}
+	}
 	for index, copy := range d.Copies {
 		source, err := decl.ResolveSource(dir, copy.Source)
 		if err != nil {
@@ -221,7 +254,14 @@ func ProjectEvidence(d decl.Declaration, declarationPath string, declarationByte
 		if sourceType != "file" && sourceType != "directory" {
 			return Result{}, fmt.Errorf("retained mount %d source type is invalid", index)
 		}
-		p.Mounts = append(p.Mounts, Mount{Source: source, SourceType: sourceType, Target: filepath.Clean(mount.Target), Mode: mount.Mode})
+		target := filepath.Clean(mount.Target)
+		if err := mountpath.Validate(source); err != nil {
+			return Result{}, fmt.Errorf("mount source %s: %w", mount.Source, err)
+		}
+		if err := mountpath.Validate(target); err != nil {
+			return Result{}, fmt.Errorf("mount target %s: %w", mount.Target, err)
+		}
+		p.Mounts = append(p.Mounts, Mount{Source: source, SourceType: sourceType, Target: target, Mode: mount.Mode})
 	}
 	for _, allow := range d.Network.Allow {
 		p.NetworkAllow = append(p.NetworkAllow, NetworkAllow{Host: allow.Host, Port: allow.Port})
@@ -255,52 +295,13 @@ func validPlanDigest(value string) bool {
 // DigestSource returns the canonical content and mode fingerprint used for a
 // copied file or tree.
 func DigestSource(root string) (string, error) {
-	entries := []string{}
-	err := filepath.WalkDir(root, func(path string, item os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		info, err := item.Info()
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		switch {
-		case info.IsDir():
-			entries = append(entries, "d\x00"+filepath.ToSlash(rel)+"\x00"+info.Mode().Perm().String())
-		case info.Mode().IsRegular():
-			file, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			hash := sha256.New()
-			_, copyErr := io.Copy(hash, file)
-			closeErr := file.Close()
-			if copyErr != nil {
-				return copyErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-			entries = append(entries, "f\x00"+filepath.ToSlash(rel)+"\x00"+hex.EncodeToString(hash.Sum(nil))+"\x00"+info.Mode().Perm().String())
-		default:
-			return fmt.Errorf("unsupported source node %s", path)
-		}
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	sort.Strings(entries)
-	hash := sha256.New()
-	for _, entry := range entries {
-		io.WriteString(hash, entry)
-		hash.Write([]byte{'\n'})
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return DigestSourceContext(context.Background(), root)
+}
+
+// DigestSourceContext computes the canonical source digest under the shared
+// source-tree resource and cancellation bounds.
+func DigestSourceContext(ctx context.Context, root string) (string, error) {
+	return sourcetree.Digest(ctx, root)
 }
 
 func mountSourceType(source string) (string, error) {

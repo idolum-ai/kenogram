@@ -212,11 +212,20 @@ func Prepare(path string) (Prepared, error) {
 	return PrepareBytes(raw, path)
 }
 func PrepareBytes(raw []byte, path string) (Prepared, error) {
+	return PrepareBytesContext(context.Background(), raw, path)
+}
+
+// PrepareBytesContext threads cancellation through source-tree validation and
+// digest work while preserving the ordinary preparation API.
+func PrepareBytesContext(ctx context.Context, raw []byte, path string) (Prepared, error) {
+	if err := ctx.Err(); err != nil {
+		return Prepared{}, err
+	}
 	d, err := decl.Parse(raw)
 	if err != nil {
 		return Prepared{}, fmt.Errorf("parse declaration: %w", err)
 	}
-	result, err := plan.Build(d, path, raw)
+	result, err := plan.BuildContext(ctx, d, path, raw)
 	if err != nil {
 		return Prepared{}, fmt.Errorf("validate declaration: %w", err)
 	}
@@ -1526,18 +1535,18 @@ func hostPathsOverlap(first, second string) bool {
 }
 func (a *App) materialize(ctx context.Context, l worldfs.Layout, container string, generation int64, p Prepared) error {
 	for i, c := range p.Result.Plan.Copies {
-		liveDigest, err := plan.DigestSource(c.Source)
+		liveDigest, err := plan.DigestSourceContext(ctx, c.Source)
 		if err != nil {
 			return err
 		}
 		if liveDigest != c.SourceDigest {
 			return fmt.Errorf("copy source %s changed after planning", c.Source)
 		}
-		stage, err := l.StageSource(generation, i, c.Source, c.Mode)
+		stage, err := l.StageSourceContext(ctx, generation, i, c.Source, c.Mode)
 		if err != nil {
 			return err
 		}
-		stagedDigest, err := plan.DigestSource(stage)
+		stagedDigest, err := plan.DigestSourceContext(ctx, stage)
 		if err != nil {
 			return err
 		}

@@ -213,7 +213,7 @@ func runJob(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fs.Usage()
 		return 2
 	}
-	requestRaw, err := os.ReadFile(*requestPath)
+	requestRaw, err := job.ReadRequestFile(ctx, *requestPath)
 	if err != nil {
 		fmt.Fprintln(stderr, "job:", err)
 		return 2
