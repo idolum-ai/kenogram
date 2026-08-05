@@ -271,7 +271,7 @@ func ValidateManifest(value Manifest) error {
 
 func ValidateEgressEvidence(value EgressEvidence) error {
 	if value.Schema != EgressEvidenceSchema || !slices.Contains([]string{"complete", "incomplete"}, value.Status) ||
-		!validDigest(value.AllowlistSHA256) || !validDigest(value.DiagnosticsSHA256) ||
+		!validDigest(value.AllowlistSHA256) ||
 		!containerIDPattern.MatchString(value.ContainerID) || !ownerIDPattern.MatchString(value.OwnerID) || value.Generation < 1 || value.Generation > MaximumWireInteger ||
 		value.PID < 1 || value.PID > MaximumWireInteger || !validOpaqueText(value.ProcessStart, 1, 256) || !validTimestamp(value.ReadyAt) ||
 		!validNamespaceIdentity(value.UserNamespace) || !validNamespaceIdentity(value.NetworkNamespace) ||

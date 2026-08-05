@@ -85,9 +85,10 @@ type Proxy struct {
 	cancel      context.CancelFunc
 }
 
-// ActivitySummary is bounded metadata-only lifecycle evidence. Its diagnostic
-// digest commits to the bounded internal event snapshot without exposing
-// target requests, headers, payloads, or undeclared destinations.
+// ActivitySummary is bounded metadata-only lifecycle input for the runtime.
+// DiagnosticsSHA256 identifies the ephemeral in-process snapshot only. Because
+// that snapshot is deliberately not retained, the digest must not be promoted
+// into independently replayable durable evidence.
 type ActivitySummary struct {
 	Accepted          uint64
 	Refused           uint64
@@ -468,8 +469,9 @@ func (p *Proxy) WaitIdle(ctx context.Context) error {
 	}
 }
 
-// Summary returns only bounded counters and a digest of bounded diagnostic
-// metadata. The diagnostic events themselves remain ephemeral.
+// Summary returns bounded counters plus a producer-local digest of bounded
+// diagnostic metadata. The events and digest both remain ephemeral at the
+// durable evidence boundary.
 func (p *Proxy) Summary() ActivitySummary {
 	snapshot := p.diagnostics.snapshot(MaxDiagnosticLimit, MaxDiagnosticBytes)
 	raw, _ := json.Marshal(snapshot)

@@ -203,7 +203,8 @@ func WorkspaceCleanupExitCode(err error) int {
 type egressRuntime struct {
 	listener     net.Listener
 	proxy        *proxy.Proxy
-	done         chan error
+	serveDone    chan struct{}
+	finalize     chan struct{}
 	address      string
 	ownerID      string
 	containerID  string
@@ -213,11 +214,14 @@ type egressRuntime struct {
 	allowDigest  string
 	readyAt      time.Time
 
-	mu       sync.Mutex
-	stopping bool
-	stopped  chan struct{}
-	raw      []byte
-	err      error
+	mu             sync.Mutex
+	serveErr       error
+	revoked        bool
+	revokedAt      time.Time
+	listenerClosed bool
+	complete       bool
+	raw            []byte
+	err            error
 }
 
 func New(podman *backend.Podman) *Runtime {
@@ -520,17 +524,26 @@ func (r *Runtime) startEgress(ctx context.Context, invocation job.Invocation, ob
 	}
 	p := proxy.New(destinations, proxy.Options{Generation: generation, Now: r.now})
 	egress := &egressRuntime{
-		listener: listener, proxy: p, done: make(chan error, 1), stopped: make(chan struct{}), address: address,
+		listener: listener, proxy: p, serveDone: make(chan struct{}), finalize: make(chan struct{}, 1), address: address,
 		ownerID: ownerID, containerID: observed.ID, pid: observed.PID, processStart: observed.ProcessStart,
 		namespaces: namespaces, allowDigest: job.EgressAllowlistDigest(invocation.Prepared.Result.Plan.NetworkAllow), readyAt: r.now().UTC(),
 	}
+	egress.finalize <- struct{}{}
 	r.mu.Lock()
 	r.egress = egress
 	r.mu.Unlock()
-	go func() { egress.done <- p.Serve(listener) }()
+	go func() {
+		serveErr := p.Serve(listener)
+		egress.mu.Lock()
+		egress.serveErr = serveErr
+		close(egress.serveDone)
+		egress.mu.Unlock()
+	}()
 	select {
-	case serveErr := <-egress.done:
-		egress.done <- serveErr
+	case <-egress.serveDone:
+		egress.mu.Lock()
+		serveErr := egress.serveErr
+		egress.mu.Unlock()
 		listener.Close()
 		return "", jobcontract.RuntimeEgressAdmission{}, fmt.Errorf("governed egress proxy exited before target admission: %w", serveErr)
 	default:
@@ -543,48 +556,84 @@ func (r *Runtime) startEgress(ctx context.Context, invocation job.Invocation, ob
 	}, nil
 }
 
-func (r *Runtime) stopEgress(ctx context.Context) ([]byte, error) {
+// revokeEgress removes network policy at the target boundary. It is separate
+// from joining the proxy workers so target lifecycle evidence never depends on
+// teardown latency or proxy health.
+func (r *Runtime) revokeEgress() {
 	r.mu.Lock()
 	egress := r.egress
 	r.mu.Unlock()
 	if egress == nil {
-		return nil, nil
+		return
 	}
 	egress.mu.Lock()
-	if egress.stopping {
-		done := egress.stopped
-		egress.mu.Unlock()
-		select {
-		case <-done:
-			egress.mu.Lock()
-			raw, err := append([]byte{}, egress.raw...), egress.err
-			egress.mu.Unlock()
-			return raw, err
-		case <-ctx.Done():
-			return nil, context.Cause(ctx)
-		}
+	defer egress.mu.Unlock()
+	if egress.revoked {
+		return
 	}
-	egress.stopping = true
+	// Capture the instant at which the policy is actually withdrawn. Handler
+	// drain and Serve joining happen later and must not inflate this timestamp.
+	egress.revokedAt = r.now().UTC()
+	egress.proxy.RevokeAll()
+	egress.revoked = true
+}
+
+// stopEgress joins the revoked proxy lifecycle and publishes its bounded
+// evidence. The boolean reports whether every Serve/handler worker joined and
+// the listener was closed. A caller deadline returns a transient observation;
+// only a joined result is cached, so Cleanup can retry safely.
+func (r *Runtime) stopEgress(ctx context.Context) ([]byte, bool, error) {
+	r.mu.Lock()
+	egress := r.egress
+	r.mu.Unlock()
+	if egress == nil {
+		return nil, true, nil
+	}
+	r.revokeEgress()
+	select {
+	case <-egress.finalize:
+		defer func() { egress.finalize <- struct{}{} }()
+	case <-ctx.Done():
+		return nil, false, context.Cause(ctx)
+	}
+
+	egress.mu.Lock()
+	if egress.complete {
+		raw, err := append([]byte{}, egress.raw...), egress.err
+		egress.mu.Unlock()
+		return raw, true, err
+	}
+	listenerClosed := egress.listenerClosed
+	revokedAt := egress.revokedAt
 	egress.mu.Unlock()
 
 	reasons := []string{}
-	egress.proxy.RevokeAll()
-	listenerClosed := true
-	if err := egress.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		listenerClosed = false
-		reasons = append(reasons, "PROXY_LISTENER_CLOSE_FAILED")
+	if !listenerClosed {
+		if err := egress.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			reasons = append(reasons, "PROXY_LISTENER_CLOSE_FAILED")
+		} else {
+			listenerClosed = true
+			egress.mu.Lock()
+			egress.listenerClosed = true
+			egress.mu.Unlock()
+		}
 	}
-	joined := false
+	serveJoined := false
+	var serveErr error
 	select {
-	case serveErr := <-egress.done:
-		joined = true
+	case <-egress.serveDone:
+		serveJoined = true
+		egress.mu.Lock()
+		serveErr = egress.serveErr
+		egress.mu.Unlock()
 		if serveErr != nil && !errors.Is(serveErr, net.ErrClosed) {
 			reasons = append(reasons, "PROXY_SERVE_FAILED")
 		}
 	case <-ctx.Done():
 		reasons = append(reasons, "PROXY_JOIN_FAILED")
 	}
-	if err := egress.proxy.WaitIdle(ctx); err != nil {
+	idleErr := egress.proxy.WaitIdle(ctx)
+	if idleErr != nil {
 		reasons = append(reasons, "PROXY_ACTIVE_CONNECTIONS")
 	}
 	summary := egress.proxy.Summary()
@@ -592,6 +641,7 @@ func (r *Runtime) stopEgress(ctx context.Context) ([]byte, error) {
 	if !activeZero {
 		reasons = append(reasons, "PROXY_ACTIVE_CONNECTIONS")
 	}
+	joined := listenerClosed && serveJoined && idleErr == nil && activeZero
 	reasons = sortedUniqueStrings(reasons)
 	status := "complete"
 	if len(reasons) != 0 {
@@ -606,7 +656,7 @@ func (r *Runtime) stopEgress(ctx context.Context) ([]byte, error) {
 		ReadyAt:          egress.readyAt.Format(time.RFC3339Nano),
 		EnvironmentKeys:  append([]string{}, job.EgressEnvironmentKeys...),
 		Accepted:         boundedCounter(summary.Accepted), Refused: boundedCounter(summary.Refused), DialFailed: boundedCounter(summary.DialFailed), Omitted: boundedCounter(summary.Omitted),
-		DiagnosticsSHA256: summary.DiagnosticsSHA256, RevokedAt: r.now().UTC().Format(time.RFC3339Nano),
+		RevokedAt:      revokedAt.Format(time.RFC3339Nano),
 		ListenerClosed: listenerClosed, ActiveConnectionsZero: activeZero, Joined: joined, Reasons: reasons,
 	}
 	raw, marshalErr := json.Marshal(observation)
@@ -617,11 +667,12 @@ func (r *Runtime) stopEgress(ctx context.Context) ([]byte, error) {
 	if status != "complete" {
 		resultErr = errors.Join(resultErr, errors.New("governed egress lifecycle is incomplete"))
 	}
-	egress.mu.Lock()
-	egress.raw, egress.err = append([]byte{}, raw...), resultErr
-	close(egress.stopped)
-	egress.mu.Unlock()
-	return raw, resultErr
+	if joined {
+		egress.mu.Lock()
+		egress.complete, egress.raw, egress.err = true, append([]byte{}, raw...), resultErr
+		egress.mu.Unlock()
+	}
+	return raw, joined, resultErr
 }
 
 func boundedCounter(value uint64) int64 {
@@ -684,6 +735,21 @@ func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcon
 			}
 		}
 	}
+	_, egressJoined, egressErr := r.stopEgress(ctx)
+	if !egressJoined {
+		return jobcontract.CleanupResult{
+			Status:            "incomplete",
+			ContainerAbsent:   false,
+			ProxyAbsent:       false,
+			ProcessGroupEmpty: false,
+			DurationNS:        int64(time.Since(started)),
+			Reasons:           []string{"PROXY_CLEANUP_INCOMPLETE", "PROXY_WORKER_PRESENT", "SCRATCH_RETAINED_FOR_ACTIVE_PROXY"},
+		}
+	}
+	proxyAbsent := true
+	if egressErr != nil {
+		reasons = append(reasons, "PROXY_CLEANUP_INCOMPLETE")
+	}
 	r.mu.Lock()
 	artifactRoots := append([]*os.Root{}, r.artifactRoots...)
 	r.artifactRoots = nil
@@ -698,11 +764,6 @@ func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcon
 			invocation.Prepared.Result.DeclarationDigest, scratchID,
 			workspaceBindings, workspaceBindingsDigest,
 		)
-	}
-	proxyAbsent := true
-	if _, err := r.stopEgress(ctx); err != nil {
-		proxyAbsent = false
-		reasons = append(reasons, "PROXY_CLEANUP_INCOMPLETE")
 	}
 	if process != nil && process.attached != nil && !process.finished() {
 		forced = true
@@ -1256,9 +1317,9 @@ func (p *process) Wait(ctx context.Context) (jobcontract.TargetResult, error) {
 	case <-ctx.Done():
 	}
 	controlCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-	_, egressErr := p.runtime.stopEgress(controlCtx)
+	p.runtime.revokeEgress()
 	_, ownershipErr := p.runtime.proveOwned(controlCtx)
-	stopErr := errors.Join(egressErr, ownershipErr)
+	stopErr := ownershipErr
 	if stopErr == nil {
 		stopErr = p.runtime.Podman.StopWithin(controlCtx, p.runtime.containerID, 1)
 	}
@@ -1283,20 +1344,12 @@ func (p *process) Wait(ctx context.Context) (jobcontract.TargetResult, error) {
 }
 
 func (p *process) recordTerminal(err error) (jobcontract.TargetResult, error) {
+	p.runtime.revokeEgress()
 	if err != nil {
 		p.mu.Lock()
 		p.waited, p.waitErr = true, err
 		p.mu.Unlock()
 		return jobcontract.TargetResult{Kind: "unknown"}, err
-	}
-	egressCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	_, egressErr := p.runtime.stopEgress(egressCtx)
-	cancel()
-	if egressErr != nil {
-		p.mu.Lock()
-		p.waited, p.waitErr = true, egressErr
-		p.mu.Unlock()
-		return jobcontract.TargetResult{Kind: "unknown"}, egressErr
 	}
 	record, readErr := joblifecycle.ReadSlot(p.runtime.lifecycleFile, p.runtime.lifecycleKey, p.runtime.lifecycleID)
 	if readErr != nil {
@@ -1332,7 +1385,7 @@ func (p *process) Finalize(ctx context.Context) (job.RuntimeFinalization, error)
 	if !p.finished() {
 		return job.RuntimeFinalization{}, errors.New("target terminal observation is absent")
 	}
-	egressRaw, egressErr := p.runtime.stopEgress(ctx)
+	egressRaw, _, egressErr := p.runtime.stopEgress(ctx)
 	if egressErr != nil {
 		return job.RuntimeFinalization{Egress: egressRaw}, egressErr
 	}

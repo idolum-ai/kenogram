@@ -334,10 +334,24 @@ func TestEgressEvidenceRequiresBoundedCompleteLifecycle(t *testing.T) {
 		ListenerAddress: "127.0.0.1:3128", OwnerID: strings.Repeat("d", 32), ContainerID: strings.Repeat("c", 64), Generation: 1,
 		PID: 42, ProcessStart: "start", UserNamespace: NamespaceIdentity{Device: 1, Inode: 2}, NetworkNamespace: NamespaceIdentity{Device: 3, Inode: 4},
 		ReadyAt: "2026-08-05T12:00:00Z", EnvironmentKeys: []string{"ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "https_proxy", "http_proxy"},
-		DiagnosticsSHA256: testDigest, RevokedAt: "2026-08-05T12:00:02Z", ListenerClosed: true, ActiveConnectionsZero: true, Joined: true, Reasons: []string{},
+		RevokedAt: "2026-08-05T12:00:02Z", ListenerClosed: true, ActiveConnectionsZero: true, Joined: true, Reasons: []string{},
 	}
 	if err := ValidateEgressEvidence(value); err != nil {
 		t.Fatal(err)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "diagnostics_sha256") {
+		t.Fatalf("discarded diagnostic snapshot received an unverifiable durable commitment: %s", raw)
+	}
+	if _, err := ParseEgressEvidence(raw); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte(strings.TrimSuffix(string(raw), "}") + `,"diagnostics_sha256":"` + testDigest + `"}`)
+	if _, err := ParseEgressEvidence(legacy); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unverifiable legacy diagnostic commitment accepted: %v", err)
 	}
 	for _, edit := range []func(*EgressEvidence){
 		func(v *EgressEvidence) { v.ListenerAddress = "0.0.0.0:3128" },

@@ -197,7 +197,7 @@ func (f *fakeProcess) Finalize(context.Context) (RuntimeFinalization, error) {
 			Schema: jobcontract.EgressEvidenceSchema, Status: "complete", AllowlistSHA256: EgressAllowlistDigest(f.invocation.Prepared.Result.Plan.NetworkAllow),
 			ListenerAddress: "127.0.0.1:3128", OwnerID: strings.Repeat("d", 32), ContainerID: strings.Repeat("c", 64), Generation: 1,
 			PID: 42, ProcessStart: "start", UserNamespace: jobcontract.NamespaceIdentity{Device: 1, Inode: 2}, NetworkNamespace: jobcontract.NamespaceIdentity{Device: 3, Inode: 4},
-			ReadyAt: "2026-08-05T11:59:59Z", EnvironmentKeys: append([]string{}, EgressEnvironmentKeys...), DiagnosticsSHA256: testDigest(),
+			ReadyAt: "2026-08-05T11:59:59Z", EnvironmentKeys: append([]string{}, EgressEnvironmentKeys...),
 			RevokedAt: "2026-08-05T12:00:01Z", ListenerClosed: true, ActiveConnectionsZero: true, Joined: true, Reasons: []string{},
 		}
 		if f.egressMutate != nil {

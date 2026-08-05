@@ -50,6 +50,12 @@ type crashingListener struct {
 	once    sync.Once
 }
 
+type recoverableStuckListener struct {
+	mu       sync.Mutex
+	release  chan struct{}
+	released bool
+}
+
 func (l *stuckListener) Accept() (net.Conn, error) { <-l.release; return nil, net.ErrClosed }
 func (l *stuckListener) Close() error              { return errors.New("injected listener close failure") }
 func (l *stuckListener) Addr() net.Addr {
@@ -73,6 +79,33 @@ func (l *crashingListener) Addr() net.Addr {
 
 func (l *crashingListener) Crash() {
 	l.once.Do(func() { close(l.trigger) })
+}
+
+func (l *recoverableStuckListener) Accept() (net.Conn, error) {
+	<-l.release
+	return nil, net.ErrClosed
+}
+
+func (l *recoverableStuckListener) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.released {
+		return errors.New("injected listener worker remains active")
+	}
+	return nil
+}
+
+func (l *recoverableStuckListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3128}
+}
+
+func (l *recoverableStuckListener) Release() {
+	l.mu.Lock()
+	if !l.released {
+		l.released = true
+		close(l.release)
+	}
+	l.mu.Unlock()
 }
 
 func (f *fakeAttachedStarter) BindLifecycle(path string, key []byte) {
@@ -619,7 +652,7 @@ func TestGovernedEgressJoinAndListenerFailureRemainIncomplete(t *testing.T) {
 		t.Fatalf("process=%#v error=%v", process, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	raw, stopErr := runtime.stopEgress(ctx)
+	raw, _, stopErr := runtime.stopEgress(ctx)
 	cancel()
 	close(listener.release)
 	if stopErr == nil {
@@ -631,6 +664,111 @@ func TestGovernedEgressJoinAndListenerFailureRemainIncomplete(t *testing.T) {
 	}
 	cleanup := runtime.Cleanup(context.Background(), invocation)
 	if cleanup.Status != "incomplete" || cleanup.ProxyAbsent {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+}
+
+func TestGovernedEgressCleanupRetainsAuthorityUntilWorkersJoinAndRetries(t *testing.T) {
+	runtime, runner, attached, invocation := runtimeFixture(t)
+	invocation.Prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "example.test", Port: 443}}
+	listener := &recoverableStuckListener{release: make(chan struct{})}
+	runtime.listener = func(_ context.Context, _ int, _, _ string, revalidate func() error) (net.Listener, netns.NamespaceIdentity, error) {
+		if err := revalidate(); err != nil {
+			return nil, netns.NamespaceIdentity{}, err
+		}
+		return listener, netns.NamespaceIdentity{UserInode: 1, NetworkInode: 2}, nil
+	}
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil || process == nil {
+		t.Fatalf("process=%#v error=%v", process, err)
+	}
+	scratch := runtime.scratch
+	attached.finish(nil)
+	if target, waitErr := process.Wait(context.Background()); waitErr != nil || target.Kind != "exited" {
+		t.Fatalf("target=%#v error=%v", target, waitErr)
+	}
+	finalCtx, cancelFinal := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	final, finalErr := process.Finalize(finalCtx)
+	cancelFinal()
+	if finalErr == nil {
+		t.Fatal("unjoined proxy finalization was accepted")
+	}
+	egress, parseErr := jobcontract.ParseEgressEvidence(final.Egress)
+	if parseErr != nil || egress.Joined || egress.Status != "incomplete" {
+		t.Fatalf("egress=%#v parse_error=%v final_error=%v", egress, parseErr, finalErr)
+	}
+
+	runner.mu.Lock()
+	callsBeforeCleanup := len(runner.calls)
+	runner.mu.Unlock()
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	cleanup := runtime.Cleanup(cleanupCtx, invocation)
+	cancelCleanup()
+	if cleanup.Status != "incomplete" || cleanup.ProxyAbsent || !slices.Contains(cleanup.Reasons, "PROXY_WORKER_PRESENT") {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+	runner.mu.Lock()
+	callsAfterCleanup := len(runner.calls)
+	runner.mu.Unlock()
+	if callsAfterCleanup != callsBeforeCleanup {
+		t.Fatalf("cleanup contacted provider while proxy worker remained active: before=%d after=%d calls=%v", callsBeforeCleanup, callsAfterCleanup, runner.calls)
+	}
+	if _, err := os.Stat(scratch); err != nil {
+		t.Fatalf("scratch was not retained for active proxy worker: %v", err)
+	}
+
+	listener.Release()
+	cleanup = runtime.Cleanup(context.Background(), invocation)
+	if cleanup.Status != "complete" || !cleanup.ProxyAbsent || !cleanup.ContainerAbsent {
+		t.Fatalf("recovered cleanup=%#v", cleanup)
+	}
+	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
+		t.Fatalf("scratch remains after joined cleanup: %v", err)
+	}
+}
+
+func TestGovernedEgressRevocationTimestampExcludesFinalizationLatency(t *testing.T) {
+	runtime, _, attached, invocation := runtimeFixture(t)
+	invocation.Prepared.Result.Plan.NetworkAllow = []plan.NetworkAllow{{Host: "example.test", Port: 443}}
+	runtime.listener = func(_ context.Context, _ int, _, address string, revalidate func() error) (net.Listener, netns.NamespaceIdentity, error) {
+		if err := revalidate(); err != nil {
+			return nil, netns.NamespaceIdentity{}, err
+		}
+		listener, err := net.Listen("tcp4", address)
+		return listener, netns.NamespaceIdentity{UserInode: 1, NetworkInode: 2}, err
+	}
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := process.Identity(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := jobcontract.ParseRuntimeObservation(identity.Before)
+	if err != nil || before.EgressAdmission == nil {
+		t.Fatalf("before=%#v error=%v", before, err)
+	}
+	readyAt, err := time.Parse(time.RFC3339Nano, before.ObservedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revokedAt := readyAt.Add(time.Second)
+	runtime.now = func() time.Time { return revokedAt }
+	attached.finish(nil)
+	if _, err := process.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	runtime.now = func() time.Time { return revokedAt.Add(30 * time.Second) }
+	final, err := process.Finalize(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	egress, err := jobcontract.ParseEgressEvidence(final.Egress)
+	if err != nil || egress.RevokedAt != revokedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("revoked_at=%q want=%q error=%v", egress.RevokedAt, revokedAt.Format(time.RFC3339Nano), err)
+	}
+	if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" {
 		t.Fatalf("cleanup=%#v", cleanup)
 	}
 }
@@ -656,7 +794,7 @@ func TestGovernedEgressProxyCrashCannotBecomeComplete(t *testing.T) {
 		t.Fatal("proxy listener did not crash")
 	}
 	attached.finish(nil)
-	if target, waitErr := process.Wait(context.Background()); waitErr == nil || target.Kind != "unknown" {
+	if target, waitErr := process.Wait(context.Background()); waitErr != nil || target.Kind != "exited" || target.ExitStatus == nil || *target.ExitStatus != 0 {
 		t.Fatalf("target=%#v error=%v", target, waitErr)
 	}
 	final, finalErr := process.Finalize(context.Background())
@@ -668,7 +806,7 @@ func TestGovernedEgressProxyCrashCannotBecomeComplete(t *testing.T) {
 		t.Fatalf("egress=%#v parse_error=%v final_error=%v", egress, parseErr, finalErr)
 	}
 	cleanup := runtime.Cleanup(context.Background(), invocation)
-	if cleanup.Status != "incomplete" || cleanup.ProxyAbsent {
+	if cleanup.Status != "incomplete" || !cleanup.ProxyAbsent {
 		t.Fatalf("cleanup=%#v", cleanup)
 	}
 }

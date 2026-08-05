@@ -18,7 +18,8 @@ Notable user-visible and operational changes are recorded here.
   keep `network=none`, descriptor-pin and revalidate the exact holder namespaces,
   inject only system-owned proxy variables, enforce exact host/port policy with
   per-connection DNS, independently bind admission identity in pre-target runtime
-  evidence, and seal bounded metadata-only revocation/join evidence. Invalid or
+  evidence, and seal bounded metadata-only revocation/join evidence without an
+  unverifiable digest of discarded diagnostics. Invalid or
   unrequested egress output is omitted from a replayable incomplete seal.
   Hosted Linux K6 and release-candidate replay and a release claim remain later work. Raise the module API floor to Go 1.25 for the standard-library
   descriptor-owned `os.Root` boundary used on macOS and for evidence paths;

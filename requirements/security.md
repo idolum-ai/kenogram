@@ -76,9 +76,10 @@ Governed-job egress does not add a container route. A descriptor-transferred
 loopback listener is bound to the exact verified holder namespaces and served
 by a host-owned proxy restricted to the canonical declaration allowlist.
 Request environment authority cannot override proxy variables. Retained egress
-evidence contains public identity, bounded outcome counters, and a diagnostic
-digest only; it contains no headers, payload, body, TLS plaintext, resolved IP,
-secret, runtime socket, or namespace capability descriptor.
+evidence contains public identity and bounded outcome counters; it contains no
+diagnostic events or digest of discarded diagnostics, headers, payload, body,
+TLS plaintext, resolved IP, secret, runtime socket, or namespace capability
+descriptor.
 
 Named interfaces are trusted host-operator capability. Kenogram verifies the
 declaration and generation but does not authenticate, encrypt, authorize, or

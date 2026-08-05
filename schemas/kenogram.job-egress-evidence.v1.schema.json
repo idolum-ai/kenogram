@@ -4,7 +4,7 @@
   "title": "Kenogram governed job egress evidence v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "status", "allowlist_sha256", "listener_address", "owner_id", "container_id", "generation", "pid", "process_start", "user_namespace", "network_namespace", "ready_at", "environment_keys", "accepted", "refused", "dial_failed", "omitted", "diagnostics_sha256", "revoked_at", "listener_closed", "active_connections_zero", "joined", "reasons"],
+  "required": ["schema", "status", "allowlist_sha256", "listener_address", "owner_id", "container_id", "generation", "pid", "process_start", "user_namespace", "network_namespace", "ready_at", "environment_keys", "accepted", "refused", "dial_failed", "omitted", "revoked_at", "listener_closed", "active_connections_zero", "joined", "reasons"],
   "properties": {
     "schema": {"const": "kenogram.job-egress-evidence.v1"},
     "status": {"enum": ["complete", "incomplete"]},
@@ -23,7 +23,6 @@
     "refused": {"$ref": "#/$defs/nonnegative"},
     "dial_failed": {"$ref": "#/$defs/nonnegative"},
     "omitted": {"$ref": "#/$defs/nonnegative"},
-    "diagnostics_sha256": {"$ref": "#/$defs/digest"},
     "revoked_at": {"type": "string", "format": "date-time", "maxLength": 64},
     "listener_closed": {"type": "boolean"},
     "active_connections_zero": {"type": "boolean"},

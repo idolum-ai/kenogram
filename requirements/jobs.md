@@ -26,7 +26,7 @@ The versioned language-neutral documents are:
 - `kenogram.podman-runtime-observation.v1`, which closes the public K5 runtime
   proof over immutable container, image, enforcement, and mount identities; and
 - `kenogram.job-egress-evidence.v1`, which conditionally binds the declared
-  allowlist, pinned namespace listener, bounded metadata counters, revocation,
+  allowlist, pinned namespace listener, bounded outcome counters, revocation,
   active-tunnel closure, and proxy join.
 
 Their JSON Schemas are under [`../schemas/`](../schemas/). The schemas are
@@ -191,6 +191,12 @@ upgraded to complete. Invalid or unrequested runtime egress output is not
 retained as `egress.json`; the sealed result is incomplete with a stable reason
 and remains independently replayable. When present, the artifact's digest is
 bound by the result identity and manifest content root.
+
+The retained outcome counters are producer observations. Exact diagnostic
+events remain bounded and ephemeral because they contain target-authored
+destination metadata. Kenogram does not retain a digest of that discarded
+snapshot: without the preimage such a value would be an unverifiable producer
+claim, not an independently replayable evidence commitment.
 
 Optional target artifacts are copied into the host-owned evidence tree only
 after target execution has ended. Manifest entries are unique and strictly

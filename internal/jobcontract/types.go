@@ -238,7 +238,6 @@ type EgressEvidence struct {
 	Refused               int64             `json:"refused"`
 	DialFailed            int64             `json:"dial_failed"`
 	Omitted               int64             `json:"omitted"`
-	DiagnosticsSHA256     string            `json:"diagnostics_sha256"`
 	RevokedAt             string            `json:"revoked_at"`
 	ListenerClosed        bool              `json:"listener_closed"`
 	ActiveConnectionsZero bool              `json:"active_connections_zero"`
