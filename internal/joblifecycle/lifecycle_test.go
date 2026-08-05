@@ -95,10 +95,25 @@ func TestPreparedLifecycleSlotRejectsPrewriteAndSubstitution(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		replacement := filepath.Join(dir, "replacement.json")
+		if err := Write(replacement, record, key); err != nil {
+			t.Fatal(err)
+		}
+		replacementInfo, err := os.Lstat(replacement)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replacementIdentity, err := identityOf(replacementInfo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replacementIdentity == identity {
+			t.Fatal("simultaneously live files unexpectedly share an identity")
+		}
 		if err := os.Remove(path); err != nil {
 			t.Fatal(err)
 		}
-		if err := Write(path, record, key); err != nil {
+		if err := os.Rename(replacement, path); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := ReadSlot(path, key, identity); err == nil || !strings.Contains(err.Error(), "identity changed") {
