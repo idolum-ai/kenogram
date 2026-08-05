@@ -11,10 +11,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
 
+	"github.com/idolum-ai/kenogram/internal/decl"
 	"github.com/idolum-ai/kenogram/internal/jobcontract"
 	"github.com/idolum-ai/kenogram/internal/plan"
 )
@@ -114,11 +116,19 @@ func Verify(evidenceDir string) (Verification, error) {
 	if err := json.Unmarshal(observed["plan.json"], &retainedPlan); err != nil {
 		return Verification{}, err
 	}
-	if planDigest != prefixedDigest(retainedPlan.EvidenceDigest) || result.Identity.PlanSHA256 != planDigest {
-		return Verification{}, errors.New("plan identity mismatch")
+	declaration, err := decl.Parse(observed["declaration.toml"])
+	if err != nil {
+		return Verification{}, err
 	}
-	if retainedPlan.DeclarationDigest != strings.TrimPrefix(request.Declaration.SHA256, "sha256:") {
-		return Verification{}, errors.New("retained plan declaration identity mismatch")
+	expectedPlan, err := plan.ProjectEvidence(declaration, request.Declaration.Path, observed["declaration.toml"], retainedPlan.Plan)
+	if err != nil {
+		return Verification{}, fmt.Errorf("re-project retained plan: %w", err)
+	}
+	if !reflect.DeepEqual(retainedPlan, expectedPlan) {
+		return Verification{}, errors.New("retained public plan disagrees with declaration semantics")
+	}
+	if planDigest != prefixedDigest(retainedPlan.PlanDigest) || retainedPlan.PlanDigest != retainedPlan.EvidenceDigest || result.Identity.PlanSHA256 != planDigest {
+		return Verification{}, errors.New("plan identity mismatch")
 	}
 	if err := validateSecretEnvironment(request, retainedPlan); err != nil {
 		return Verification{}, err

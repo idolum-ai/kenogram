@@ -20,6 +20,16 @@ func ImagePinned(image string) bool { return pinnedImage.MatchString(image) }
 
 // Validate checks schema constraints that depend on values and host metadata.
 func Validate(d Declaration, declarationDir string) error {
+	return validate(d, declarationDir, true)
+}
+
+// ValidateEvidence checks declaration semantics that can be re-derived from a
+// retained declaration without reopening its external copy or mount sources.
+func ValidateEvidence(d Declaration, declarationDir string) error {
+	return validate(d, declarationDir, false)
+}
+
+func validate(d Declaration, declarationDir string, inspectSources bool) error {
 	if d.Version != 1 {
 		return fmt.Errorf("version must be 1, got %d", d.Version)
 	}
@@ -52,8 +62,13 @@ func Validate(d Declaration, declarationDir string) error {
 		seenPaths[path] = true
 	}
 	for i, c := range d.Copies {
-		if err := sourceExists(declarationDir, c.Source); err != nil {
-			return fmt.Errorf("copies[%d]: %w", i, err)
+		if c.Source == "" {
+			return fmt.Errorf("copies[%d]: source must not be empty", i)
+		}
+		if inspectSources {
+			if err := sourceExists(declarationDir, c.Source); err != nil {
+				return fmt.Errorf("copies[%d]: %w", i, err)
+			}
 		}
 		if err := absoluteClean(fmt.Sprintf("copies[%d].target", i), c.Target); err != nil {
 			return err
@@ -64,7 +79,7 @@ func Validate(d Declaration, declarationDir string) error {
 		if reservedOverlap(c.Target) {
 			return fmt.Errorf("copies[%d].target %q overlaps a reserved path", i, c.Target)
 		}
-		if c.Secret {
+		if c.Secret && inspectSources {
 			resolved, err := ResolveSource(declarationDir, c.Source)
 			if err != nil {
 				return fmt.Errorf("copies[%d].source: %w", i, err)
@@ -75,8 +90,13 @@ func Validate(d Declaration, declarationDir string) error {
 		}
 	}
 	for i, m := range d.Mounts {
-		if err := sourceExists(declarationDir, m.Source); err != nil {
-			return fmt.Errorf("mounts[%d]: %w", i, err)
+		if m.Source == "" {
+			return fmt.Errorf("mounts[%d]: source must not be empty", i)
+		}
+		if inspectSources {
+			if err := sourceExists(declarationDir, m.Source); err != nil {
+				return fmt.Errorf("mounts[%d]: %w", i, err)
+			}
 		}
 		if err := absoluteClean(fmt.Sprintf("mounts[%d].target", i), m.Target); err != nil {
 			return err

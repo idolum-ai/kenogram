@@ -87,6 +87,67 @@ func TestGovernedJobCLIRejectsInvalidRequestBeforeProviderSelection(t *testing.T
 	}
 }
 
+func TestGovernedJobCLIRejectsMalformedDeclarationBeforeSemanticIdentity(t *testing.T) {
+	prior := governedJobRuntime
+	governedJobRuntime = func() job.Runtime { return unusedJobRuntime{} }
+	defer func() { governedJobRuntime = prior }()
+	dir := t.TempDir()
+	declaration := []byte("version = [not valid TOML\n")
+	requestPath := writeJobCLIRequest(t, dir, declaration, nil)
+	evidence := filepath.Join(dir, "evidence")
+	var stdout, stderr bytes.Buffer
+	code := runJob(context.Background(), []string{"--request", requestPath, "--evidence-dir", evidence}, &stdout, &stderr)
+	if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "prepare bound declaration") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Lstat(evidence); !os.IsNotExist(err) {
+		t.Fatalf("invalid declaration created evidence: %v", err)
+	}
+}
+
+func TestGovernedJobCLIRejectsUnboundSecretBeforeSemanticIdentity(t *testing.T) {
+	prior := governedJobRuntime
+	governedJobRuntime = func() job.Runtime { return unusedJobRuntime{} }
+	defer func() { governedJobRuntime = prior }()
+	dir := t.TempDir()
+	declaration := []byte("version = 1\nname = \"job\"\n[world]\nhostname = \"job\"\nbase = \"example.invalid/job@sha256:" + strings.Repeat("a", 64) + "\"\nworkdir = \"/workspace\"\nuser = \"agent\"\n[resources]\ncpus = 1\nmemory_bytes = 1024\npids = 8\n[workspace]\npaths = [\"/workspace\"]\n")
+	environment := []jobcontract.EnvironmentItem{{Name: "TOKEN", SecretFile: "/run/secrets/token"}}
+	requestPath := writeJobCLIRequest(t, dir, declaration, environment)
+	evidence := filepath.Join(dir, "evidence")
+	var stdout, stderr bytes.Buffer
+	code := runJob(context.Background(), []string{"--request", requestPath, "--evidence-dir", evidence}, &stdout, &stderr)
+	if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "exactly one declaration-owned secret copy") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Lstat(evidence); !os.IsNotExist(err) {
+		t.Fatalf("invalid secret binding created evidence: %v", err)
+	}
+}
+
+func writeJobCLIRequest(t *testing.T, dir string, declaration []byte, environment []jobcontract.EnvironmentItem) string {
+	t.Helper()
+	declarationPath := filepath.Join(dir, "kenogram.toml")
+	if err := os.WriteFile(declarationPath, declaration, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(declaration)
+	request := jobcontract.Request{
+		Schema: jobcontract.RequestSchema, JobID: "job-1",
+		Declaration: jobcontract.DeclarationBinding{Path: declarationPath, SHA256: fmt.Sprintf("sha256:%x", sum)},
+		Command:     jobcontract.Command{Argv: []string{"/bin/true"}, WorkingDirectory: "/workspace", Environment: environment},
+		Limits:      jobcontract.Limits{TimeoutNS: int64(time.Second), FinalizeNS: int64(time.Second), StdoutMaxBytes: 1, StderrMaxBytes: 1},
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(dir, "request.json")
+	if err := os.WriteFile(requestPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return requestPath
+}
+
 func TestGovernedJobCLIReturnsOneForPostIdentityPublicationFailure(t *testing.T) {
 	prior := governedJobRuntime
 	governedJobRuntime = func() job.Runtime { return unusedJobRuntime{} }

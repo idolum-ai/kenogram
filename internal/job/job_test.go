@@ -54,13 +54,17 @@ type fakeProcess struct {
 	block          bool
 	waitBlock      <-chan struct{}
 	finalBlock     <-chan struct{}
+	identityBlock  <-chan struct{}
 	artifacts      []Artifact
 	beforeRaw      []byte
 	imageReference string
 	imageDigest    string
 }
 
-func (f *fakeProcess) Identity() RuntimeIdentity {
+func (f *fakeProcess) Identity(context.Context) (RuntimeIdentity, error) {
+	if f.identityBlock != nil {
+		<-f.identityBlock
+	}
 	before := f.beforeRaw
 	if before == nil {
 		before = []byte("{\"running\":true}\n")
@@ -73,7 +77,7 @@ func (f *fakeProcess) Identity() RuntimeIdentity {
 	if digest == "" {
 		digest = testDigest()
 	}
-	return RuntimeIdentity{Generation: 1, ImageReference: reference, ImageDigest: digest, Before: before}
+	return RuntimeIdentity{Generation: 1, ImageReference: reference, ImageDigest: digest, Before: before}, nil
 }
 
 func (f *fakeProcess) Wait(ctx context.Context) (jobcontract.TargetResult, error) {
@@ -228,6 +232,7 @@ func TestExecutorBoundsContextIgnoringRuntimePhases(t *testing.T) {
 		edit func(*fakeRuntime, chan struct{})
 	}{
 		{name: "start", edit: func(runtime *fakeRuntime, release chan struct{}) { runtime.startBlock = release }},
+		{name: "identity", edit: func(runtime *fakeRuntime, release chan struct{}) { runtime.process.identityBlock = release }},
 		{name: "wait", edit: func(runtime *fakeRuntime, release chan struct{}) { runtime.process.waitBlock = release }},
 		{name: "finalize", edit: func(runtime *fakeRuntime, release chan struct{}) { runtime.process.finalBlock = release }},
 		{name: "cleanup", edit: func(runtime *fakeRuntime, release chan struct{}) { runtime.cleanupBlock = release }},
@@ -486,7 +491,72 @@ func TestVerifierRejectsPlanDeclarationCrossBindingMismatch(t *testing.T) {
 			}
 		}
 	})
-	if _, err := Verify(evidence); err == nil || !strings.Contains(err.Error(), "declaration identity") {
+	if _, err := Verify(evidence); err == nil || !strings.Contains(err.Error(), "declaration semantics") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestVerifierRejectsSelfConsistentForgedPlanProjection(t *testing.T) {
+	executor, requestRaw, evidence, _ := fixture(t)
+	if _, err := executor.Run(context.Background(), requestRaw, evidence); err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(evidence, "plan.json")
+	var retained plan.Result
+	planRaw, err := os.ReadFile(planPath)
+	if err != nil || json.Unmarshal(planRaw, &retained) != nil {
+		t.Fatal(err)
+	}
+	forgedDigest := "sha256:" + strings.Repeat("b", 64)
+	retained.Plan.World.Base = "example.invalid/forged@" + forgedDigest
+	_, evidenceDigest, err := plan.EvidenceCanonical(retained.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained.PlanDigest = evidenceDigest
+	retained.EvidenceDigest = evidenceDigest
+	changedPlan, err := json.Marshal(retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedPlan = append(changedPlan, '\n')
+	if err := os.WriteFile(planPath, changedPlan, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resultPath := filepath.Join(evidence, "result.json")
+	resultRaw, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := jobcontract.ParseResult(resultRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Identity.PlanSHA256 = prefixedDigest(evidenceDigest)
+	result.Identity.ImageReference = retained.Plan.World.Base
+	result.Identity.ImageDigest = forgedDigest
+	changedResult, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedResult = append(changedResult, '\n')
+	if err := os.WriteFile(resultPath, changedResult, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rewriteManifest(t, evidence, func(manifest *jobcontract.Manifest) {
+		for index := range manifest.Entries {
+			switch manifest.Entries[index].Path {
+			case "plan.json":
+				manifest.Entries[index].Size = int64(len(changedPlan))
+				manifest.Entries[index].SHA256 = digest(changedPlan)
+			case "result.json":
+				manifest.Entries[index].Size = int64(len(changedResult))
+				manifest.Entries[index].SHA256 = digest(changedResult)
+				manifest.ResultSHA256 = digest(changedResult)
+			}
+		}
+	})
+	if _, err := Verify(evidence); err == nil || !strings.Contains(err.Error(), "declaration semantics") {
 		t.Fatalf("error=%v", err)
 	}
 }

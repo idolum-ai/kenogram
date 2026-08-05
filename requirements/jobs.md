@@ -50,10 +50,12 @@ observation.
 Once implemented, a semantically valid request produces exactly one JSON result
 on stdout. Exit 0 means the execution was completely observed and sealed; the
 target's own nonzero exit remains a target result and does not become recorder
-failure. Exit 1 means a typed `refused` or `incomplete` result was sealed. Exit
-2 means the invocation or request was invalid before a trustworthy job identity
-could be established and need not emit a job result. Diagnostics use stderr
-and are never part of the machine result.
+failure. Exit 1 means a typed `refused` or `incomplete` result was sealed, or
+that a publication failure occurred after semantic job identity was established
+but could not itself be sealed. Exit 2 means the invocation, request, retained
+declaration, or declaration-owned secret binding was invalid before trustworthy
+semantic job identity could be established and need not emit a job result.
+Diagnostics use stderr and are never part of the machine result.
 
 The provider-independent core is not evidence that a real provider satisfies
 the contract. A consumer must require a sealed bundle produced through the K5

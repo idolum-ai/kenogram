@@ -28,7 +28,7 @@ type Runtime interface {
 }
 
 type Process interface {
-	Identity() RuntimeIdentity
+	Identity(context.Context) (RuntimeIdentity, error)
 	Wait(context.Context) (jobcontract.TargetResult, error)
 	Finalize(context.Context) (RuntimeFinalization, error)
 }
@@ -123,7 +123,6 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 	if digest(declarationRaw) != request.Declaration.SHA256 {
 		return Outcome{}, errors.New("declaration digest does not match job request")
 	}
-	identityEstablished = true
 	prepared, err := app.PrepareBytes(declarationRaw, request.Declaration.Path)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("prepare bound declaration: %w", err)
@@ -131,6 +130,7 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 	if err := validateSecretEnvironment(request, prepared.Result); err != nil {
 		return Outcome{}, err
 	}
+	identityEstablished = true
 	planRaw, err := plan.JSON(prepared.Result)
 	if err != nil {
 		return Outcome{}, err
@@ -200,7 +200,7 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 	var runtimeBefore, runtimeAfter []byte
 	artifactInventoryWritten := false
 	if startErr == nil {
-		identity := process.Identity()
+		identity, identityErr := identityProcessBounded(executionCtx, process)
 		result.Identity.Generation = identity.Generation
 		if validRuntimeDigest(identity.ImageDigest) {
 			result.Identity.ImageDigest = identity.ImageDigest
@@ -209,9 +209,10 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 		if err := jobcontract.ValidateJSONDocument(runtimeBefore, jobcontract.MaximumManifestBytes); err != nil {
 			startErr = fmt.Errorf("runtime before evidence is invalid: %w", err)
 		}
-		if identityErr := validateRuntimeIdentity(identity, prepared.Result); identityErr != nil {
-			startErr = errors.Join(startErr, identityErr)
+		if validateErr := validateRuntimeIdentity(identity, prepared.Result); validateErr != nil {
+			identityErr = errors.Join(identityErr, validateErr)
 		}
+		startErr = errors.Join(startErr, identityErr)
 	}
 	if startErr != nil && admitted {
 		result.Status = "incomplete"
@@ -235,6 +236,7 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 		finalStarted := e.Now().UTC()
 		finalMonotonic := time.Now()
 		finalCtx, cancelFinalize := context.WithTimeout(context.WithoutCancel(ctx), time.Duration(request.Limits.FinalizeNS))
+		defer cancelFinalize()
 		final, finalErr := finalizeProcessBounded(finalCtx, process)
 		finalFinished := e.Now().UTC()
 		result.Finalization = interval(finalStarted, finalFinished, time.Since(finalMonotonic))
@@ -404,6 +406,28 @@ func lateCleanup(runtime Runtime, invocation Invocation, timeout time.Duration) 
 type targetObservation struct {
 	target jobcontract.TargetResult
 	err    error
+}
+
+type identityObservation struct {
+	identity RuntimeIdentity
+	err      error
+}
+
+func identityProcessBounded(ctx context.Context, process Process) (RuntimeIdentity, error) {
+	result := make(chan identityObservation, 1)
+	go func() {
+		identity, err := process.Identity(ctx)
+		result <- identityObservation{identity: identity, err: err}
+	}()
+	select {
+	case observed := <-result:
+		if err := ctx.Err(); err != nil {
+			return RuntimeIdentity{}, errors.Join(observed.err, err)
+		}
+		return observed.identity, observed.err
+	case <-ctx.Done():
+		return RuntimeIdentity{}, ctx.Err()
+	}
 }
 
 func waitProcessBounded(ctx context.Context, process Process) (jobcontract.TargetResult, error) {

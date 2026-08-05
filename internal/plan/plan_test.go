@@ -134,6 +134,25 @@ func TestRenderDoesNotReadOrPrintSourceContents(t *testing.T) {
 	if retained.EvidenceDigest != evidenceDigest || retained.EvidenceDigest == result.PlanDigest {
 		t.Fatalf("retained evidence digest=%q operational digest=%q recomputed=%q", retained.EvidenceDigest, result.PlanDigest, evidenceDigest)
 	}
+	if retained.PlanDigest != retained.EvidenceDigest {
+		t.Fatalf("retained plan digest=%q evidence digest=%q", retained.PlanDigest, retained.EvidenceDigest)
+	}
+	projected, err := ProjectEvidence(d, path, data, retained.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(mustJSON(t, retained), mustJSON(t, projected)) {
+		t.Fatalf("retained plan does not equal its declaration projection\nretained: %s\nprojected: %s", mustJSON(t, retained), mustJSON(t, projected))
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func TestCanonicalHasTrailingNewline(t *testing.T) {

@@ -168,6 +168,79 @@ func EvidenceCanonical(p Plan) (Plan, string, error) {
 	return redacted, hex.EncodeToString(sum[:]), nil
 }
 
+// ProjectEvidence strictly re-derives the retained public plan from the
+// declaration. Non-secret source digests are retained content observations;
+// secret digests must already be the literal redaction marker.
+func ProjectEvidence(d decl.Declaration, declarationPath string, declarationBytes []byte, retained Plan) (Result, error) {
+	dir, err := filepath.Abs(filepath.Dir(declarationPath))
+	if err != nil {
+		return Result{}, err
+	}
+	if err := decl.ValidateEvidence(d, dir); err != nil {
+		return Result{}, err
+	}
+	if len(retained.Copies) != len(d.Copies) || len(retained.Mounts) != len(d.Mounts) {
+		return Result{}, fmt.Errorf("retained plan copy or mount cardinality disagrees with declaration")
+	}
+	p := Plan{
+		Version: d.Version, Name: d.Name, AllowUnpinned: d.AllowUnpinned,
+		World:     World{Hostname: d.World.Hostname, Base: d.World.Base, Workdir: filepath.Clean(d.World.Workdir), User: d.World.User},
+		Resources: Resources{CPUs: d.Resources.CPUs, MemoryBytes: d.Resources.MemoryBytes, PIDs: d.Resources.PIDs},
+		Workspace: append([]string{}, d.Workspace.Paths...),
+		Copies:    make([]Copy, 0, len(d.Copies)), Mounts: make([]Mount, 0, len(d.Mounts)),
+		NetworkAllow: make([]NetworkAllow, 0, len(d.Network.Allow)), Services: make([]Service, 0, len(d.Services)),
+	}
+	for index, copy := range d.Copies {
+		source, err := decl.ResolveSource(dir, copy.Source)
+		if err != nil {
+			return Result{}, err
+		}
+		digest := retained.Copies[index].SourceDigest
+		if copy.Secret {
+			if digest != "<redacted>" {
+				return Result{}, fmt.Errorf("retained secret copy %d is not redacted", index)
+			}
+		} else if !validPlanDigest(digest) {
+			return Result{}, fmt.Errorf("retained copy %d digest is invalid", index)
+		}
+		p.Copies = append(p.Copies, Copy{Source: source, SourceDigest: digest, Target: filepath.Clean(copy.Target), Mode: copy.Mode, Secret: copy.Secret})
+	}
+	for _, mount := range d.Mounts {
+		source, err := decl.ResolveSource(dir, mount.Source)
+		if err != nil {
+			return Result{}, err
+		}
+		p.Mounts = append(p.Mounts, Mount{Source: source, Target: filepath.Clean(mount.Target), Mode: mount.Mode})
+	}
+	for _, allow := range d.Network.Allow {
+		p.NetworkAllow = append(p.NetworkAllow, NetworkAllow{Host: allow.Host, Port: allow.Port})
+	}
+	for _, endpoint := range d.Interfaces {
+		p.Interfaces = append(p.Interfaces, Interface{Name: endpoint.Name, Address: endpoint.Address})
+	}
+	for _, service := range d.Services {
+		p.Services = append(p.Services, Service{Name: service.Name, Command: append([]string{}, service.Command...), Autostart: service.Autostart, Restart: service.Restart})
+	}
+	_, evidenceDigest, err := EvidenceCanonical(p)
+	if err != nil {
+		return Result{}, err
+	}
+	declarationSum := sha256.Sum256(declarationBytes)
+	result := Result{PlanDigest: evidenceDigest, EvidenceDigest: evidenceDigest, DeclarationDigest: hex.EncodeToString(declarationSum[:]), Warnings: []string{}, Plan: p}
+	if !decl.ImagePinned(d.World.Base) {
+		result.Warnings = append(result.Warnings, "UNPINNED BASE IMAGE: reproducibility depends on mutable external state")
+	}
+	return result, nil
+}
+
+func validPlanDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
 // DigestSource returns the canonical content and mode fingerprint used for a
 // copied file or tree.
 func DigestSource(root string) (string, error) {
@@ -232,6 +305,12 @@ func Canonical(p Plan) ([]byte, error) {
 
 // JSON returns the stable machine-readable result.
 func JSON(result Result) ([]byte, error) {
+	_, evidenceDigest, err := EvidenceCanonical(result.Plan)
+	if err != nil {
+		return nil, err
+	}
+	result.PlanDigest = evidenceDigest
+	result.EvidenceDigest = evidenceDigest
 	var out bytes.Buffer
 	encoder := json.NewEncoder(&out)
 	encoder.SetEscapeHTML(false)
