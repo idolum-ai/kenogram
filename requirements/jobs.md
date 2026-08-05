@@ -1,6 +1,6 @@
 # Governed job contract
 
-Status: implemented direct Linux provider and provider-independent core. The
+Status: implemented provider-independent core and direct Linux provider. The
 schemas, independent Go semantic validators, create-only publisher, bounded
 executor, offline verifier, and direct one-shot Podman CLI adapter are active.
 The adapter deliberately refuses declared egress until a job-scoped proxy can
@@ -22,7 +22,9 @@ The versioned language-neutral documents are:
 - `kenogram.job-evidence-manifest.v1`, which seals one closed create-only
   evidence inventory; and
 - `kenogram.executable-provenance.v1`, which identifies the Kenogram executable
-  that produced the observation.
+  that produced the observation; and
+- `kenogram.podman-runtime-observation.v1`, which closes the public K5 runtime
+  proof over immutable container, image, enforcement, and mount identities.
 
 Their JSON Schemas are under [`../schemas/`](../schemas/). The schemas are
 closed and collection/value bounded. Kenogram additionally limits the encoded
@@ -184,7 +186,11 @@ path NUL kind NUL decimal-size NUL sha256-digest LF
 files, recomputes every entry and content-root digest, validates all four
 documents, and cross-checks job/request/result/provenance identities. It never
 starts a target, contacts a provider, or upgrades runtime-reported fields to
-host-observed facts.
+host-observed facts. For a complete K5 result it strictly decodes both runtime
+phases, requires `before` running and `after` stopped, re-derives containment
+and resource constraints, cross-binds plan/result/provider identity, and
+requires stable facts and mount identities to agree across phases. Generic
+JSON cannot substitute for the K5 contract.
 
 The verifier never adopts a manifest entry size or kind as allocation or work
 authority. It classifies the fixed inventory first, parses `request.json` under
@@ -227,7 +233,12 @@ daemon API. It invokes the Podman CLI with exact argv and proves:
 The declared image never supplies the inert holder or environment launcher.
 The executing Kenogram binary is mounted read-only at the declaration-reserved
 `/etc/kenogram/job-exec` path and supplies both. Public and secret environment
-values cross to that launcher only over a bounded binary stdin protocol. Secret
+values and a one-use lifecycle MAC key cross to that launcher only over a
+bounded binary stdin protocol. The key is retained only in host memory and is
+not passed to the target environment. The helper launches the target as its
+child and writes an authenticated target-local start, finish, duration, and
+exit/signal observation. The Podman client envelope is never reported as target
+time; absent or invalid lifecycle evidence produces `unknown`. Secret
 bytes are read from the uniquely bound declaration-owned regular source after
 content revalidation; they never enter provider argv, the provider environment,
 or retained evidence. Copy staging is removed immediately after provider copy;
@@ -243,25 +254,31 @@ must separately prove the distributed Linux artifact is equally self-contained.
 Requested artifacts are collected only after the target is terminal and the
 container is stopped. A second staged Kenogram helper enters `podman unshare`,
 re-proves the immutable container ID and owner label, mounts the stopped root
-inside that user namespace, and copies only descriptor-opened regular files
+inside that user namespace, opens the mounted root descriptor-first, rejects
+symlinks in every requested-root component, and copies only descriptor-opened regular files
 under the requested count, byte, traversal, and caller deadline bounds. It
 always attempts an unmount before returning. The adapter does not use an
 unbounded `podman cp` as artifact authority.
 
 Every container uses `network=none`; a request with `network.allow` is refused
-rather than silently broadened. Declared bind mounts are inode-checked, retain
+rather than silently broadened. The target command is absolute and its requested
+working directory must equal the declared world workdir, keeping the inspected
+configuration and execution authority identical. Declared bind mounts have source device, inode,
+type, and content digest captured before creation, retain
 their exact read-only/read-write mode, and cannot overlap known Podman or Docker
 control sockets. Runtime memory, CPU, PID, user, namespace, capability,
 seccomp, image, mount, and ownership facts are independently inspected before
 target admission. Cleanup re-inspects both the immutable container ID and the
-random ownership label before exact name removal and never deletes a name whose
-identity or ownership has changed.
+random ownership label before every destructive stop, kill, unmount, or
+removal. Every post-create provider call is addressed by immutable container
+ID. A canceled or reply-lost create is reconciled under a fresh bounded context,
+and Kenogram never deletes a name whose identity or ownership has changed.
 
-Podman reserves exit statuses 125–127 for provider/invocation failures, while
-signal conventions overlap the higher range. The adapter therefore reports
-statuses 125–255 as `unknown` rather than misclassifying infrastructure or
-signal loss as a completely observed target exit. Nonzero target exits 1–124
-remain complete target observations.
+Podman reserves exit statuses for provider/invocation failures, so the adapter
+does not interpret its client's status as a target status. The authenticated
+target-local lifecycle record preserves the full 0–255 target exit range and
+signals separately. A provider/client failure or unauthenticated lifecycle
+record remains `unknown`.
 
 The core treats every returned field as untrusted: malformed target, cleanup,
 runtime, artifact, or identity evidence is refused or downgraded. Unit tests

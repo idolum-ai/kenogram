@@ -17,6 +17,7 @@ const (
 	MaximumValueBytes = 16 << 10
 	maximumNameBytes  = 255
 	magic             = "KENOGRAM_JOB_ENV_V1\x00"
+	LifecycleKeyBytes = 32
 )
 
 type Item struct {
@@ -25,11 +26,19 @@ type Item struct {
 }
 
 func Encode(items []Item) ([]byte, error) {
+	return EncodeLaunch(items, make([]byte, LifecycleKeyBytes))
+}
+
+func EncodeLaunch(items []Item, lifecycleKey []byte) ([]byte, error) {
 	if len(items) > MaximumItems {
 		return nil, errors.New("target environment exceeds item bound")
 	}
 	var out bytes.Buffer
 	out.WriteString(magic)
+	if len(lifecycleKey) != LifecycleKeyBytes {
+		return nil, errors.New("lifecycle authentication key has invalid length")
+	}
+	out.Write(lifecycleKey)
 	if err := binary.Write(&out, binary.BigEndian, uint16(len(items))); err != nil {
 		return nil, err
 	}
@@ -55,14 +64,23 @@ func Encode(items []Item) ([]byte, error) {
 }
 
 func Decode(reader io.Reader) ([]Item, error) {
+	items, _, err := DecodeLaunch(reader)
+	return items, err
+}
+
+func DecodeLaunch(reader io.Reader) ([]Item, []byte, error) {
 	limited := &io.LimitedReader{R: reader, N: maximumDocumentBytes() + 1}
 	header := make([]byte, len(magic))
 	if _, err := io.ReadFull(limited, header); err != nil || string(header) != magic {
-		return nil, errors.New("target environment header is invalid")
+		return nil, nil, errors.New("target environment header is invalid")
+	}
+	key := make([]byte, LifecycleKeyBytes)
+	if _, err := io.ReadFull(limited, key); err != nil {
+		return nil, nil, errors.New("lifecycle authentication key is truncated")
 	}
 	var count uint16
 	if err := binary.Read(limited, binary.BigEndian, &count); err != nil || count > MaximumItems {
-		return nil, errors.New("target environment item count is invalid")
+		return nil, nil, errors.New("target environment item count is invalid")
 	}
 	items := make([]Item, 0, int(count))
 	seen := map[string]struct{}{}
@@ -70,36 +88,36 @@ func Decode(reader io.Reader) ([]Item, error) {
 		var nameSize uint16
 		var valueSize uint32
 		if err := binary.Read(limited, binary.BigEndian, &nameSize); err != nil {
-			return nil, fmt.Errorf("read target environment name size: %w", err)
+			return nil, nil, fmt.Errorf("read target environment name size: %w", err)
 		}
 		if err := binary.Read(limited, binary.BigEndian, &valueSize); err != nil {
-			return nil, fmt.Errorf("read target environment value size: %w", err)
+			return nil, nil, fmt.Errorf("read target environment value size: %w", err)
 		}
 		if nameSize == 0 || nameSize > maximumNameBytes || valueSize > MaximumValueBytes {
-			return nil, errors.New("target environment item exceeds bounds")
+			return nil, nil, errors.New("target environment item exceeds bounds")
 		}
 		name, value := make([]byte, nameSize), make([]byte, valueSize)
 		if _, err := io.ReadFull(limited, name); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, err := io.ReadFull(limited, value); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		item := Item{Name: string(name), Value: value}
 		if err := validate(item); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, exists := seen[item.Name]; exists {
-			return nil, fmt.Errorf("duplicate target environment name %q", item.Name)
+			return nil, nil, fmt.Errorf("duplicate target environment name %q", item.Name)
 		}
 		seen[item.Name] = struct{}{}
 		items = append(items, item)
 	}
 	var trailing [1]byte
 	if n, err := limited.Read(trailing[:]); n != 0 || !errors.Is(err, io.EOF) {
-		return nil, errors.New("target environment contains trailing bytes")
+		return nil, nil, errors.New("target environment contains trailing bytes")
 	}
-	return items, nil
+	return items, key, nil
 }
 
 func validate(item Item) error {
@@ -113,5 +131,5 @@ func validate(item Item) error {
 }
 
 func maximumDocumentBytes() int64 {
-	return int64(len(magic)+2) + MaximumItems*int64(2+4+maximumNameBytes+MaximumValueBytes)
+	return int64(len(magic)+LifecycleKeyBytes+2) + MaximumItems*int64(2+4+maximumNameBytes+MaximumValueBytes)
 }

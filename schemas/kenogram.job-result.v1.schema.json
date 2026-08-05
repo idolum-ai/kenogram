@@ -60,7 +60,7 @@
     "identity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["declaration_sha256", "plan_sha256", "generation", "image_reference", "image_digest", "runtime_evidence_sha256", "provenance_sha256"],
+      "required": ["declaration_sha256", "plan_sha256", "generation", "image_reference", "image_digest", "runtime_evidence_sha256", "provenance_sha256", "runtime_provider"],
       "properties": {
         "declaration_sha256": {"$ref": "#/$defs/digest"},
         "plan_sha256": {"$ref": "#/$defs/digest"},
@@ -68,7 +68,8 @@
         "image_reference": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000]+$"},
         "image_digest": {"oneOf": [{"const": ""}, {"$ref": "#/$defs/digest"}]},
         "runtime_evidence_sha256": {"oneOf": [{"const": ""}, {"$ref": "#/$defs/digest"}]},
-        "provenance_sha256": {"$ref": "#/$defs/digest"}
+        "provenance_sha256": {"$ref": "#/$defs/digest"},
+        "runtime_provider": {"type": "string", "enum": ["", "podman-cli"]}
       }
     },
     "target": {

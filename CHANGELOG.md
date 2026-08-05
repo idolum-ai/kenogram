@@ -18,6 +18,13 @@ Notable user-visible and operational changes are recorded here.
   release-candidate replay, and a release claim remain later work. Raise the module API floor to Go 1.25 for the standard-library
   descriptor-owned `os.Root` boundary used on macOS and for evidence paths;
   the pinned build toolchain remains Go 1.26.5.
+- Harden the direct job provider with option-terminated strict image
+  references, immutable-ID-only post-create calls, fresh canceled-create
+  reconciliation, owner re-proofs before destructive operations,
+  descriptor-relative artifact-root traversal, mount inode/content identities,
+  a strict cross-phase runtime observation schema, and an authenticated
+  target-local lifecycle record that separates target timing from Podman client
+  overhead.
 - Add a proof-only semantic reference for transactional cutover readiness,
   including bounded provider actions, rollback, pre-commit process death,
   inherited egress, and acknowledgement-only compatibility without adding a

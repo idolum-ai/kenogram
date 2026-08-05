@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -28,13 +29,14 @@ type fakeRuntime struct {
 	cleanupBlock <-chan struct{}
 }
 
-func (f *fakeRuntime) Start(_ context.Context, _ Invocation, stdout, stderr io.Writer) (Process, error) {
+func (f *fakeRuntime) Start(_ context.Context, invocation Invocation, stdout, stderr io.Writer) (Process, error) {
 	if f.startBlock != nil {
 		<-f.startBlock
 	}
 	if f.startErr != nil {
 		return nil, f.startErr
 	}
+	f.process.invocation = invocation
 	_, _ = stdout.Write([]byte("answer\n"))
 	_, _ = stderr.Write([]byte("note\n"))
 	return f.process, nil
@@ -60,6 +62,9 @@ type fakeProcess struct {
 	beforeRaw      []byte
 	imageReference string
 	imageDigest    string
+	provider       string
+	invocation     Invocation
+	afterRaw       []byte
 }
 
 func (f *fakeProcess) Identity(context.Context) (RuntimeIdentity, error) {
@@ -68,7 +73,7 @@ func (f *fakeProcess) Identity(context.Context) (RuntimeIdentity, error) {
 	}
 	before := f.beforeRaw
 	if before == nil {
-		before = []byte("{\"running\":true}\n")
+		before = fakeRuntimeObservation(f.invocation, "before")
 	}
 	reference := f.imageReference
 	if reference == "" {
@@ -78,7 +83,11 @@ func (f *fakeProcess) Identity(context.Context) (RuntimeIdentity, error) {
 	if digest == "" {
 		digest = testDigest()
 	}
-	return RuntimeIdentity{Generation: 1, ImageReference: reference, ImageDigest: digest, Before: before}, nil
+	provider := f.provider
+	if provider == "" {
+		provider = "podman-cli"
+	}
+	return RuntimeIdentity{Provider: provider, Generation: 1, ImageReference: reference, ImageDigest: digest, Before: before}, nil
 }
 
 func (f *fakeProcess) Wait(ctx context.Context) (jobcontract.TargetResult, error) {
@@ -95,7 +104,35 @@ func (f *fakeProcess) Finalize(context.Context) (RuntimeFinalization, error) {
 	if f.finalBlock != nil {
 		<-f.finalBlock
 	}
-	return RuntimeFinalization{After: []byte("{\"absent\":true}\n"), Artifacts: f.artifacts}, f.finalErr
+	after := f.afterRaw
+	if after == nil {
+		after = fakeRuntimeObservation(f.invocation, "after")
+	}
+	return RuntimeFinalization{After: after, Artifacts: f.artifacts}, f.finalErr
+}
+
+func fakeRuntimeObservation(invocation Invocation, phase string) []byte {
+	running := phase == "before"
+	mounts := []jobcontract.RuntimeMountObservation{
+		{Source: "/tmp/kenogram-test-helper", Target: "/etc/kenogram/job-exec", Mode: "ro", Device: 1, Inode: 1, FileType: "file", SHA256: invocation.Provenance.ExecutableSHA256, IdentityVerified: true},
+		{Source: "/tmp/kenogram-test-lifecycle", Target: "/etc/kenogram/job-lifecycle", Mode: "rw", Device: 1, Inode: 2, FileType: "directory", SHA256: testDigest(), IdentityVerified: true},
+	}
+	for index, target := range invocation.Prepared.Result.Plan.Workspace {
+		mounts = append(mounts, jobcontract.RuntimeMountObservation{Source: fmt.Sprintf("/tmp/kenogram-test-workspace-%d", index), Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 3), FileType: "directory", SHA256: testDigest(), IdentityVerified: true})
+	}
+	sort.Slice(mounts, func(i, j int) bool { return mounts[i].Target < mounts[j].Target })
+	value := jobcontract.RuntimeObservation{
+		Schema: jobcontract.RuntimeObservationSchema, Phase: phase, ObservedAt: "2026-08-05T12:00:00Z", Provider: "podman-cli",
+		ContainerID: strings.Repeat("c", 64), ContainerName: "kenogram-job-test", Running: running,
+		ImageReference: invocation.Prepared.Result.Plan.World.Base, ImageDigest: testDigest(), PlanSHA256: prefixedDigest(invocation.Prepared.Result.EvidenceDigest), DeclarationSHA256: prefixedDigest(invocation.Prepared.Result.DeclarationDigest), Generation: 1,
+		NetworkMode: "none", IPCMode: "private", PIDMode: "private", UTSMode: "private", UserNSMode: "keep-id", User: invocation.Prepared.Result.Plan.World.User, Hostname: invocation.Prepared.Result.Plan.World.Hostname, WorkingDirectory: invocation.Request.Command.WorkingDirectory,
+		BoundingCaps: []string{}, MemoryBytes: invocation.Prepared.Result.Plan.Resources.MemoryBytes, NanoCPUs: invocation.Prepared.Result.Plan.Resources.CPUs * 1_000_000_000, PIDs: invocation.Prepared.Result.Plan.Resources.PIDs, Mounts: mounts,
+	}
+	if running {
+		value.IPCIsolated, value.UIDIdentity, value.GIDIdentity, value.NoNewPrivileges, value.SeccompMode = true, true, true, true, 2
+	}
+	raw, _ := json.Marshal(value)
+	return raw
 }
 
 func TestExecutorSealsAndVerifierRederivesEvidence(t *testing.T) {
@@ -119,6 +156,21 @@ func TestExecutorSealsAndVerifierRederivesEvidence(t *testing.T) {
 	}
 	if _, err := Verify(evidence); err == nil || !(strings.Contains(err.Error(), "changed") || strings.Contains(err.Error(), "bound")) {
 		t.Fatalf("substitution verification error=%v", err)
+	}
+}
+
+func TestVerifierRejectsGenericJSONSubstitutedForPodmanRuntimeContract(t *testing.T) {
+	executor, requestRaw, evidence, runtime := fixture(t)
+	runtime.process.provider = "podman-cli"
+	runtime.process.beforeRaw = []byte("{\"running\":true}\n")
+	runtime.process.afterRaw = []byte("{\"absent\":true}\n")
+	outcome, err := executor.Run(context.Background(), requestRaw, evidence)
+	if err != nil || outcome.Result.Status != "incomplete" || !contains(outcome.Result.Reasons, "RUNTIME_OBSERVATION_INVALID") {
+		t.Fatalf("outcome=%#v error=%v", outcome, err)
+	}
+	verification, err := Verify(evidence)
+	if err != nil || verification.Status != "incomplete" {
+		t.Fatalf("generic provider evidence was not downgraded: verification=%#v error=%v", verification, err)
 	}
 }
 

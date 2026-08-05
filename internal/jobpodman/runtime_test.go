@@ -21,6 +21,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/job"
 	"github.com/idolum-ai/kenogram/internal/jobcontract"
 	"github.com/idolum-ai/kenogram/internal/jobenv"
+	"github.com/idolum-ai/kenogram/internal/joblifecycle"
 	"github.com/idolum-ai/kenogram/internal/plan"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
@@ -31,6 +32,10 @@ type fakeAttachedStarter struct {
 	stdin   []byte
 }
 
+func (f *fakeAttachedStarter) BindLifecycle(path string, key []byte) {
+	f.process.lifecyclePath, f.process.lifecycleKey = path, append([]byte{}, key...)
+}
+
 func (f *fakeAttachedStarter) Start(_ string, args []string, stdin io.Reader, _, _ io.Writer) (attachedProcess, error) {
 	f.args = append([]string{}, args...)
 	f.stdin, _ = io.ReadAll(stdin)
@@ -38,8 +43,10 @@ func (f *fakeAttachedStarter) Start(_ string, args []string, stdin io.Reader, _,
 }
 
 type fakeAttachedProcess struct {
-	once sync.Once
-	done chan error
+	once          sync.Once
+	done          chan error
+	lifecyclePath string
+	lifecycleKey  []byte
 }
 
 func newFakeAttached() *fakeAttachedProcess { return &fakeAttachedProcess{done: make(chan error, 1)} }
@@ -48,7 +55,15 @@ func (f *fakeAttachedProcess) Kill() error {
 	f.finish(errors.New("killed attached client"))
 	return nil
 }
-func (f *fakeAttachedProcess) finish(err error) { f.once.Do(func() { f.done <- err }) }
+func (f *fakeAttachedProcess) finish(err error) {
+	f.once.Do(func() {
+		if err == nil && f.lifecyclePath != "" {
+			status := int64(0)
+			_ = joblifecycle.Write(f.lifecyclePath, joblifecycle.Record{Schema: joblifecycle.Schema, StartedAt: "2026-08-05T12:00:00Z", FinishedAt: "2026-08-05T12:00:01Z", DurationNS: int64(time.Second), ExitStatus: &status}, f.lifecycleKey)
+		}
+		f.done <- err
+	})
+}
 
 type fakePodmanRunner struct {
 	mu              sync.Mutex
@@ -65,9 +80,10 @@ type fakePodmanRunner struct {
 	artifactSymlink bool
 	imageDigest     string
 	containerID     string
+	cancelOnCreate  func()
 }
 
-func (f *fakePodmanRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
+func (f *fakePodmanRunner) Run(ctx context.Context, _ string, args ...string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, append([]string{}, args...))
@@ -90,7 +106,7 @@ func (f *fakePodmanRunner) Run(_ context.Context, _ string, args ...string) ([]b
 				f.labels[parts[0]] = parts[1]
 			case "--mount":
 				fields := strings.Split(args[index+1], ",")
-				mount := map[string]any{"RW": strings.Contains(args[index+1], ",rw"), "Mode": fields[len(fields)-1], "Options": []string{"rw", "nodev", "nosuid"}}
+				mount := map[string]any{"RW": strings.Contains(args[index+1], ",rw"), "Mode": fields[3], "Options": fields[3:]}
 				for _, field := range fields {
 					if strings.HasPrefix(field, "src=") {
 						mount["Source"] = strings.TrimPrefix(field, "src=")
@@ -102,13 +118,17 @@ func (f *fakePodmanRunner) Run(_ context.Context, _ string, args ...string) ([]b
 				f.mounts = append(f.mounts, mount)
 			}
 		}
+		if f.cancelOnCreate != nil {
+			f.cancelOnCreate()
+			return nil, ctx.Err()
+		}
 		if f.failCreateAfter {
 			if f.ownerOverride != "" {
 				f.labels["io.kenogram.job-owner"] = f.ownerOverride
 			}
 			return nil, errors.New("create response lost after ownership committed")
 		}
-		return nil, nil
+		return []byte(f.containerIDValue() + "\n"), nil
 	case "start":
 		f.running = true
 		return nil, nil
@@ -120,7 +140,7 @@ func (f *fakePodmanRunner) Run(_ context.Context, _ string, args ...string) ([]b
 	case "exec":
 		return []byte{}, nil
 	case "unshare":
-		if len(args) != 10 || args[2] != "_job-collect" || args[3] != f.name || args[4] != f.containerIDValue() || args[5] != f.labels["io.kenogram.job-owner"] {
+		if len(args) != 10 || args[2] != "_job-collect" || args[3] != f.containerIDValue() || args[4] != f.name || args[5] != f.labels["io.kenogram.job-owner"] {
 			return nil, errors.New("artifact collector authority mismatch")
 		}
 		if err := os.Mkdir(args[7], 0o700); err != nil {
@@ -205,9 +225,9 @@ func TestDirectRuntimeOwnsAttachedLifecycleAndCleanupProof(t *testing.T) {
 	if strings.Contains(joined, " --env ") || strings.Contains(joined, "C.UTF-8") {
 		t.Fatalf("ambient podman environment injection remained in argv=%q", joined)
 	}
-	items, err := jobenv.Decode(bytes.NewReader(runtime.starter.(*fakeAttachedStarter).stdin))
-	if err != nil || len(items) != 1 || items[0].Name != "LANG" || string(items[0].Value) != "C.UTF-8" {
-		t.Fatalf("handoff=%#v err=%v", items, err)
+	items, key, err := jobenv.DecodeLaunch(bytes.NewReader(runtime.starter.(*fakeAttachedStarter).stdin))
+	if err != nil || len(items) != 1 || items[0].Name != "LANG" || string(items[0].Value) != "C.UTF-8" || len(key) != jobenv.LifecycleKeyBytes || bytes.Equal(key, make([]byte, len(key))) {
+		t.Fatalf("handoff=%#v key_bytes=%d err=%v", items, len(key), err)
 	}
 }
 
@@ -254,7 +274,7 @@ func TestAttachedClientCancellationTargetsTheOwnedProcessGroup(t *testing.T) {
 func TestProviderAmbiguousExitStatusCannotBecomeACompleteTargetExit(t *testing.T) {
 	command := exec.Command("/bin/sh", "-c", "exit 125")
 	err := command.Run()
-	process := &process{runtime: &Runtime{now: time.Now}, monotonic: time.Now()}
+	process := &process{runtime: &Runtime{now: time.Now}}
 	target, observedErr := process.recordTerminal(err)
 	if observedErr == nil || target.Kind != "unknown" {
 		t.Fatalf("target=%#v error=%v", target, observedErr)
@@ -386,7 +406,7 @@ func TestObservedImageBindingSelectsTheDeclaredDigestFromProviderFacts(t *testin
 func TestDirectRuntimeDoesNotDestroyPreexistingName(t *testing.T) {
 	runtime, runner, _, invocation := runtimeFixture(t)
 	runner.exists = true
-	runner.name = jobContainerName(invocation.Request.JobID, "test-owner-token")
+	runner.name = jobContainerName(invocation.Request.JobID, strings.Repeat("d", 32))
 	if _, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("error=%v", err)
 	}
@@ -421,6 +441,20 @@ func TestDirectRuntimeNeverAdoptsMismatchedPartiallyCreatedContainer(t *testing.
 	}
 }
 
+func TestCanceledCreateUsesFreshBoundedReconciliationAndCleanup(t *testing.T) {
+	runtime, runner, _, invocation := runtimeFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.cancelOnCreate = cancel
+	process, err := runtime.Start(ctx, invocation, io.Discard, io.Discard)
+	if err == nil || process == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("process=%#v error=%v", process, err)
+	}
+	cleanup := runtime.Cleanup(context.Background(), invocation)
+	if cleanup.Status != "complete" || !cleanup.ContainerAbsent || !hasCall(runner.calls, "rm", "--force", runner.containerIDValue()) {
+		t.Fatalf("cleanup=%#v calls=%v", cleanup, runner.calls)
+	}
+}
+
 func TestDirectRuntimeNeverDeletesAReplacedOwnedName(t *testing.T) {
 	runtime, runner, _, invocation := runtimeFixture(t)
 	if _, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err != nil {
@@ -430,6 +464,88 @@ func TestDirectRuntimeNeverDeletesAReplacedOwnedName(t *testing.T) {
 	cleanup := runtime.Cleanup(context.Background(), invocation)
 	if cleanup.Status != "incomplete" || cleanup.ContainerAbsent || !runner.exists || hasCall(runner.calls, "rm") || !hasReason(cleanup.Reasons, "CONTAINER_OWNERSHIP_UNPROVED") || !hasReason(cleanup.Reasons, "SCRATCH_RETAINED_FOR_UNPROVED_CONTAINER") {
 		t.Fatalf("cleanup=%#v calls=%v", cleanup, runner.calls)
+	}
+}
+
+func TestAllPostCreateProviderCallsUseImmutableContainerID(t *testing.T) {
+	runtime, runner, attached, invocation := runtimeFixture(t)
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached.finish(nil)
+	if _, err := process.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+	for _, call := range runner.calls {
+		switch call[0] {
+		case "start", "inspect", "cp", "stop", "kill", "rm", "mount", "unmount":
+			for _, argument := range call[1:] {
+				if argument == runtime.name {
+					t.Fatalf("post-create call used mutable name: %v", call)
+				}
+			}
+		}
+	}
+}
+
+func TestStagedHelperMustMatchExecutableProvenance(t *testing.T) {
+	runtime, runner, _, invocation := runtimeFixture(t)
+	invocation.Provenance.ExecutableSHA256 = "sha256:" + strings.Repeat("0", 64)
+	if _, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "provenance") {
+		t.Fatalf("error=%v", err)
+	}
+	if hasCall(runner.calls, "create") {
+		t.Fatalf("container admitted: %v", runner.calls)
+	}
+}
+
+func TestMountInodeReplacementInvalidatesFinalization(t *testing.T) {
+	runtime, _, attached, invocation := runtimeFixture(t)
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached.finish(nil)
+	if _, err := process.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var workspace string
+	for _, fact := range runtime.mountFacts {
+		if fact.Target == "/workspace" {
+			workspace = fact.Source
+		}
+	}
+	old := workspace + ".old"
+	if err := os.Rename(workspace, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Finalize(context.Background()); err == nil || !strings.Contains(err.Error(), "source identity changed") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestAuthenticatedLifecyclePreservesProviderReservedTargetExit(t *testing.T) {
+	dir := t.TempDir()
+	key := bytes.Repeat([]byte{9}, 32)
+	status := int64(125)
+	path := filepath.Join(dir, joblifecycle.FileName)
+	if err := joblifecycle.Write(path, joblifecycle.Record{Schema: joblifecycle.Schema, StartedAt: "2026-08-05T12:00:00Z", FinishedAt: "2026-08-05T12:00:01Z", DurationNS: int64(time.Second), ExitStatus: &status}, key); err != nil {
+		t.Fatal(err)
+	}
+	p := &process{runtime: &Runtime{lifecycleFile: path, lifecycleKey: key}}
+	target, err := p.recordTerminal(nil)
+	if err != nil || target.ExitStatus == nil || *target.ExitStatus != 125 {
+		t.Fatalf("target=%#v error=%v", target, err)
 	}
 }
 
@@ -533,6 +649,18 @@ func TestArtifactCollectorCopiesOnlyBoundedRegularTrees(t *testing.T) {
 			t.Fatalf("raw=%q error=%v", raw, err)
 		}
 	})
+	t.Run("symlink in root prefix", func(t *testing.T) {
+		mounted, destination := t.TempDir(), filepath.Join(t.TempDir(), "collected")
+		if err := os.Mkdir(filepath.Join(mounted, "real"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("real", filepath.Join(mounted, "escape")); err != nil {
+			t.Fatal(err)
+		}
+		if err := collectArtifactTreeFromMountedRoot(context.Background(), mounted, "/escape", destination, 1, 1024); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("error=%v", err)
+		}
+	})
 	t.Run("symlink", func(t *testing.T) {
 		source, destination := t.TempDir(), filepath.Join(t.TempDir(), "collected")
 		if err := os.Symlink("/etc/passwd", filepath.Join(source, "escape")); err != nil {
@@ -584,6 +712,11 @@ paths = ["/workspace"]
 		Command: jobcontract.Command{Argv: []string{"/bin/true", "--probe"}, WorkingDirectory: "/workspace", Environment: []jobcontract.EnvironmentItem{{Name: "LANG", PublicValue: &lang}}},
 		Limits:  jobcontract.Limits{TimeoutNS: int64(time.Second), FinalizeNS: int64(time.Second), StdoutMaxBytes: 1024, StderrMaxBytes: 1024},
 	}}
+	provenance, _, err := job.Provenance("", job.BuildIdentity{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocation.Provenance = provenance
 	runner := &fakePodmanRunner{}
 	podman := backend.New(runner)
 	podman.ReadProcStatus = func(int) ([]byte, error) { return []byte("Seccomp:\t2\n"), nil }
@@ -595,7 +728,7 @@ paths = ["/workspace"]
 	runtime.goos = "linux"
 	temporaryRoot := t.TempDir()
 	runtime.tempDir = func(_, pattern string) (string, error) { return os.MkdirTemp(temporaryRoot, pattern) }
-	runtime.token = func() (string, error) { return "test-owner-token", nil }
+	runtime.token = func() (string, error) { return strings.Repeat("d", 32), nil }
 	runtime.starter = &fakeAttachedStarter{process: attached}
 	runtime.now = func() time.Time { return time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC) }
 	return runtime, runner, attached, invocation

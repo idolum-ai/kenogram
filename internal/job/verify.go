@@ -146,6 +146,16 @@ func Verify(evidenceDir string) (Verification, error) {
 	if runtimeEvidenceDigest(observed["runtime-before.json"], observed["runtime-after.json"]) != result.Identity.RuntimeSHA256 {
 		return Verification{}, errors.New("runtime evidence identity mismatch")
 	}
+	if result.Status == "complete" {
+		before, beforeErr := jobcontract.ParseRuntimeObservation(observed["runtime-before.json"])
+		after, afterErr := jobcontract.ParseRuntimeObservation(observed["runtime-after.json"])
+		if beforeErr != nil || afterErr != nil {
+			return Verification{}, errors.Join(errors.New("complete result lacks strict runtime observations"), beforeErr, afterErr)
+		}
+		if err := verifyRuntimeObservations(before, after, result, request, retainedPlan, provenance); err != nil {
+			return Verification{}, err
+		}
+	}
 	if err := verifyArtifacts(request, manifest, observed); err != nil {
 		return Verification{}, err
 	}
@@ -162,6 +172,58 @@ func Verify(evidenceDir string) (Verification, error) {
 	}
 	return Verification{Schema: "kenogram.job-verification.v1", JobID: manifest.JobID, Status: result.Status, Entries: len(manifest.Entries)}, nil
 }
+
+func verifyRuntimeObservations(before, after jobcontract.RuntimeObservation, result jobcontract.Result, request jobcontract.Request, retained plan.Result, provenance jobcontract.Provenance) error {
+	if before.Phase != "before" || after.Phase != "after" || !before.Running || after.Running {
+		return errors.New("runtime observation phases or running states disagree")
+	}
+	if before.ContainerID != after.ContainerID || before.ContainerName != after.ContainerName ||
+		before.ImageReference != after.ImageReference || before.ImageDigest != after.ImageDigest ||
+		before.PlanSHA256 != after.PlanSHA256 || before.DeclarationSHA256 != after.DeclarationSHA256 || before.Generation != after.Generation {
+		return errors.New("runtime identity changed across phases")
+	}
+	if before.ImageReference != result.Identity.ImageReference || before.ImageDigest != result.Identity.ImageDigest || before.Generation != result.Identity.Generation || before.PlanSHA256 != result.Identity.PlanSHA256 || before.DeclarationSHA256 != result.Identity.DeclarationSHA256 {
+		return errors.New("runtime observation disagrees with result identity")
+	}
+	if result.Identity.RuntimeProvider != before.Provider {
+		return errors.New("runtime provider identity mismatch")
+	}
+	if before.NetworkMode != "none" || (before.IPCMode != "private" && before.IPCMode != "shareable") || !before.IPCIsolated || before.PIDMode != "private" || before.UTSMode != "private" || before.UserNSMode == "host" || !before.UIDIdentity || !before.GIDIdentity || len(before.BoundingCaps) != 0 || !before.NoNewPrivileges || before.SeccompMode != 2 || before.Devices != 0 {
+		return errors.New("runtime observation does not prove required containment")
+	}
+	if before.User != retained.Plan.World.User || before.Hostname != retained.Plan.World.Hostname || before.WorkingDirectory != request.Command.WorkingDirectory || before.MemoryBytes != retained.Plan.Resources.MemoryBytes || before.NanoCPUs != retained.Plan.Resources.CPUs*1_000_000_000 || before.PIDs != retained.Plan.Resources.PIDs {
+		return errors.New("runtime observation disagrees with retained execution authority")
+	}
+	stableBefore, stableAfter := before, after
+	stableBefore.Phase, stableAfter.Phase, stableBefore.ObservedAt, stableAfter.ObservedAt, stableBefore.Running, stableAfter.Running = "", "", "", "", false, false
+	// Live-process-only fields are deliberately absent after stop.
+	stableBefore.IPCIsolated, stableBefore.UIDIdentity, stableBefore.GIDIdentity, stableBefore.NoNewPrivileges, stableBefore.SeccompMode, stableBefore.BoundingCaps = false, false, false, false, 0, []string{}
+	if !reflect.DeepEqual(stableBefore, stableAfter) {
+		return errors.New("stable runtime enforcement facts changed across phases")
+	}
+	expected := map[string]string{jobHelperPathForVerification: "ro", jobLifecyclePathForVerification: "rw"}
+	for _, target := range retained.Plan.Workspace {
+		expected[target] = "rw"
+	}
+	for _, mount := range retained.Plan.Mounts {
+		expected[mount.Target] = mount.Mode
+	}
+	if len(before.Mounts) != len(expected) {
+		return errors.New("runtime mount inventory disagrees with retained plan")
+	}
+	for _, mount := range before.Mounts {
+		if expected[mount.Target] != mount.Mode {
+			return fmt.Errorf("runtime mount %q is undeclared or has the wrong mode", mount.Target)
+		}
+		if mount.Target == jobHelperPathForVerification && mount.SHA256 != provenance.ExecutableSHA256 {
+			return errors.New("runtime helper mount is not bound to executable provenance")
+		}
+	}
+	return nil
+}
+
+const jobHelperPathForVerification = "/etc/kenogram/job-exec"
+const jobLifecyclePathForVerification = "/etc/kenogram/job-lifecycle"
 
 type evidenceKindBound struct {
 	kind string

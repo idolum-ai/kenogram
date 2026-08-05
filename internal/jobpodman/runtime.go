@@ -28,6 +28,7 @@ import (
 	"github.com/idolum-ai/kenogram/internal/job"
 	"github.com/idolum-ai/kenogram/internal/jobcontract"
 	"github.com/idolum-ai/kenogram/internal/jobenv"
+	"github.com/idolum-ai/kenogram/internal/joblifecycle"
 	"github.com/idolum-ai/kenogram/internal/plan"
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
@@ -35,6 +36,7 @@ import (
 const generation = int64(1)
 
 const jobHelperPath = "/etc/kenogram/job-exec"
+const jobLifecyclePath = "/etc/kenogram/job-lifecycle"
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var containerIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -47,6 +49,10 @@ type attachedStarter interface {
 type attachedProcess interface {
 	Wait() error
 	Kill() error
+}
+
+type lifecycleBoundStarter interface {
+	BindLifecycle(string, []byte)
 }
 
 type execStarter struct{}
@@ -98,6 +104,9 @@ type Runtime struct {
 	process       *process
 	mounts        []backend.Mount
 	artifactRoots []*os.Root
+	mountFacts    []jobcontract.RuntimeMountObservation
+	lifecycleKey  []byte
+	lifecycleFile string
 	forced        bool
 	started       bool
 }
@@ -129,9 +138,8 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if !pathIsAbsoluteCommand(invocation.Request.Command.Argv[0]) {
 		return nil, errors.New("direct governed jobs require an absolute target command")
 	}
-	environmentRaw, err := targetEnvironment(invocation)
-	if err != nil {
-		return nil, err
+	if invocation.Request.Command.WorkingDirectory != invocation.Prepared.Result.Plan.World.Workdir {
+		return nil, errors.New("direct governed jobs require the declared world working directory")
 	}
 	if err := r.Podman.Preflight(ctx); err != nil {
 		return nil, fmt.Errorf("runtime preflight: %w", err)
@@ -163,9 +171,24 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if err := layout.Ensure(); err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
-	helperSource, err := stageHelper(r.executable, scratch)
+	lifecycleHost := filepath.Join(scratch, "job-lifecycle")
+	if err := os.Mkdir(lifecycleHost, 0o700); err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	lifecycleKey := make([]byte, jobenv.LifecycleKeyBytes)
+	if _, err := rand.Read(lifecycleKey); err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	environmentRaw, err := targetEnvironment(invocation, lifecycleKey)
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
+	}
+	helperSource, helperFact, err := stageHelper(r.executable, scratch)
+	if err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	if invocation.Provenance.ExecutableSHA256 == "" || helperFact.SHA256 != invocation.Provenance.ExecutableSHA256 {
+		return r.refuseBeforeAdmission(errors.New("staged helper does not match retained executable provenance"))
 	}
 	r.mu.Lock()
 	r.helperSource = helperSource
@@ -174,28 +197,48 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
-	mounts = append(mounts, backend.Mount{Source: helperSource, Target: jobHelperPath, Mode: "ro"})
+	mounts = append(mounts, backend.Mount{Source: helperSource, Target: jobHelperPath, Mode: "ro"}, backend.Mount{Source: lifecycleHost, Target: jobLifecyclePath, Mode: "rw", NoExec: true})
+	mountFacts, err := captureMountFacts(mounts)
+	if err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	// stageHelper already captured this exact file. Binding the two observations
+	// makes the mounted helper's inode and digest part of executable provenance.
+	for index := range mountFacts {
+		if mountFacts[index].Target == jobHelperPath && (mountFacts[index].Device != helperFact.Device || mountFacts[index].Inode != helperFact.Inode || mountFacts[index].SHA256 != helperFact.SHA256) {
+			return r.refuseBeforeAdmission(errors.New("staged helper identity changed before admission"))
+		}
+	}
+	r.mu.Lock()
+	r.mountFacts, r.lifecycleKey, r.lifecycleFile = mountFacts, append([]byte{}, lifecycleKey...), filepath.Join(lifecycleHost, joblifecycle.FileName)
+	r.mu.Unlock()
 	ownerLabels := map[string]string{"io.kenogram.job-owner": ownerToken, "io.kenogram.job-id": invocation.Request.JobID}
 	providerPlan := publicProviderPlan(invocation.Prepared.Result)
-	if _, err := r.Podman.CreateGovernedJob(ctx, name, providerPlan, generation, mounts, ownerLabels, jobHelperPath); err != nil {
-		if evidence, inspectErr := r.Podman.Inspect(ctx, name); inspectErr == nil && containerIDPattern.MatchString(evidence.ID) && evidence.Name == name && evidence.Labels["io.kenogram.job-owner"] == ownerToken {
+	createdID, err := r.Podman.CreateGovernedJob(ctx, name, providerPlan, generation, mounts, ownerLabels, jobHelperPath)
+	if err != nil {
+		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		if evidence, inspectErr := r.Podman.Inspect(reconcileCtx, name); inspectErr == nil && containerIDPattern.MatchString(evidence.ID) && evidence.Name == name && evidence.Labels["io.kenogram.job-owner"] == ownerToken {
 			r.recordOwnership(evidence.ID)
 			return r.admittedFailure(invocation, err)
 		}
 		return nil, err
 	}
-	created, err := r.Podman.Inspect(ctx, name)
+	if !containerIDPattern.MatchString(createdID) {
+		return r.admittedFailure(invocation, errors.New("created container ID is invalid"))
+	}
+	r.recordOwnership(createdID)
+	created, err := r.Podman.Inspect(ctx, createdID)
 	if err != nil || !containerIDPattern.MatchString(created.ID) || created.Name != name || created.Labels["io.kenogram.job-owner"] != ownerToken {
 		return r.admittedFailure(invocation, errors.New("created container identity is unproved"))
 	}
-	r.recordOwnership(created.ID)
-	if err := materializeCopies(ctx, r.Podman, layout, name, invocation.Prepared.Result); err != nil {
+	if err := materializeCopies(ctx, r.Podman, layout, created.ID, invocation.Prepared.Result); err != nil {
 		return r.admittedFailure(invocation, err)
 	}
-	if err := r.Podman.Start(ctx, name); err != nil {
+	if err := r.Podman.Start(ctx, created.ID); err != nil {
 		return r.admittedFailure(invocation, err)
 	}
-	evidence, err := r.Podman.Inspect(ctx, name)
+	evidence, err := r.Podman.Inspect(ctx, created.ID)
 	if err != nil {
 		return r.admittedFailure(invocation, err)
 	}
@@ -209,22 +252,26 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if err != nil {
 		return r.admittedFailure(invocation, err)
 	}
-	before, err := runtimeEvidence("before", r.now().UTC(), evidence)
+	if err := verifyMountFacts(mountFacts, true); err != nil {
+		return r.admittedFailure(invocation, err)
+	}
+	before, err := runtimeEvidence("before", r.now().UTC(), evidence, invocation, imageDigest, mountFacts)
 	if err != nil {
 		return r.admittedFailure(invocation, err)
 	}
-	args := []string{"exec", "--interactive", "--workdir", invocation.Request.Command.WorkingDirectory, name, jobHelperPath, "_job-exec"}
+	args := []string{"exec", "--interactive", "--workdir", invocation.Request.Command.WorkingDirectory, created.ID, jobHelperPath, "_job-exec"}
 	args = append(args, invocation.Request.Command.Argv...)
-	startedAt := r.now().UTC()
-	monotonic := time.Now()
+	if binder, ok := r.starter.(lifecycleBoundStarter); ok {
+		binder.BindLifecycle(r.lifecycleFile, r.lifecycleKey)
+	}
 	attached, err := r.starter.Start(r.Podman.Binary, args, bytes.NewReader(environmentRaw), stdout, stderr)
 	if err != nil {
 		return r.admittedFailure(invocation, err)
 	}
 	process := &process{runtime: r, attached: attached, invocation: invocation, identity: job.RuntimeIdentity{
-		Generation: generation, ImageReference: invocation.Prepared.Result.Plan.World.Base,
+		Provider: "podman-cli", Generation: generation, ImageReference: invocation.Prepared.Result.Plan.World.Base,
 		ImageDigest: imageDigest, Before: before,
-	}, startedAt: startedAt, monotonic: monotonic, done: make(chan error, 1), clientDone: make(chan struct{})}
+	}, done: make(chan error, 1), clientDone: make(chan struct{})}
 	r.mu.Lock()
 	r.mounts, r.process = mounts, process
 	r.mu.Unlock()
@@ -254,6 +301,20 @@ func (r *Runtime) recordOwnership(containerID string) {
 	r.mu.Unlock()
 }
 
+func (r *Runtime) proveOwned(ctx context.Context) (backend.Evidence, error) {
+	r.mu.Lock()
+	name, id, owner := r.name, r.containerID, r.ownerToken
+	r.mu.Unlock()
+	if name == "" || !containerIDPattern.MatchString(id) || !ownerTokenPattern.MatchString(owner) {
+		return backend.Evidence{}, errors.New("container ownership authority is incomplete")
+	}
+	evidence, err := r.Podman.Inspect(ctx, id)
+	if err != nil || evidence.ID != id || evidence.Name != name || evidence.Labels["io.kenogram.job-owner"] != owner {
+		return backend.Evidence{}, errors.New("container ownership is unproved")
+	}
+	return evidence, nil
+}
+
 func (r *Runtime) admittedFailure(invocation job.Invocation, cause error) (job.Process, error) {
 	done := make(chan struct{})
 	close(done)
@@ -267,7 +328,7 @@ func (r *Runtime) admittedFailure(invocation job.Invocation, cause error) (job.P
 func (r *Runtime) Cleanup(ctx context.Context, _ job.Invocation) jobcontract.CleanupResult {
 	started := time.Now()
 	r.mu.Lock()
-	name, containerID, scratch, mayOwn, process := r.name, r.containerID, r.scratch, r.mayOwn, r.process
+	name, containerID, ownerToken, scratch, mayOwn, process := r.name, r.containerID, r.ownerToken, r.scratch, r.mayOwn, r.process
 	artifactRoots := append([]*os.Root{}, r.artifactRoots...)
 	forced := r.forced
 	r.mu.Unlock()
@@ -295,6 +356,15 @@ func (r *Runtime) Cleanup(ctx context.Context, _ job.Invocation) jobcontract.Cle
 			reasons = append(reasons, "ARTIFACT_DESCRIPTOR_CLOSE_FAILED")
 		}
 	}
+	if !mayOwn && name != "" && ownerTokenPattern.MatchString(ownerToken) {
+		// A create response can be lost after the provider commits the object.
+		// Reconcile with fresh authority during cleanup rather than abandoning a
+		// potentially owned container forever.
+		if evidence, inspectErr := r.Podman.Inspect(ctx, name); inspectErr == nil && containerIDPattern.MatchString(evidence.ID) && evidence.Name == name && evidence.Labels["io.kenogram.job-owner"] == ownerToken {
+			containerID, mayOwn = evidence.ID, true
+			r.recordOwnership(containerID)
+		}
+	}
 	if mayOwn && name != "" {
 		exists, existsErr := r.Podman.Exists(ctx, name)
 		switch {
@@ -302,10 +372,10 @@ func (r *Runtime) Cleanup(ctx context.Context, _ job.Invocation) jobcontract.Cle
 			reasons = append(reasons, "CONTAINER_OWNERSHIP_UNPROVED")
 		case !exists:
 		case exists:
-			evidence, inspectErr := r.Podman.Inspect(ctx, name)
-			if inspectErr != nil || containerID == "" || evidence.ID != containerID || evidence.Name != name || evidence.Labels["io.kenogram.job-owner"] != r.ownerToken {
+			evidence, inspectErr := r.Podman.Inspect(ctx, containerID)
+			if inspectErr != nil || containerID == "" || evidence.ID != containerID || evidence.Name != name || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
 				reasons = append(reasons, "CONTAINER_OWNERSHIP_UNPROVED")
-			} else if err := r.Podman.Destroy(ctx, name); err != nil {
+			} else if err := r.Podman.Destroy(ctx, containerID); err != nil {
 				reasons = append(reasons, "CONTAINER_REMOVE_FAILED")
 			}
 		}
@@ -343,8 +413,6 @@ type process struct {
 	attached   attachedProcess
 	invocation job.Invocation
 	identity   job.RuntimeIdentity
-	startedAt  time.Time
-	monotonic  time.Time
 	done       chan error
 	clientDone chan struct{}
 
@@ -367,9 +435,15 @@ func (p *process) Wait(ctx context.Context) (jobcontract.TargetResult, error) {
 	case <-ctx.Done():
 	}
 	controlCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-	stopErr := p.runtime.Podman.StopWithin(controlCtx, p.runtime.name, 1)
+	_, ownershipErr := p.runtime.proveOwned(controlCtx)
+	stopErr := ownershipErr
+	if stopErr == nil {
+		stopErr = p.runtime.Podman.StopWithin(controlCtx, p.runtime.containerID, 1)
+	}
 	if stopErr != nil {
-		_ = p.runtime.Podman.Kill(controlCtx, p.runtime.name)
+		if _, proofErr := p.runtime.proveOwned(controlCtx); proofErr == nil {
+			_ = p.runtime.Podman.Kill(controlCtx, p.runtime.containerID)
+		}
 	}
 	cancel()
 	timer := time.NewTimer(2 * time.Second)
@@ -387,23 +461,25 @@ func (p *process) Wait(ctx context.Context) (jobcontract.TargetResult, error) {
 }
 
 func (p *process) recordTerminal(err error) (jobcontract.TargetResult, error) {
-	finished := p.runtime.now().UTC()
-	duration := int64(time.Since(p.monotonic))
-	result := jobcontract.TargetResult{Kind: "exited", StartedAt: p.startedAt.Format(time.RFC3339Nano), FinishedAt: finished.Format(time.RFC3339Nano), DurationNS: &duration}
-	status := int64(0)
 	if err != nil {
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) || exit.ExitCode() < 0 || exit.ExitCode() > 255 || exit.ExitCode() >= 125 {
-			p.mu.Lock()
-			p.waited, p.waitErr = true, err
-			p.mu.Unlock()
-			return jobcontract.TargetResult{Kind: "unknown"}, err
-		}
-		status = int64(exit.ExitCode())
+		p.mu.Lock()
+		p.waited, p.waitErr = true, err
+		p.mu.Unlock()
+		return jobcontract.TargetResult{Kind: "unknown"}, err
 	}
-	result.ExitStatus = &status
+	record, readErr := joblifecycle.Read(p.runtime.lifecycleFile, p.runtime.lifecycleKey)
+	if readErr != nil {
+		p.mu.Lock()
+		p.waited, p.waitErr = true, readErr
+		p.mu.Unlock()
+		return jobcontract.TargetResult{Kind: "unknown"}, fmt.Errorf("target-local lifecycle is unproved: %w", readErr)
+	}
+	result := jobcontract.TargetResult{Kind: "exited", ExitStatus: record.ExitStatus, Signal: record.Signal, StartedAt: record.StartedAt, FinishedAt: record.FinishedAt, DurationNS: &record.DurationNS}
+	if record.Signal != nil {
+		result.Kind = "signaled"
+	}
 	p.mu.Lock()
-	p.waited, p.waitErr = true, err
+	p.waited, p.waitErr = true, nil
 	p.mu.Unlock()
 	return result, nil
 }
@@ -418,15 +494,21 @@ func (p *process) Finalize(ctx context.Context) (job.RuntimeFinalization, error)
 	if !p.finished() {
 		return job.RuntimeFinalization{}, errors.New("target terminal observation is absent")
 	}
-	if err := p.runtime.Podman.StopWithin(ctx, p.runtime.name, 1); err != nil {
-		if killErr := p.runtime.Podman.Kill(ctx, p.runtime.name); killErr != nil {
+	if _, err := p.runtime.proveOwned(ctx); err != nil {
+		return job.RuntimeFinalization{}, err
+	}
+	if err := p.runtime.Podman.StopWithin(ctx, p.runtime.containerID, 1); err != nil {
+		if _, proofErr := p.runtime.proveOwned(ctx); proofErr != nil {
+			return job.RuntimeFinalization{}, errors.Join(err, proofErr)
+		}
+		if killErr := p.runtime.Podman.Kill(ctx, p.runtime.containerID); killErr != nil {
 			return job.RuntimeFinalization{}, errors.Join(err, killErr)
 		}
 		p.runtime.mu.Lock()
 		p.runtime.forced = true
 		p.runtime.mu.Unlock()
 	}
-	evidence, err := p.runtime.Podman.Inspect(ctx, p.runtime.name)
+	evidence, err := p.runtime.Podman.Inspect(ctx, p.runtime.containerID)
 	if err != nil {
 		return job.RuntimeFinalization{}, err
 	}
@@ -436,7 +518,10 @@ func (p *process) Finalize(ctx context.Context) (job.RuntimeFinalization, error)
 	if err := verifyStoppedEvidence(evidence, publicProviderPlan(p.invocation.Prepared.Result), p.runtime.name, p.runtime.containerID, p.runtime.ownerToken, p.identity.ImageDigest); err != nil {
 		return job.RuntimeFinalization{}, fmt.Errorf("verify stopped job runtime: %w", err)
 	}
-	after, err := runtimeEvidence("after", p.runtime.now().UTC(), evidence)
+	if err := verifyMountFacts(p.runtime.mountFacts, false); err != nil {
+		return job.RuntimeFinalization{}, err
+	}
+	after, err := runtimeEvidence("after", p.runtime.now().UTC(), evidence, p.invocation, p.identity.ImageDigest, p.runtime.mountFacts)
 	if err != nil {
 		return job.RuntimeFinalization{}, err
 	}
@@ -459,7 +544,7 @@ func verifyStoppedEvidence(evidence backend.Evidence, result plan.Result, name, 
 	return nil
 }
 
-func targetEnvironment(invocation job.Invocation) ([]byte, error) {
+func targetEnvironment(invocation job.Invocation, lifecycleKey []byte) ([]byte, error) {
 	items := make([]jobenv.Item, 0, len(invocation.Request.Command.Environment))
 	for _, requested := range invocation.Request.Command.Environment {
 		if requested.PublicValue != nil {
@@ -485,7 +570,7 @@ func targetEnvironment(invocation job.Invocation) ([]byte, error) {
 		}
 		items = append(items, jobenv.Item{Name: requested.Name, Value: value})
 	}
-	return jobenv.Encode(items)
+	return jobenv.EncodeLaunch(items, lifecycleKey)
 }
 
 func readSecretSource(copy plan.Copy) ([]byte, error) {
@@ -526,7 +611,7 @@ func (p *process) extractArtifacts(ctx context.Context) ([]job.Artifact, error) 
 	}
 	destination := filepath.Join(p.runtime.scratch, "artifacts")
 	command := []string{
-		p.runtime.helperSource, "_job-collect", p.runtime.name, p.runtime.containerID,
+		p.runtime.helperSource, "_job-collect", p.runtime.containerID, p.runtime.name,
 		p.runtime.ownerToken, request.ContainerRoot, destination,
 		fmt.Sprint(request.MaxEntries), fmt.Sprint(request.MaxBytes),
 	}
@@ -589,28 +674,73 @@ func (p *process) extractArtifacts(ctx context.Context) ([]job.Artifact, error) 
 // CollectArtifacts is the narrow helper entered under `podman unshare`. It
 // re-proves the stopped container identity, mounts its root only inside the
 // provider user namespace, copies a bounded regular-file tree, and unmounts it.
-func CollectArtifacts(ctx context.Context, podman *backend.Podman, name, containerID, ownerToken, containerRoot, destination string, maximumEntries, maximumBytes int64) (retErr error) {
+func CollectArtifacts(ctx context.Context, podman *backend.Podman, containerID, name, ownerToken, containerRoot, destination string, maximumEntries, maximumBytes int64) (retErr error) {
 	if podman == nil || name == "" || !containerIDPattern.MatchString(containerID) || !ownerTokenPattern.MatchString(ownerToken) ||
 		!filepath.IsAbs(containerRoot) || filepath.Clean(containerRoot) != containerRoot ||
 		!filepath.IsAbs(destination) || filepath.Clean(destination) != destination ||
 		maximumEntries < 1 || maximumEntries > 10_000 || maximumBytes < 1 || maximumBytes > 1<<30 {
 		return errors.New("artifact collector authority is invalid")
 	}
-	evidence, err := podman.Inspect(ctx, name)
+	evidence, err := podman.Inspect(ctx, containerID)
 	if err != nil || evidence.Running || evidence.ID != containerID || evidence.Name != name || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
 		return errors.New("stopped artifact source identity is unproved")
 	}
-	mounted, err := podman.MountRoot(ctx, name)
+	mounted, err := podman.MountRoot(ctx, containerID)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		unmountCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 		defer cancel()
-		retErr = errors.Join(retErr, podman.Unmount(unmountCtx, name))
+		// Unmount is destructive provider state. Re-prove immutable identity and
+		// owner immediately before issuing it.
+		proof, proofErr := podman.Inspect(unmountCtx, containerID)
+		if proofErr != nil || proof.ID != containerID || proof.Name != name || proof.Labels["io.kenogram.job-owner"] != ownerToken {
+			retErr = errors.Join(retErr, errors.New("artifact source ownership changed before unmount"))
+			return
+		}
+		retErr = errors.Join(retErr, podman.Unmount(unmountCtx, containerID))
 	}()
-	source := filepath.Join(mounted, filepath.FromSlash(strings.TrimPrefix(containerRoot, "/")))
-	return collectArtifactTree(ctx, source, destination, maximumEntries, maximumBytes)
+	return collectArtifactTreeFromMountedRoot(ctx, mounted, containerRoot, destination, maximumEntries, maximumBytes)
+}
+
+func collectArtifactTreeFromMountedRoot(ctx context.Context, mounted, containerRoot, destination string, maximumEntries, maximumBytes int64) error {
+	root, err := os.OpenRoot(mounted)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	relative := filepath.FromSlash(strings.TrimPrefix(containerRoot, "/"))
+	current := root
+	for _, component := range strings.Split(relative, string(os.PathSeparator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		info, err := current.Lstat(component)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			if current != root {
+				current.Close()
+			}
+			return errors.New("target artifact root traversal contains a non-directory or symlink")
+		}
+		next, err := current.OpenRoot(component)
+		if current != root {
+			current.Close()
+		}
+		if err != nil {
+			return err
+		}
+		opened, err := next.Stat(".")
+		if err != nil || !opened.IsDir() || !os.SameFile(info, opened) {
+			next.Close()
+			return errors.New("target artifact root component changed during descriptor open")
+		}
+		current = next
+	}
+	if current != root {
+		defer current.Close()
+	}
+	return collectArtifactRoot(ctx, current, destination, maximumEntries, maximumBytes)
 }
 
 func collectArtifactTree(ctx context.Context, source, destination string, maximumEntries, maximumBytes int64) error {
@@ -623,6 +753,10 @@ func collectArtifactTree(ctx context.Context, source, destination string, maximu
 		return err
 	}
 	defer sourceRoot.Close()
+	return collectArtifactRoot(ctx, sourceRoot, destination, maximumEntries, maximumBytes)
+}
+
+func collectArtifactRoot(ctx context.Context, sourceRoot *os.Root, destination string, maximumEntries, maximumBytes int64) error {
 	if err := os.Mkdir(destination, 0o700); err != nil {
 		return err
 	}
@@ -688,15 +822,48 @@ func collectArtifactTree(ctx context.Context, source, destination string, maximu
 	})
 }
 
-type runtimeObservation struct {
-	Schema     string           `json:"schema"`
-	Phase      string           `json:"phase"`
-	ObservedAt string           `json:"observed_at"`
-	Evidence   backend.Evidence `json:"evidence"`
+func runtimeEvidence(phase string, observed time.Time, evidence backend.Evidence, invocation job.Invocation, imageDigest string, mounts []jobcontract.RuntimeMountObservation) ([]byte, error) {
+	observation := jobcontract.RuntimeObservation{
+		Schema: jobcontract.RuntimeObservationSchema, Phase: phase, ObservedAt: observed.Format(time.RFC3339Nano), Provider: "podman-cli",
+		ContainerID: evidence.ID, ContainerName: evidence.Name, Running: evidence.Running,
+		ImageReference: invocation.Prepared.Result.Plan.World.Base, ImageDigest: imageDigest,
+		PlanSHA256: "sha256:" + invocation.Prepared.Result.EvidenceDigest, DeclarationSHA256: "sha256:" + invocation.Prepared.Result.DeclarationDigest, Generation: generation,
+		NetworkMode: evidence.NetworkMode, IPCMode: evidence.IPCMode, IPCIsolated: evidence.IPCIsolatedFromHost,
+		PIDMode: evidence.PIDMode, UTSMode: evidence.UTSMode, UserNSMode: evidence.UserNSMode, User: evidence.User,
+		Hostname: evidence.Hostname, WorkingDirectory: evidence.WorkingDir, BoundingCaps: append([]string{}, evidence.BoundingCaps...),
+		NoNewPrivileges: containsFold(evidence.SecurityOpt, "no-new-privileges"), SeccompMode: int64(evidence.SeccompMode), Devices: int64(evidence.Devices),
+		UIDIdentity: mapsHostIdentity(evidence.UIDMap, int64(os.Getuid())), GIDIdentity: mapsHostIdentity(evidence.GIDMap, int64(os.Getgid())),
+		MemoryBytes: evidence.Memory, NanoCPUs: evidence.NanoCPUs, PIDs: evidence.PIDs, Mounts: append([]jobcontract.RuntimeMountObservation{}, mounts...),
+	}
+	if phase == "after" {
+		// These properties require a live process to inspect. Preserve their
+		// absence honestly rather than copying a stale live-process claim.
+		observation.IPCIsolated, observation.NoNewPrivileges, observation.UIDIdentity, observation.GIDIdentity = false, false, false, false
+		observation.SeccompMode = 0
+		observation.BoundingCaps = []string{}
+	}
+	if err := jobcontract.ValidateRuntimeObservation(observation); err != nil {
+		return nil, err
+	}
+	return json.Marshal(observation)
 }
 
-func runtimeEvidence(phase string, observed time.Time, evidence backend.Evidence) ([]byte, error) {
-	return json.Marshal(runtimeObservation{Schema: "kenogram.podman-runtime-observation.v1", Phase: phase, ObservedAt: observed.Format(time.RFC3339Nano), Evidence: evidence})
+func containsFold(values []string, wanted string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, wanted) || strings.HasPrefix(strings.ToLower(value), strings.ToLower(wanted)+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func mapsHostIdentity(mappings []backend.IDMap, id int64) bool {
+	for _, mapping := range mappings {
+		if mapping.Size > 0 && id >= mapping.HostID && id < mapping.HostID+mapping.Size && mapping.ContainerID+id-mapping.HostID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func observedImageDigest(evidence backend.Evidence) string {
@@ -765,40 +932,114 @@ func runningExecutable() (string, error) {
 	return os.Executable()
 }
 
-func stageHelper(resolve func() (string, error), scratch string) (string, error) {
+func stageHelper(resolve func() (string, error), scratch string) (string, jobcontract.RuntimeMountObservation, error) {
 	source, err := resolve()
 	if err != nil {
-		return "", fmt.Errorf("resolve governed job helper: %w", err)
+		return "", jobcontract.RuntimeMountObservation{}, fmt.Errorf("resolve governed job helper: %w", err)
+	}
+	before, err := os.Lstat(source)
+	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
+		return "", jobcontract.RuntimeMountObservation{}, errors.New("governed job helper source is not a regular non-symlink file")
 	}
 	input, err := os.Open(source)
 	if err != nil {
-		return "", errors.New("open governed job helper")
+		return "", jobcontract.RuntimeMountObservation{}, errors.New("open governed job helper")
 	}
 	defer input.Close()
 	info, err := input.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 1<<30 {
-		return "", errors.New("governed job helper is not a bounded regular file")
+	if err != nil || !info.Mode().IsRegular() || !os.SameFile(before, info) || info.Size() < 1 || info.Size() > 1<<30 {
+		return "", jobcontract.RuntimeMountObservation{}, errors.New("governed job helper is not a bounded stable regular file")
 	}
 	target := filepath.Join(scratch, "job-exec")
 	output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o555)
 	if err != nil {
-		return "", err
+		return "", jobcontract.RuntimeMountObservation{}, err
 	}
 	written, copyErr := io.Copy(output, io.LimitReader(input, (1<<30)+1))
 	syncErr := output.Sync()
 	closeErr := output.Close()
 	if copyErr != nil || syncErr != nil || closeErr != nil || written != info.Size() {
-		return "", errors.Join(copyErr, syncErr, closeErr, errors.New("governed job helper copy is incomplete"))
+		return "", jobcontract.RuntimeMountObservation{}, errors.Join(copyErr, syncErr, closeErr, errors.New("governed job helper copy is incomplete"))
 	}
 	if err := os.Chmod(target, 0o555); err != nil {
+		return "", jobcontract.RuntimeMountObservation{}, err
+	}
+	fact, err := captureSourceFact(target, jobHelperPath, "ro")
+	if err != nil {
+		return "", jobcontract.RuntimeMountObservation{}, err
+	}
+	return target, fact, nil
+}
+
+func captureMountFacts(mounts []backend.Mount) ([]jobcontract.RuntimeMountObservation, error) {
+	facts := make([]jobcontract.RuntimeMountObservation, 0, len(mounts))
+	for _, mount := range mounts {
+		fact, err := captureSourceFact(mount.Source, mount.Target, mount.Mode)
+		if err != nil {
+			return nil, fmt.Errorf("capture mount %q identity: %w", mount.Target, err)
+		}
+		facts = append(facts, fact)
+	}
+	sort.Slice(facts, func(i, j int) bool { return facts[i].Target < facts[j].Target })
+	return facts, nil
+}
+
+func captureSourceFact(source, target, mode string) (jobcontract.RuntimeMountObservation, error) {
+	before, err := os.Lstat(source)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || (!before.IsDir() && !before.Mode().IsRegular()) {
+		return jobcontract.RuntimeMountObservation{}, errors.New("source is not a regular non-symlink file or directory")
+	}
+	stat, ok := before.Sys().(*syscall.Stat_t)
+	if !ok || stat.Dev == 0 || stat.Ino == 0 {
+		return jobcontract.RuntimeMountObservation{}, errors.New("source device and inode are unavailable")
+	}
+	digest, err := sourceContentDigest(source, before)
+	if err != nil {
+		return jobcontract.RuntimeMountObservation{}, err
+	}
+	fileType := "file"
+	if before.IsDir() {
+		fileType = "directory"
+	}
+	return jobcontract.RuntimeMountObservation{Source: filepath.Clean(source), Target: target, Mode: mode, Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: fileType, SHA256: "sha256:" + digest, IdentityVerified: true}, nil
+}
+
+func sourceContentDigest(source string, info fs.FileInfo) (string, error) {
+	if info.IsDir() {
+		return plan.DigestSource(source)
+	}
+	file, err := os.Open(source)
+	if err != nil {
 		return "", err
 	}
-	return target, nil
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		return "", errors.New("source identity changed during digest open")
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, io.LimitReader(file, (1<<30)+1)); err != nil {
+		return "", err
+	}
+	if opened.Size() > 1<<30 {
+		return "", errors.New("source file exceeds identity digest bound")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func verifyMountFacts(facts []jobcontract.RuntimeMountObservation, verifyDigest bool) error {
+	for _, expected := range facts {
+		observed, err := captureSourceFact(expected.Source, expected.Target, expected.Mode)
+		if err != nil || observed.Device != expected.Device || observed.Inode != expected.Inode || observed.FileType != expected.FileType || (verifyDigest && observed.SHA256 != expected.SHA256) {
+			return fmt.Errorf("mount %q source identity changed", expected.Target)
+		}
+	}
+	return nil
 }
 
 func jobMounts(layout worldfs.Layout, result plan.Result) ([]backend.Mount, error) {
 	mounts := []backend.Mount{}
-	targets := []string{jobHelperPath}
+	targets := []string{jobHelperPath, jobLifecyclePath}
 	for _, target := range result.Plan.Workspace {
 		if overlappingContainerTarget(target, targets) {
 			return nil, fmt.Errorf("workspace target %q overlaps another runtime-owned target", target)
@@ -837,12 +1078,12 @@ func pathIsAbsoluteCommand(value string) bool {
 }
 
 func validateMountSource(source string) error {
-	info, err := os.Stat(source)
+	info, err := os.Lstat(source)
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() && !info.Mode().IsRegular() {
-		return errors.New("mount source is not a regular file or directory")
+	if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+		return errors.New("mount source is not a regular non-symlink file or directory")
 	}
 	canonical := canonicalHostPath(source)
 	uid := fmt.Sprint(os.Getuid())

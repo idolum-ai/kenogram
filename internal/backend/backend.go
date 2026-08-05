@@ -180,7 +180,7 @@ func (p *Podman) CreateNamed(ctx context.Context, name string, result plan.Resul
 }
 
 func (p *Podman) CreateNamedWithLabels(ctx context.Context, name string, result plan.Result, generation int64, mounts []Mount, labels map[string]string) (string, error) {
-	return p.createNamedWithLabels(ctx, name, result, generation, mounts, labels, "/usr/bin/tail", []string{"-f", "/dev/null"})
+	return p.createNamedWithLabels(ctx, name, result, generation, mounts, labels, "/usr/bin/tail", []string{"-f", "/dev/null"}, false)
 }
 
 // CreateGovernedJob creates a one-shot job holder whose executable is supplied
@@ -190,10 +190,10 @@ func (p *Podman) CreateGovernedJob(ctx context.Context, name string, result plan
 	if !filepath.IsAbs(helperPath) || filepath.Clean(helperPath) != helperPath {
 		return "", errors.New("governed job helper path must be absolute and clean")
 	}
-	return p.createNamedWithLabels(ctx, name, result, generation, mounts, labels, helperPath, []string{"_job-hold"})
+	return p.createNamedWithLabels(ctx, name, result, generation, mounts, labels, helperPath, []string{"_job-hold"}, true)
 }
 
-func (p *Podman) createNamedWithLabels(ctx context.Context, name string, result plan.Result, generation int64, mounts []Mount, labels map[string]string, entrypoint string, command []string) (string, error) {
+func (p *Podman) createNamedWithLabels(ctx context.Context, name string, result plan.Result, generation int64, mounts []Mount, labels map[string]string, entrypoint string, command []string, returnID bool) (string, error) {
 	args := []string{"create", "--name", name, "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--image-volume", "ignore", "--hostname", result.Plan.World.Hostname, "--user", result.Plan.World.User, "--workdir", result.Plan.World.Workdir, "--cpus", strconv.FormatInt(result.Plan.Resources.CPUs, 10), "--memory", strconv.FormatInt(result.Plan.Resources.MemoryBytes, 10), "--pids-limit", strconv.FormatInt(result.Plan.Resources.PIDs, 10), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=" + result.Plan.Name, "--label", "io.kenogram.generation=" + strconv.FormatInt(generation, 10), "--label", "io.kenogram.plan-digest=" + result.PlanDigest, "--label", "io.kenogram.declaration-digest=" + result.DeclarationDigest, "--env", "NO_PROXY=localhost,127.0.0.1"}
 	labelNames := make([]string, 0, len(labels))
 	for key := range labels {
@@ -216,10 +216,26 @@ func (p *Podman) createNamedWithLabels(ctx context.Context, name string, result 
 	// A declaration owns the world's process model. Explicitly replace any
 	// image entrypoint so a base image cannot run bootstrap code before the
 	// inert holder or reinterpret tail's arguments as its own command.
-	args = append(args, "--entrypoint", entrypoint, result.Plan.World.Base)
+	// End provider option parsing before the image reference. The declaration
+	// validator also rejects option-shaped references, but this delimiter keeps
+	// the execution boundary safe if a future parser accidentally regresses.
+	args = append(args, "--entrypoint", entrypoint, "--", result.Plan.World.Base)
 	args = append(args, command...)
-	if _, err := p.Runner.Run(ctx, p.Binary, args...); err != nil {
+	raw, err := p.Runner.Run(ctx, p.Binary, args...)
+	if err != nil {
 		return "", err
+	}
+	if returnID {
+		id := strings.TrimSpace(string(raw))
+		if len(id) != 64 {
+			return "", errors.New("podman create did not return an immutable container ID")
+		}
+		for _, character := range id {
+			if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+				return "", errors.New("podman create returned an invalid container ID")
+			}
+		}
+		return id, nil
 	}
 	return name, nil
 }

@@ -57,15 +57,22 @@ Exit 1 means a sealed refusal/incomplete observation or a post-identity
 publication failure. Exit 2 means invocation authority was invalid before
 semantic job identity. Always inspect the JSON `status`, `target`, `cleanup`,
 and `reasons` fields rather than treating the shell status as the target result.
-Podman's reserved and signal-ambiguous 125–255 range is intentionally classified
-as unknown because the provider cannot distinguish those observations from a
-target that deliberately exits with the same number.
+The provider client's exit status is never used as the target's status. The
+contained Kenogram helper records target-local launch, exit or signal, and
+monotonic duration in an HMAC-authenticated lifecycle file whose key is passed
+only over the bounded launcher stdin protocol. A missing, modified, or
+provider-only observation is `unknown`.
 
 The current direct provider enforces `network=none`. A declaration containing
 `network.allow` is refused until a job-scoped egress proxy has its own proof.
-Commands must be absolute container paths. Read-only/read-write mounts, world
+Commands must be absolute container paths, and the requested working directory
+must equal the declared world workdir so provider inspection can bind it.
+Read-only/read-write mounts, world
 user, CPU, memory, PID, capabilities, seccomp, namespaces, exact image identity,
-and the absence of extra mounts are inspected before target admission.
+and the absence of extra mounts are inspected before target admission. The
+public `kenogram.podman-runtime-observation.v1` documents retain a closed,
+strictly decoded cross-phase proof; `verify-job` re-derives its bindings rather
+than accepting arbitrary provider JSON.
 
 The Kenogram executable also acts as the image-independent holder and target
 launcher. It must therefore be a self-contained Linux binary for images that do

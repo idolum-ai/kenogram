@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/idolum-ai/kenogram/internal/backend"
 	"github.com/idolum-ai/kenogram/internal/job"
 	"github.com/idolum-ai/kenogram/internal/jobenv"
+	"github.com/idolum-ai/kenogram/internal/joblifecycle"
 	"github.com/idolum-ai/kenogram/internal/jobpodman"
 )
 
@@ -36,21 +39,46 @@ func runGovernedJobHelper(args []string, stdin io.Reader, stderr io.Writer) (int
 		if len(args) < 2 {
 			return 125, true
 		}
-		items, err := jobenv.Decode(stdin)
+		items, lifecycleKey, err := jobenv.DecodeLaunch(stdin)
 		if err != nil {
 			fmt.Fprintln(stderr, "job environment handoff is invalid")
 			return 125, true
 		}
-		os.Clearenv()
+		environment := make([]string, 0, len(items))
 		for _, item := range items {
-			if err := os.Setenv(item.Name, string(item.Value)); err != nil {
-				fmt.Fprintln(stderr, "job environment could not be established")
-				return 125, true
-			}
+			environment = append(environment, item.Name+"="+string(item.Value))
 		}
-		if err := syscall.Exec(args[1], args[1:], os.Environ()); err != nil {
+		command := exec.Command(args[1], args[2:]...)
+		command.Env, command.Stdin, command.Stdout, command.Stderr = environment, nil, os.Stdout, os.Stderr
+		startedAt, monotonic := time.Now().UTC(), time.Now()
+		if err := command.Start(); err != nil {
 			fmt.Fprintln(stderr, "job target could not be executed")
 			return 126, true
+		}
+		waitErr := command.Wait()
+		finishedAt := time.Now().UTC()
+		record := joblifecycle.Record{Schema: joblifecycle.Schema, StartedAt: startedAt.Format(time.RFC3339Nano), FinishedAt: finishedAt.Format(time.RFC3339Nano), DurationNS: int64(time.Since(monotonic))}
+		if waitErr == nil {
+			status := int64(0)
+			record.ExitStatus = &status
+		} else if exit, ok := waitErr.(*exec.ExitError); ok {
+			waitStatus, ok := exit.Sys().(syscall.WaitStatus)
+			if !ok {
+				return 125, true
+			}
+			if waitStatus.Signaled() {
+				signal := int64(waitStatus.Signal())
+				record.Signal = &signal
+			} else {
+				status := int64(waitStatus.ExitStatus())
+				record.ExitStatus = &status
+			}
+		} else {
+			return 125, true
+		}
+		if err := joblifecycle.Write("/etc/kenogram/job-lifecycle/"+joblifecycle.FileName, record, lifecycleKey); err != nil {
+			fmt.Fprintln(stderr, "job target lifecycle could not be retained")
+			return 125, true
 		}
 		return 0, true
 	case "_job-collect":

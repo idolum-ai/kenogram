@@ -20,6 +20,7 @@ required=(
   schemas/kenogram.job-result.v1.schema.json
   schemas/kenogram.job-evidence-manifest.v1.schema.json
   schemas/kenogram.executable-provenance.v1.schema.json
+  schemas/kenogram.podman-runtime-observation.v1.schema.json
 )
 for file in "${required[@]}"; do
   [[ -s "$file" ]] || { echo "missing required file: $file" >&2; exit 1; }

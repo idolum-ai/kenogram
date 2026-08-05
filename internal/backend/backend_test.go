@@ -138,14 +138,14 @@ func TestCreateExactArgv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create", "--name", "kenogram-w-g7", "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--image-volume", "ignore", "--hostname", "h", "--user", "agent", "--workdir", "/workspace", "--cpus", "2", "--memory", "3", "--pids-limit", "4", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=w", "--label", "io.kenogram.generation=7", "--label", "io.kenogram.plan-digest=pd", "--label", "io.kenogram.declaration-digest=dd", "--env", "NO_PROXY=localhost,127.0.0.1", "--env", "HTTP_PROXY=http://127.0.0.1:3128", "--env", "HTTPS_PROXY=http://127.0.0.1:3128", "--mount", "type=bind,src=/host,dst=/workspace,rw,nodev,nosuid,noexec", "--entrypoint", "/usr/bin/tail", "base@sha256:x", "-f", "/dev/null"}
+	want := []string{"create", "--name", "kenogram-w-g7", "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--image-volume", "ignore", "--hostname", "h", "--user", "agent", "--workdir", "/workspace", "--cpus", "2", "--memory", "3", "--pids-limit", "4", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=w", "--label", "io.kenogram.generation=7", "--label", "io.kenogram.plan-digest=pd", "--label", "io.kenogram.declaration-digest=dd", "--env", "NO_PROXY=localhost,127.0.0.1", "--env", "HTTP_PROXY=http://127.0.0.1:3128", "--env", "HTTPS_PROXY=http://127.0.0.1:3128", "--mount", "type=bind,src=/host,dst=/workspace,rw,nodev,nosuid,noexec", "--entrypoint", "/usr/bin/tail", "--", "base@sha256:x", "-f", "/dev/null"}
 	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].args, want) {
 		t.Fatalf("got %#v", f.calls)
 	}
 }
 
 func TestCreateGovernedJobUsesOnlyCallerOwnedHelper(t *testing.T) {
-	f := &fake{}
+	f := &fake{out: []byte(strings.Repeat("c", 64) + "\n")}
 	p := New(f)
 	r := plan.Result{PlanDigest: "pd", DeclarationDigest: "dd", Plan: plan.Plan{Name: "w", World: plan.World{Hostname: "h", Base: "sha256:" + strings.Repeat("a", 64), Workdir: "/workspace", User: "0"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
 	_, err := p.CreateGovernedJob(context.Background(), "owned-job", r, 1, []Mount{{Source: "/host/kenogram", Target: "/etc/kenogram/job-exec", Mode: "ro"}}, map[string]string{"z": "last", "a": "first"}, "/etc/kenogram/job-exec")
@@ -153,7 +153,7 @@ func TestCreateGovernedJobUsesOnlyCallerOwnedHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(f.calls[0].args, " ")
-	if !strings.HasSuffix(joined, "--entrypoint /etc/kenogram/job-exec "+r.Plan.World.Base+" _job-hold") {
+	if !strings.HasSuffix(joined, "--entrypoint /etc/kenogram/job-exec -- "+r.Plan.World.Base+" _job-hold") {
 		t.Fatalf("argv=%q", joined)
 	}
 	if strings.Index(joined, "--label a=first") > strings.Index(joined, "--label z=last") {

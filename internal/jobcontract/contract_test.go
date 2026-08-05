@@ -200,10 +200,11 @@ func TestPublishedSchemasAreClosedJSONDocuments(t *testing.T) {
 	t.Parallel()
 	root := repositoryRoot(t)
 	tests := map[string]string{
-		"kenogram.job-request.v1.schema.json":           RequestSchema,
-		"kenogram.job-result.v1.schema.json":            ResultSchema,
-		"kenogram.job-evidence-manifest.v1.schema.json": ManifestSchema,
-		"kenogram.executable-provenance.v1.schema.json": ProvenanceSchema,
+		"kenogram.job-request.v1.schema.json":                RequestSchema,
+		"kenogram.job-result.v1.schema.json":                 ResultSchema,
+		"kenogram.job-evidence-manifest.v1.schema.json":      ManifestSchema,
+		"kenogram.executable-provenance.v1.schema.json":      ProvenanceSchema,
+		"kenogram.podman-runtime-observation.v1.schema.json": RuntimeObservationSchema,
 	}
 	for name, identifier := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -262,7 +263,7 @@ func validResult() Result {
 	duration := int64(1_000_000_000)
 	return Result{
 		Schema: ResultSchema, JobID: "ergograph-proof-1", Status: "complete", RequestSHA256: testDigest, EvidenceManifest: "manifest.json",
-		Identity:     ExecutionIdentity{DeclarationSHA256: testDigest, PlanSHA256: testDigest, Generation: 1, ImageReference: "example.test/probe@" + testDigest, ImageDigest: testDigest, RuntimeSHA256: testDigest, ProvenanceSHA256: testDigest},
+		Identity:     ExecutionIdentity{DeclarationSHA256: testDigest, PlanSHA256: testDigest, Generation: 1, ImageReference: "example.test/probe@" + testDigest, ImageDigest: testDigest, RuntimeSHA256: testDigest, ProvenanceSHA256: testDigest, RuntimeProvider: "podman-cli"},
 		Target:       TargetResult{Kind: "exited", ExitStatus: &exit, StartedAt: "2026-08-04T12:00:00Z", FinishedAt: "2026-08-04T12:00:01Z", DurationNS: &duration},
 		Stdout:       StreamResult{Path: "stdout.bin", SHA256: testDigest, CapturedBytes: 1, TotalBytes: 1},
 		Stderr:       StreamResult{Path: "stderr.bin", SHA256: testDigest},

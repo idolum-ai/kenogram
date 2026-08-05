@@ -12,11 +12,16 @@ import (
 	"github.com/idolum-ai/kenogram/internal/naming"
 )
 
-var pinnedImage = regexp.MustCompile(`(?:@sha256:|^sha256:)[0-9a-fA-F]{64}$`)
+var pinnedImage = regexp.MustCompile(`^(?:sha256:[0-9a-fA-F]{64}|[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-fA-F]{64})$`)
+var validImage = regexp.MustCompile(`^(?:sha256:[0-9a-fA-F]{64}|[A-Za-z0-9][A-Za-z0-9._/:+@-]*)$`)
 
 // ImagePinned reports whether an image reference has immutable registry or
 // exact local content identity.
 func ImagePinned(image string) bool { return pinnedImage.MatchString(image) }
+
+func ImageReferenceValid(image string) bool {
+	return len(image) <= 4096 && validImage.MatchString(image)
+}
 
 // Validate checks schema constraints that depend on values and host metadata.
 func Validate(d Declaration, declarationDir string) error {
@@ -38,6 +43,9 @@ func validate(d Declaration, declarationDir string, inspectSources bool) error {
 	}
 	if d.World.Hostname == "" || d.World.Base == "" || d.World.User == "" {
 		return fmt.Errorf("world hostname, base, and user must not be empty")
+	}
+	if !ImageReferenceValid(d.World.Base) {
+		return fmt.Errorf("world.base is not a strict image reference")
 	}
 	if !ImagePinned(d.World.Base) && !d.AllowUnpinned {
 		return fmt.Errorf("world.base must be pinned by sha256 digest or allow_unpinned must be true")

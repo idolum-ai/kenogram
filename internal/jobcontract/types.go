@@ -4,10 +4,11 @@
 package jobcontract
 
 const (
-	RequestSchema    = "kenogram.job-request.v1"
-	ResultSchema     = "kenogram.job-result.v1"
-	ManifestSchema   = "kenogram.job-evidence-manifest.v1"
-	ProvenanceSchema = "kenogram.executable-provenance.v1"
+	RequestSchema            = "kenogram.job-request.v1"
+	ResultSchema             = "kenogram.job-result.v1"
+	ManifestSchema           = "kenogram.job-evidence-manifest.v1"
+	ProvenanceSchema         = "kenogram.executable-provenance.v1"
+	RuntimeObservationSchema = "kenogram.podman-runtime-observation.v1"
 
 	MaximumRequestBytes    = 1 << 20
 	MaximumResultBytes     = 1 << 20
@@ -80,6 +81,7 @@ type ExecutionIdentity struct {
 	ImageDigest       string `json:"image_digest"`
 	RuntimeSHA256     string `json:"runtime_evidence_sha256"`
 	ProvenanceSHA256  string `json:"provenance_sha256"`
+	RuntimeProvider   string `json:"runtime_provider"`
 }
 
 type TargetResult struct {
@@ -142,4 +144,53 @@ type Provenance struct {
 	GOOS             string `json:"goos"`
 	GOARCH           string `json:"goarch"`
 	ExecutableSHA256 string `json:"executable_sha256"`
+}
+
+// RuntimeObservation is the closed, provider-specific public proof retained
+// around a direct governed job. It intentionally contains only public
+// authority and observed enforcement facts; capability material never enters
+// this document.
+type RuntimeObservation struct {
+	Schema            string                    `json:"schema"`
+	Phase             string                    `json:"phase"`
+	ObservedAt        string                    `json:"observed_at"`
+	Provider          string                    `json:"provider"`
+	ContainerID       string                    `json:"container_id"`
+	ContainerName     string                    `json:"container_name"`
+	Running           bool                      `json:"running"`
+	ImageReference    string                    `json:"image_reference"`
+	ImageDigest       string                    `json:"image_digest"`
+	PlanSHA256        string                    `json:"plan_sha256"`
+	DeclarationSHA256 string                    `json:"declaration_sha256"`
+	Generation        int64                     `json:"generation"`
+	NetworkMode       string                    `json:"network_mode"`
+	IPCMode           string                    `json:"ipc_mode"`
+	IPCIsolated       bool                      `json:"ipc_isolated"`
+	PIDMode           string                    `json:"pid_mode"`
+	UTSMode           string                    `json:"uts_mode"`
+	UserNSMode        string                    `json:"userns_mode"`
+	User              string                    `json:"user"`
+	Hostname          string                    `json:"hostname"`
+	WorkingDirectory  string                    `json:"working_directory"`
+	BoundingCaps      []string                  `json:"bounding_caps"`
+	NoNewPrivileges   bool                      `json:"no_new_privileges"`
+	SeccompMode       int64                     `json:"seccomp_mode"`
+	Devices           int64                     `json:"devices"`
+	UIDIdentity       bool                      `json:"uid_identity"`
+	GIDIdentity       bool                      `json:"gid_identity"`
+	MemoryBytes       int64                     `json:"memory_bytes"`
+	NanoCPUs          int64                     `json:"nano_cpus"`
+	PIDs              int64                     `json:"pids"`
+	Mounts            []RuntimeMountObservation `json:"mounts"`
+}
+
+type RuntimeMountObservation struct {
+	Source           string `json:"source"`
+	Target           string `json:"target"`
+	Mode             string `json:"mode"`
+	Device           uint64 `json:"device"`
+	Inode            uint64 `json:"inode"`
+	FileType         string `json:"file_type"`
+	SHA256           string `json:"sha256"`
+	IdentityVerified bool   `json:"identity_verified"`
 }

@@ -144,7 +144,10 @@ func validateExecutionIdentity(value ExecutionIdentity, complete bool) error {
 		!validDigest(value.ProvenanceSHA256) {
 		return errors.New("execution identity is invalid")
 	}
-	if complete && (value.Generation < 1 || value.ImageDigest == "" || value.RuntimeSHA256 == "") {
+	if value.RuntimeProvider != "" && value.RuntimeProvider != "podman-cli" {
+		return errors.New("execution runtime provider is invalid")
+	}
+	if complete && (value.Generation < 1 || value.ImageDigest == "" || value.RuntimeSHA256 == "" || value.RuntimeProvider != "podman-cli") {
 		return errors.New("complete result lacks an observed execution identity")
 	}
 	return nil

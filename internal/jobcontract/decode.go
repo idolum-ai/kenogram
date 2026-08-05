@@ -53,6 +53,17 @@ func ParseProvenance(raw []byte) (Provenance, error) {
 	return value, nil
 }
 
+func ParseRuntimeObservation(raw []byte) (RuntimeObservation, error) {
+	var value RuntimeObservation
+	if err := decode(raw, MaximumManifestBytes, &value); err != nil {
+		return value, fmt.Errorf("decode runtime observation: %w", err)
+	}
+	if err := ValidateRuntimeObservation(value); err != nil {
+		return value, err
+	}
+	return value, nil
+}
+
 // ValidateJSONDocument applies the common bounded, UTF-8, duplicate-key, and
 // trailing-data rules to an otherwise provider-owned JSON observation.
 func ValidateJSONDocument(raw []byte, maximum int) error {

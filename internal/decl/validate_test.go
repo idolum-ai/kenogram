@@ -57,6 +57,14 @@ func TestValidateAcceptsExactLocalImageID(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsOptionShapedPinnedImageReference(t *testing.T) {
+	d, dir := validForValidation(t)
+	d.World.Base = "--pull=always@sha256:" + strings.Repeat("a", 64)
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "image reference") {
+		t.Fatalf("option-shaped image accepted: %v", err)
+	}
+}
+
 func TestValidateRejectsPermissiveSecret(t *testing.T) {
 	d, dir := validForValidation(t)
 	if err := os.Chmod(filepath.Join(dir, "secret"), 0o640); err != nil {

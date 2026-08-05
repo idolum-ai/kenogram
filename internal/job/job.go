@@ -35,11 +35,13 @@ type Process interface {
 }
 
 type Invocation struct {
-	Request  jobcontract.Request
-	Prepared app.Prepared
+	Request    jobcontract.Request
+	Prepared   app.Prepared
+	Provenance jobcontract.Provenance
 }
 
 type RuntimeIdentity struct {
+	Provider       string
 	Generation     int64
 	ImageReference string
 	ImageDigest    string
@@ -168,7 +170,7 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 		return Outcome{}, err
 	}
 
-	invocation := Invocation{Request: request, Prepared: prepared}
+	invocation := Invocation{Request: request, Prepared: prepared, Provenance: provenance}
 	cleanupDone := false
 	defer func() {
 		if cleanupDone {
@@ -203,6 +205,7 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 	if startErr == nil {
 		identity, identityErr := identityProcessBounded(executionCtx, process)
 		result.Identity.Generation = identity.Generation
+		result.Identity.RuntimeProvider = identity.Provider
 		if validRuntimeDigest(identity.ImageDigest) {
 			result.Identity.ImageDigest = identity.ImageDigest
 		}
@@ -244,6 +247,18 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 		runtimeAfter = final.After
 		if runtimeErr := jobcontract.ValidateJSONDocument(runtimeAfter, jobcontract.MaximumManifestBytes); runtimeErr != nil {
 			finalErr = errors.Join(finalErr, runtimeErr)
+		}
+		if result.Identity.RuntimeProvider == "podman-cli" && finalErr == nil {
+			beforeObservation, beforeErr := jobcontract.ParseRuntimeObservation(runtimeBefore)
+			afterObservation, afterErr := jobcontract.ParseRuntimeObservation(runtimeAfter)
+			observationErr := errors.Join(beforeErr, afterErr)
+			if observationErr == nil {
+				observationErr = verifyRuntimeObservations(beforeObservation, afterObservation, result, request, prepared.Result, provenance)
+			}
+			if observationErr != nil {
+				finalErr = fmt.Errorf("runtime observation contract: %w", observationErr)
+				result.Reasons = appendReason(result.Reasons, "RUNTIME_OBSERVATION_INVALID")
+			}
 		}
 		if finalErr != nil {
 			result.Status = "incomplete"
