@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://idolum.ai/kenogram/schemas/kenogram.job-request.v1.schema.json",
+  "title": "Kenogram governed job request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "job_id", "declaration", "command", "limits"],
+  "properties": {
+    "schema": {"const": "kenogram.job-request.v1"},
+    "job_id": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$"},
+    "declaration": {"$ref": "#/$defs/declaration"},
+    "command": {"$ref": "#/$defs/command"},
+    "limits": {"$ref": "#/$defs/limits"},
+    "artifacts": {"$ref": "#/$defs/artifacts"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "absolute_path": {"type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^/[^\\u0000]*$"},
+    "declaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/absolute_path"},
+        "sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "environment_item": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "public_value"],
+          "properties": {
+            "name": {"$ref": "#/$defs/environment_name"},
+            "public_value": {"type": "string", "maxLength": 16384, "pattern": "^[^\\u0000]*$"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "secret_file"],
+          "properties": {
+            "name": {"$ref": "#/$defs/environment_name"},
+            "secret_file": {"$ref": "#/$defs/absolute_path"}
+          }
+        }
+      ]
+    },
+    "environment_name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"},
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv", "working_directory", "environment"],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000]+$"}
+        },
+        "working_directory": {"$ref": "#/$defs/absolute_path"},
+        "environment": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/environment_item"}
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout_ns", "finalize_timeout_ns", "stdout_max_bytes", "stderr_max_bytes"],
+      "properties": {
+        "timeout_ns": {"type": "integer", "minimum": 1000000, "maximum": 86400000000000},
+        "finalize_timeout_ns": {"type": "integer", "minimum": 1000000, "maximum": 600000000000},
+        "stdout_max_bytes": {"type": "integer", "minimum": 0, "maximum": 67108864},
+        "stderr_max_bytes": {"type": "integer", "minimum": 0, "maximum": 67108864}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["container_root", "max_entries", "max_bytes"],
+      "properties": {
+        "container_root": {"$ref": "#/$defs/absolute_path"},
+        "max_entries": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 1073741824}
+      }
+    }
+  }
+}

@@ -4,6 +4,10 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+- Reserve a bounded noninteractive governed-job and executable-provenance
+  contract with closed schemas, strict standard-library validators, explicit
+  pre-implementation status, and native non-Linux namespace refusals; no job
+  execution command or release claim is added yet.
 - Add a proof-only semantic reference for transactional cutover readiness,
   including bounded provider actions, rollback, pre-commit process death,
   inherited egress, and acknowledgement-only compatibility without adding a

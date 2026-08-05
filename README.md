@@ -190,6 +190,8 @@ engineering analogy, and its limits.
 - [Requirements and evidence](requirements/)
 - [Declaration schema](requirements/declaration.md)
 - [Operations and recovery](requirements/operations.md)
+- [Governed-job and evidence contract](requirements/jobs.md) — schemas and
+  validators only; the executor is not implemented yet.
 - [Contributing and evidence replay](CONTRIBUTING.md)
 - [Security policy and private reporting](.github/SECURITY.md)
 - [Release and immutable-publication contract](docs/release-strategy.md)
