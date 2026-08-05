@@ -76,7 +76,7 @@ func runGovernedJobHelper(args []string, stdin io.Reader, stderr io.Writer) (int
 		} else {
 			return 125, true
 		}
-		if err := joblifecycle.Write("/etc/kenogram/job-lifecycle/"+joblifecycle.FileName, record, lifecycleKey); err != nil {
+		if err := joblifecycle.WriteSlot("/etc/kenogram/target-lifecycle.json", record, lifecycleKey); err != nil {
 			fmt.Fprintln(stderr, "job target lifecycle could not be retained")
 			return 125, true
 		}

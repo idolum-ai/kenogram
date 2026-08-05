@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -27,6 +28,14 @@ type Record struct {
 	ExitStatus *int64 `json:"exit_status,omitempty"`
 	Signal     *int64 `json:"signal,omitempty"`
 	MAC        string `json:"mac"`
+}
+
+// FileIdentity binds a precreated lifecycle slot to the exact inode staged by
+// the host. The target-local helper may write that inode, but it may not create
+// a different path and have the host accept it as lifecycle authority.
+type FileIdentity struct {
+	Device uint64
+	Inode  uint64
 }
 
 type payload struct {
@@ -50,15 +59,10 @@ func Seal(record Record, key []byte) (Record, error) {
 }
 
 func Write(path string, record Record, key []byte) error {
-	sealed, err := Seal(record, key)
+	raw, err := encode(record, key)
 	if err != nil {
 		return err
 	}
-	raw, err := json.Marshal(sealed)
-	if err != nil {
-		return err
-	}
-	raw = append(raw, '\n')
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
@@ -69,11 +73,87 @@ func Write(path string, record Record, key []byte) error {
 	return errors.Join(err, file.Close())
 }
 
+// Prepare creates the one lifecycle inode that may be written across the
+// rootless user-namespace boundary. The host keeps its parent private and bind
+// mounts only this exact file into the contained process.
+func Prepare(path string) (FileIdentity, error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o622)
+	if err != nil {
+		return FileIdentity{}, err
+	}
+	if err = file.Chmod(0o622); err != nil {
+		return FileIdentity{}, errors.Join(err, file.Close())
+	}
+	if err = file.Sync(); err != nil {
+		return FileIdentity{}, errors.Join(err, file.Close())
+	}
+	info, statErr := file.Stat()
+	identity, identityErr := identityOf(info)
+	return identity, errors.Join(statErr, identityErr, file.Close())
+}
+
+// WriteSlot replaces the empty contents of a host-precreated regular file. It
+// never creates or follows a path supplied by the contained target.
+func WriteSlot(path string, record Record, key []byte) error {
+	raw, err := encode(record, key)
+	if err != nil {
+		return err
+	}
+	before, err := os.Lstat(path)
+	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() != 0 {
+		return errors.Join(err, errors.New("target lifecycle slot is not an empty regular file"))
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	opened, statErr := file.Stat()
+	if statErr != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return errors.Join(statErr, file.Close(), errors.New("target lifecycle slot identity changed before write"))
+	}
+	if _, err = file.Write(raw); err == nil {
+		err = file.Sync()
+	}
+	return errors.Join(err, file.Close())
+}
+
+func encode(record Record, key []byte) ([]byte, error) {
+	sealed, err := Seal(record, key)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(sealed)
+	if err != nil {
+		return nil, err
+	}
+	return append(raw, '\n'), nil
+}
+
 func Read(path string, key []byte) (Record, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return Record{}, err
 	}
+	return read(file, key)
+}
+
+// ReadSlot accepts lifecycle evidence only from the exact regular inode that
+// Prepare staged. O_NOFOLLOW and the identity comparison make symlink or path
+// substitution fail closed.
+func ReadSlot(path string, key []byte, expected FileIdentity) (Record, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return Record{}, err
+	}
+	info, statErr := file.Stat()
+	identity, identityErr := identityOf(info)
+	if statErr != nil || identityErr != nil || identity != expected {
+		return Record{}, errors.Join(statErr, identityErr, file.Close(), errors.New("target lifecycle slot identity changed"))
+	}
+	return read(file, key)
+}
+
+func read(file *os.File, key []byte) (Record, error) {
 	raw, readErr := io.ReadAll(io.LimitReader(file, MaximumBytes+1))
 	closeErr := file.Close()
 	if readErr != nil || closeErr != nil || len(raw) > MaximumBytes {
@@ -99,6 +179,17 @@ func Read(path string, key []byte) (Record, error) {
 	}
 	record.MAC = want
 	return record, nil
+}
+
+func identityOf(info os.FileInfo) (FileIdentity, error) {
+	if info == nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return FileIdentity{}, errors.New("target lifecycle slot is not a regular file")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return FileIdentity{}, errors.New("target lifecycle slot identity is unavailable")
+	}
+	return FileIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}, nil
 }
 
 func validate(record Record, key []byte, requireMAC bool) error {

@@ -122,7 +122,7 @@ func fakeRuntimeObservation(invocation Invocation, phase string) []byte {
 	running := phase == "before"
 	mounts := []jobcontract.RuntimeMountObservation{
 		{Role: "helper", Source: source("helper", "/etc/kenogram/job-exec", "ro", "", invocation.Provenance.ExecutableSHA256), Target: "/etc/kenogram/job-exec", Mode: "ro", Device: 1, Inode: 1, FileType: "file", SHA256: invocation.Provenance.ExecutableSHA256, IdentityVerified: true},
-		{Role: "lifecycle", Source: source("lifecycle", "/etc/kenogram/job-lifecycle", "rw", "", ""), Target: "/etc/kenogram/job-lifecycle", Mode: "rw", Device: 1, Inode: 2, FileType: "directory", IdentityVerified: true},
+		{Role: "lifecycle", Source: source("lifecycle", "/etc/kenogram/target-lifecycle.json", "rw", "", ""), Target: "/etc/kenogram/target-lifecycle.json", Mode: "rw", Device: 1, Inode: 2, FileType: "file", IdentityVerified: true},
 	}
 	for index, target := range invocation.Prepared.Result.Plan.Workspace {
 		mounts = append(mounts, jobcontract.RuntimeMountObservation{Role: "workspace", Source: source("workspace", target, "rw", "", ""), Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 3), FileType: "directory", IdentityVerified: true})
@@ -323,6 +323,13 @@ func TestRuntimeVerifierCrossBindsDeclaredMountSourcesAndRuntimeRoles(t *testing
 				}
 			}
 		}, want: "helper mount is not a file"},
+		{name: "lifecycle type substitution", mutate: func(value *jobcontract.RuntimeObservation) {
+			for index := range value.Mounts {
+				if value.Mounts[index].Role == "lifecycle" {
+					value.Mounts[index].FileType = "directory"
+				}
+			}
+		}, want: "lifecycle mount is not a file"},
 		{name: "declared type substitution", mutate: func(value *jobcontract.RuntimeObservation) {
 			for index := range value.Mounts {
 				if value.Mounts[index].Role == "declared" {

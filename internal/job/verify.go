@@ -225,11 +225,11 @@ func verifyRuntimeObservations(before, after jobcontract.RuntimeObservation, res
 			return fmt.Errorf("runtime mount %q semantic source is invalid", mount.Target)
 		}
 		switch mount.Role {
-		case "helper":
+		case "helper", "lifecycle":
 			if mount.FileType != "file" {
-				return errors.New("runtime helper mount is not a file")
+				return fmt.Errorf("runtime %s mount is not a file", mount.Role)
 			}
-		case "workspace", "lifecycle":
+		case "workspace":
 			if mount.FileType != "directory" {
 				return fmt.Errorf("runtime %s mount is not a directory", mount.Role)
 			}
@@ -248,7 +248,7 @@ func verifyRuntimeObservations(before, after jobcontract.RuntimeObservation, res
 }
 
 const jobHelperPathForVerification = "/etc/kenogram/job-exec"
-const jobLifecyclePathForVerification = "/etc/kenogram/job-lifecycle"
+const jobLifecyclePathForVerification = "/etc/kenogram/target-lifecycle.json"
 
 type evidenceKindBound struct {
 	kind string

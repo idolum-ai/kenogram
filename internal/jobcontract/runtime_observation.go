@@ -35,7 +35,7 @@ func ValidateRuntimeObservation(value RuntimeObservation) error {
 	seen := map[string]struct{}{}
 	for _, mount := range value.Mounts {
 		validRole := mount.Role == "declared" || mount.Role == "workspace" || mount.Role == "helper" || mount.Role == "lifecycle"
-		validRoleType := mount.Role == "declared" || (mount.Role == "helper" && mount.FileType == "file") || ((mount.Role == "workspace" || mount.Role == "lifecycle") && mount.FileType == "directory")
+		validRoleType := mount.Role == "declared" || ((mount.Role == "helper" || mount.Role == "lifecycle") && mount.FileType == "file") || (mount.Role == "workspace" && mount.FileType == "directory")
 		validContent := (mount.Mode == "ro" && runtimeHexDigest.MatchString(mount.SHA256)) || (mount.Mode == "rw" && mount.SHA256 == "")
 		validAuthority := (mount.Role == "declared" && filepath.IsAbs(mount.AuthoritySource) && filepath.Clean(mount.AuthoritySource) == mount.AuthoritySource) || (mount.Role != "declared" && mount.AuthoritySource == "")
 		expectedSource, sourceErr := RuntimeMountSource(mount.Role, mount.Target, mount.Mode, mount.AuthoritySource, mount.SHA256)

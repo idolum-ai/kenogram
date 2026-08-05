@@ -37,7 +37,7 @@ import (
 const generation = int64(1)
 
 const jobHelperPath = "/etc/kenogram/job-exec"
-const jobLifecyclePath = "/etc/kenogram/job-lifecycle"
+const jobLifecyclePath = "/etc/kenogram/target-lifecycle.json"
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var containerIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -108,6 +108,7 @@ type Runtime struct {
 	mountFacts    []jobcontract.RuntimeMountObservation
 	lifecycleKey  []byte
 	lifecycleFile string
+	lifecycleID   joblifecycle.FileIdentity
 	forced        bool
 	started       bool
 }
@@ -181,6 +182,11 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if err := os.Mkdir(lifecycleHost, 0o700); err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
+	lifecycleFile := filepath.Join(lifecycleHost, joblifecycle.FileName)
+	lifecycleID, err := joblifecycle.Prepare(lifecycleFile)
+	if err != nil {
+		return r.refuseBeforeAdmission(fmt.Errorf("prepare target lifecycle slot: %w", err))
+	}
 	lifecycleKey := make([]byte, jobenv.LifecycleKeyBytes)
 	if _, err := rand.Read(lifecycleKey); err != nil {
 		return r.refuseBeforeAdmission(err)
@@ -207,7 +213,9 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
-	mounts = append(mounts, backend.Mount{Source: helperSource, Target: jobHelperPath, Mode: "ro"}, backend.Mount{Source: lifecycleHost, Target: jobLifecyclePath, Mode: "rw", NoExec: true})
+	// Mount only the precreated file. The contained process gets no writable
+	// directory in which it could replace the slot or create unbounded state.
+	mounts = append(mounts, backend.Mount{Source: helperSource, Target: jobHelperPath, Mode: "ro"}, backend.Mount{Source: lifecycleFile, Target: jobLifecyclePath, Mode: "rw", NoExec: true})
 	if err := validateBackendMountPaths(mounts); err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
@@ -236,7 +244,7 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 		return r.refuseBeforeAdmission(fmt.Errorf("ephemeral container name %q already exists", name))
 	}
 	r.mu.Lock()
-	r.mountFacts, r.mounts, r.lifecycleKey, r.lifecycleFile = mountFacts, append([]backend.Mount{}, mounts...), append([]byte{}, lifecycleKey...), filepath.Join(lifecycleHost, joblifecycle.FileName)
+	r.mountFacts, r.mounts, r.lifecycleKey, r.lifecycleFile, r.lifecycleID = mountFacts, append([]backend.Mount{}, mounts...), append([]byte{}, lifecycleKey...), lifecycleFile, lifecycleID
 	r.mu.Unlock()
 	ownerLabels := map[string]string{"io.kenogram.job-owner": ownerToken, "io.kenogram.job-id": invocation.Request.JobID}
 	providerPlan := publicProviderPlan(invocation.Prepared.Result)
@@ -448,9 +456,10 @@ type process struct {
 	done       chan error
 	clientDone chan struct{}
 
-	mu      sync.Mutex
-	waited  bool
-	waitErr error
+	mu                sync.Mutex
+	waited            bool
+	waitErr           error
+	lifecycleObserved bool
 }
 
 func (p *process) Identity(ctx context.Context) (job.RuntimeIdentity, error) {
@@ -499,7 +508,7 @@ func (p *process) recordTerminal(err error) (jobcontract.TargetResult, error) {
 		p.mu.Unlock()
 		return jobcontract.TargetResult{Kind: "unknown"}, err
 	}
-	record, readErr := joblifecycle.Read(p.runtime.lifecycleFile, p.runtime.lifecycleKey)
+	record, readErr := joblifecycle.ReadSlot(p.runtime.lifecycleFile, p.runtime.lifecycleKey, p.runtime.lifecycleID)
 	if readErr != nil {
 		p.mu.Lock()
 		p.waited, p.waitErr = true, readErr
@@ -511,7 +520,7 @@ func (p *process) recordTerminal(err error) (jobcontract.TargetResult, error) {
 		result.Kind = "signaled"
 	}
 	p.mu.Lock()
-	p.waited, p.waitErr = true, nil
+	p.waited, p.waitErr, p.lifecycleObserved = true, nil, true
 	p.mu.Unlock()
 	return result, nil
 }
@@ -552,6 +561,14 @@ func (p *process) Finalize(ctx context.Context) (job.RuntimeFinalization, error)
 	}
 	if err := verifyMountFacts(ctx, p.runtime.mountFacts, p.runtime.mounts); err != nil {
 		return job.RuntimeFinalization{}, err
+	}
+	p.mu.Lock()
+	lifecycleObserved := p.lifecycleObserved
+	p.mu.Unlock()
+	if lifecycleObserved {
+		if _, err := joblifecycle.ReadSlot(p.runtime.lifecycleFile, p.runtime.lifecycleKey, p.runtime.lifecycleID); err != nil {
+			return job.RuntimeFinalization{}, fmt.Errorf("target-local lifecycle changed before finalization: %w", err)
+		}
 	}
 	after, err := runtimeEvidence("after", p.runtime.now().UTC(), evidence, p.invocation, p.identity.ImageDigest, p.runtime.mountFacts)
 	if err != nil {

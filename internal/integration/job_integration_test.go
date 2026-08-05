@@ -108,14 +108,30 @@ secret = true
 		assertNoOwnedContainers(t, tmp, jobID)
 	})
 
+	t.Run("keep-id declared user writes the bounded lifecycle slot", func(t *testing.T) {
+		jobID := "direct-provider-keep-id-user"
+		cleanupJobContainers(t, jobID)
+		declarationPath, declarationRaw := writeJobDeclarationForUser(t, tmp, imageID, fmt.Sprint(os.Getuid()), "")
+		request := governedRequest(jobID, declarationPath, declarationRaw, []string{"/usr/local/bin/job-target", "--success"})
+		result, evidenceDir := runGovernedJob(t, tmp, bin, request, false)
+		if result.Status != "complete" || result.Target.ExitStatus == nil || *result.Target.ExitStatus != 0 {
+			t.Fatalf("result=%#v", result)
+		}
+		assertVerifiedJob(t, tmp, bin, evidenceDir, "complete")
+		assertNoOwnedContainers(t, tmp, jobID)
+	})
+
 	t.Run("timeout kills orphan and seals unknown", func(t *testing.T) {
 		jobID := "direct-provider-timeout"
 		cleanupJobContainers(t, jobID)
 		declarationPath, declarationRaw := writeJobDeclaration(t, tmp, imageID, "")
 		request := governedRequest(jobID, declarationPath, declarationRaw, []string{"/usr/local/bin/job-target", "--hang-orphan"})
-		request.Limits.TimeoutNS = int64(750 * time.Millisecond)
+		// Cold hosted Podman admission can exceed a sub-second target budget.
+		// Keep this bounded while leaving enough room to prove admission before
+		// the intentionally hanging target consumes the remaining deadline.
+		request.Limits.TimeoutNS = int64(10 * time.Second)
 		result, evidenceDir := runGovernedJob(t, tmp, bin, request, true)
-		if result.Status != "incomplete" || result.Target.Kind != "unknown" || result.Cleanup.Status != "complete" || !result.Cleanup.ProcessGroupEmpty {
+		if result.Status != "incomplete" || result.Target.Kind != "unknown" || result.Cleanup.Status != "complete" || !result.Cleanup.ProcessGroupEmpty || result.Identity.Generation != 1 || result.Identity.RuntimeProvider != "podman-cli" || result.Identity.ImageDigest == "" {
 			t.Fatalf("result=%#v", result)
 		}
 		assertVerifiedJob(t, tmp, bin, evidenceDir, "incomplete")
@@ -124,6 +140,10 @@ secret = true
 }
 
 func writeJobDeclaration(t *testing.T, dir, imageID, extra string) (string, []byte) {
+	return writeJobDeclarationForUser(t, dir, imageID, "0", extra)
+}
+
+func writeJobDeclarationForUser(t *testing.T, dir, imageID, user, extra string) (string, []byte) {
 	t.Helper()
 	path := filepath.Join(dir, "kenogram-"+fmt.Sprint(time.Now().UnixNano())+".toml")
 	raw := []byte(fmt.Sprintf(`version = 1
@@ -132,14 +152,14 @@ name = "job-integration"
 hostname = "job-integration"
 base = %q
 workdir = "/workspace"
-user = "0"
+user = %q
 [resources]
 cpus = 1
 memory_bytes = 268435456
 pids = 64
 [workspace]
 paths = ["/workspace"]
-%s`, imageID, extra))
+%s`, imageID, user, extra))
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}

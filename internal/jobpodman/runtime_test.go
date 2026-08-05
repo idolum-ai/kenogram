@@ -63,7 +63,10 @@ func (f *fakeAttachedProcess) finish(err error) {
 	f.once.Do(func() {
 		if err == nil && f.lifecyclePath != "" {
 			status := int64(0)
-			_ = joblifecycle.Write(f.lifecyclePath, joblifecycle.Record{Schema: joblifecycle.Schema, StartedAt: "2026-08-05T12:00:00Z", FinishedAt: "2026-08-05T12:00:01Z", DurationNS: int64(time.Second), ExitStatus: &status}, f.lifecycleKey)
+			writeErr := joblifecycle.WriteSlot(f.lifecyclePath, joblifecycle.Record{Schema: joblifecycle.Schema, StartedAt: "2026-08-05T12:00:00Z", FinishedAt: "2026-08-05T12:00:01Z", DurationNS: int64(time.Second), ExitStatus: &status}, f.lifecycleKey)
+			if writeErr != nil {
+				err = writeErr
+			}
 		}
 		f.done <- err
 	})
@@ -1057,14 +1060,94 @@ func TestAuthenticatedLifecyclePreservesProviderReservedTargetExit(t *testing.T)
 	key := bytes.Repeat([]byte{9}, 32)
 	status := int64(125)
 	path := filepath.Join(dir, joblifecycle.FileName)
-	if err := joblifecycle.Write(path, joblifecycle.Record{Schema: joblifecycle.Schema, StartedAt: "2026-08-05T12:00:00Z", FinishedAt: "2026-08-05T12:00:01Z", DurationNS: int64(time.Second), ExitStatus: &status}, key); err != nil {
+	identity, err := joblifecycle.Prepare(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	p := &process{runtime: &Runtime{lifecycleFile: path, lifecycleKey: key}}
+	if err := joblifecycle.WriteSlot(path, joblifecycle.Record{Schema: joblifecycle.Schema, StartedAt: "2026-08-05T12:00:00Z", FinishedAt: "2026-08-05T12:00:01Z", DurationNS: int64(time.Second), ExitStatus: &status}, key); err != nil {
+		t.Fatal(err)
+	}
+	p := &process{runtime: &Runtime{lifecycleFile: path, lifecycleKey: key, lifecycleID: identity}}
 	target, err := p.recordTerminal(nil)
 	if err != nil || target.ExitStatus == nil || *target.ExitStatus != 125 {
 		t.Fatalf("target=%#v error=%v", target, err)
 	}
+}
+
+func TestDirectRuntimeStagesOnlyOneWritableLifecycleInode(t *testing.T) {
+	runtime, _, attached, invocation := runtimeFixture(t)
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.Stat(filepath.Dir(runtime.lifecycleFile))
+	if err != nil || parent.Mode().Perm() != 0o700 {
+		t.Fatalf("parent=%v error=%v", parent, err)
+	}
+	slot, err := os.Lstat(runtime.lifecycleFile)
+	if err != nil || !slot.Mode().IsRegular() || slot.Mode().Perm() != 0o622 || slot.Size() != 0 {
+		t.Fatalf("slot=%v error=%v", slot, err)
+	}
+	var observed bool
+	for _, mount := range runtime.mounts {
+		if mount.Target == jobLifecyclePath {
+			observed = mount.Source == runtime.lifecycleFile && mount.Mode == "rw" && mount.NoExec
+		}
+	}
+	if !observed {
+		t.Fatalf("exact lifecycle file mount is absent: %#v", runtime.mounts)
+	}
+	attached.finish(nil)
+	if _, err := process.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+}
+
+func TestDirectRuntimeLifecycleTamperingFailsClosed(t *testing.T) {
+	t.Run("prewrite", func(t *testing.T) {
+		runtime, _, attached, invocation := runtimeFixture(t)
+		process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(runtime.lifecycleFile, []byte("target prewrite"), 0o622); err != nil {
+			t.Fatal(err)
+		}
+		attached.finish(nil)
+		if target, err := process.Wait(context.Background()); err == nil || target.Kind != "unknown" {
+			t.Fatalf("target=%#v error=%v", target, err)
+		}
+		if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" {
+			t.Fatalf("cleanup=%#v", cleanup)
+		}
+	})
+
+	t.Run("after observation", func(t *testing.T) {
+		runtime, _, attached, invocation := runtimeFixture(t)
+		process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		attached.finish(nil)
+		if _, err := process.Wait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(runtime.lifecycleFile, []byte("orphan corruption"), 0o622); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := process.Finalize(context.Background()); err == nil || !strings.Contains(err.Error(), "lifecycle changed") {
+			t.Fatalf("error=%v", err)
+		}
+		if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" {
+			t.Fatalf("cleanup=%#v", cleanup)
+		}
+	})
 }
 
 func TestDirectRuntimeReportsUnprovenCleanupAbsence(t *testing.T) {
