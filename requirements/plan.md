@@ -6,9 +6,10 @@ Planning resolves source paths relative to the declaration directory and cleans
 all absolute target paths. A semantic plan is encoded as JSON from fixed-order
 struct fields. Declaration formatting and comments cannot affect this encoding.
 Copied source files and trees are deterministically content-digested into the
-plan; changing configuration bytes changes its exact fingerprint. Live mounts
-and carried workspace are evidenced separately because their bytes intentionally
-drift.
+plan; changing configuration bytes changes its exact fingerprint. A live mount's
+resolved authority path, target, mode, and planned file-or-directory source type
+are semantic fields. Live mount bytes and carried workspace are evidenced
+separately because their contents intentionally drift.
 
 Named loopback interfaces are semantic plan fields. Changing a name or address
 therefore changes the plan digest and requires ordinary generation replacement.

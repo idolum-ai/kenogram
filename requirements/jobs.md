@@ -81,6 +81,8 @@ The caller supplies a request no larger than 1 MiB. It contains:
 - an absolute, canonical container working directory;
 - at most 128 unique environment names, each bound either to an explicitly
   retained public value or an in-world declaration-owned secret-file path;
+- at most 512 runtime mounts in total, including every declared mount,
+  workspace, and the two Kenogram-owned helper and lifecycle mounts;
 - a target timeout from 1 ms through 24 hours;
 - a finalization timeout from 1 ms through 10 minutes;
 - independent stdout and stderr capture limits up to 64 MiB each; and
@@ -99,7 +101,11 @@ that Kenogram can stop a target from printing its own secrets.
 Every `secret_file` must match exactly one copy target whose declaration marks
 it `secret = true`. The retained plan replaces that copy's source digest with
 `<redacted>` and binds the projection through `evidence_digest`; secret bytes
-and their content digests are not needed by the offline verifier.
+and their content digests are not needed by the offline verifier. At execution,
+Kenogram opens the source once, bounds and reads that descriptor, derives the
+canonical plan-copy digest from exactly those bytes and that descriptor's mode,
+compares it with the operational plan digest, and delivers those same bytes.
+Replacing the source pathname after open cannot substitute the delivered value.
 
 The request never inherits ambient command, environment, timeout, output, or
 artifact authority. A consumer may refuse a request it cannot implement; it
@@ -264,11 +270,20 @@ Every container uses `network=none`; a request with `network.allow` is refused
 rather than silently broadened. The target command is absolute and its requested
 working directory must equal the declared world workdir, keeping the inspected
 configuration and execution authority identical. Declared bind mounts have
-source device, inode, and type captured before creation. Read-only inputs and
-the staged helper additionally receive a bounded content digest that is
-revalidated immediately before target admission and again before finalization
-use. Target-writable workspace and lifecycle directories intentionally carry no
-unchanged-content claim and are never recursively hashed during finalization.
+their file-or-directory type retained in the plan. Every declared read-only
+source is copied under bounded entry and byte limits into a create-only,
+Kenogram-owned scratch snapshot before provider use. Provider mounts and runtime
+content facts refer to that snapshot; a separate `authority_source` binds it to
+the declaration path. The original and snapshot digests must agree across the
+copy, and the snapshot is revalidated immediately before target admission and
+again before finalization. A declared writable source may not be the same inode
+as, or canonically overlap, any declared read-only source. Target-writable
+workspace and lifecycle directories intentionally carry no unchanged-content
+claim and are never recursively hashed during finalization. Offline verification
+requires helper mounts to be files, workspace and lifecycle mounts to be
+directories, and each declared mount type to equal the type retained in the
+plan. The admitted and retained runtime inventories share the same 512-mount
+bound.
 Mounts retain their exact read-only/read-write mode and cannot overlap known
 Podman or Docker control sockets. Runtime memory, CPU, PID, user, namespace, capability,
 seccomp, image, mount, and ownership facts are independently inspected before

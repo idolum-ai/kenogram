@@ -15,6 +15,7 @@ const (
 	MaximumManifestBytes   = 8 << 20
 	MaximumProvenanceBytes = 64 << 10
 	MaximumWireInteger     = int64(9_007_199_254_740_991)
+	MaxRuntimeMounts       = 512
 )
 
 type Request struct {
@@ -186,6 +187,7 @@ type RuntimeObservation struct {
 
 type RuntimeMountObservation struct {
 	Role             string `json:"role"`
+	AuthoritySource  string `json:"authority_source,omitempty"`
 	Source           string `json:"source"`
 	Target           string `json:"target"`
 	Mode             string `json:"mode"`

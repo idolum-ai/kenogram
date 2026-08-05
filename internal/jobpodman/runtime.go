@@ -141,6 +141,12 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if invocation.Request.Command.WorkingDirectory != invocation.Prepared.Result.Plan.World.Workdir {
 		return nil, errors.New("direct governed jobs require the declared world working directory")
 	}
+	if err := validateRuntimeMountCount(len(invocation.Prepared.Result.Plan.Workspace), len(invocation.Prepared.Result.Plan.Mounts)); err != nil {
+		return nil, err
+	}
+	if err := validateReadOnlyWritableAliases(invocation.Prepared.Result.Plan.Mounts); err != nil {
+		return nil, err
+	}
 	if err := r.Podman.Preflight(ctx); err != nil {
 		return nil, fmt.Errorf("runtime preflight: %w", err)
 	}
@@ -183,6 +189,10 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
+	readOnlySnapshots, err := snapshotReadOnlyMounts(ctx, scratch, invocation.Prepared.Result.Plan.Mounts)
+	if err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
 	helperSource, helperFact, err := stageHelper(ctx, r.executable, scratch)
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
@@ -193,7 +203,7 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	r.mu.Lock()
 	r.helperSource = helperSource
 	r.mu.Unlock()
-	mounts, err := jobMounts(layout, invocation.Prepared.Result)
+	mounts, err := jobMounts(layout, invocation.Prepared.Result, readOnlySnapshots)
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
@@ -577,21 +587,21 @@ func targetEnvironment(invocation job.Invocation, lifecycleKey []byte) ([]byte, 
 }
 
 func readSecretSource(copy plan.Copy) ([]byte, error) {
-	before, err := os.Lstat(copy.Source)
-	if err != nil || !before.Mode().IsRegular() {
-		return nil, errors.New("secret environment source is not a regular file")
-	}
-	if observed, err := plan.DigestSource(copy.Source); err != nil || observed != copy.SourceDigest {
-		return nil, errors.New("secret environment source changed after planning")
-	}
+	return readSecretSourceWithHook(copy, nil)
+}
+
+func readSecretSourceWithHook(copy plan.Copy, afterOpen func()) ([]byte, error) {
 	file, err := os.Open(copy.Source)
 	if err != nil {
 		return nil, errors.New("open secret environment source")
 	}
 	defer file.Close()
 	opened, err := file.Stat()
-	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		return nil, errors.New("secret environment source changed during open")
+	if err != nil || !opened.Mode().IsRegular() || opened.Size() < 0 || opened.Size() > jobenv.MaximumValueBytes {
+		return nil, errors.New("opened secret environment source is not a bounded regular file")
+	}
+	if afterOpen != nil {
+		afterOpen()
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, jobenv.MaximumValueBytes+1))
 	if err != nil || len(raw) > jobenv.MaximumValueBytes || bytes.IndexByte(raw, 0) >= 0 {
@@ -601,8 +611,8 @@ func readSecretSource(copy plan.Copy) ([]byte, error) {
 	if err != nil || !os.SameFile(opened, after) || opened.Size() != after.Size() || !opened.ModTime().Equal(after.ModTime()) {
 		return nil, errors.New("secret environment source changed during read")
 	}
-	if observed, err := plan.DigestSource(copy.Source); err != nil || observed != copy.SourceDigest {
-		return nil, errors.New("secret environment source changed after read")
+	if observed := plan.DigestRegularCopyBytes(raw, opened.Mode()); observed != copy.SourceDigest {
+		return nil, errors.New("opened secret environment bytes disagree with planned copy identity")
 	}
 	return raw, nil
 }
@@ -964,17 +974,191 @@ func stageHelper(ctx context.Context, resolve func() (string, error), scratch st
 	if err := os.Chmod(target, 0o555); err != nil {
 		return "", jobcontract.RuntimeMountObservation{}, err
 	}
-	fact, err := captureSourceFact(ctx, target, jobHelperPath, "ro", "helper", true)
+	fact, err := captureSourceFact(ctx, target, "", jobHelperPath, "ro", "helper", true)
 	if err != nil {
 		return "", jobcontract.RuntimeMountObservation{}, err
 	}
 	return target, fact, nil
 }
 
+func validateRuntimeMountCount(workspaces, declared int) error {
+	const owned = 2
+	if workspaces < 0 || declared < 0 || workspaces > jobcontract.MaxRuntimeMounts-owned || declared > jobcontract.MaxRuntimeMounts-owned-workspaces {
+		return fmt.Errorf("runtime mount count exceeds %d", jobcontract.MaxRuntimeMounts)
+	}
+	return nil
+}
+
+func validateReadOnlyWritableAliases(mounts []plan.Mount) error {
+	for left := range mounts {
+		for right := left + 1; right < len(mounts); right++ {
+			if mounts[left].Mode == mounts[right].Mode {
+				continue
+			}
+			leftInfo, leftErr := os.Lstat(mounts[left].Source)
+			rightInfo, rightErr := os.Lstat(mounts[right].Source)
+			if leftErr != nil || rightErr != nil {
+				return errors.Join(leftErr, rightErr)
+			}
+			same := os.SameFile(leftInfo, rightInfo)
+			overlap := hostPathsOverlap(canonicalHostPath(mounts[left].Source), canonicalHostPath(mounts[right].Source))
+			if same || overlap {
+				return fmt.Errorf("read-only and writable mount sources overlap at %q and %q", mounts[left].Source, mounts[right].Source)
+			}
+		}
+	}
+	return nil
+}
+
+func snapshotReadOnlyMounts(ctx context.Context, scratch string, mounts []plan.Mount) (map[string]string, error) {
+	result := map[string]string{}
+	root := filepath.Join(scratch, "read-only-mounts")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		return nil, err
+	}
+	for index, mount := range mounts {
+		if mount.Mode != "ro" {
+			continue
+		}
+		info, err := os.Lstat(mount.Source)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("read-only mount %q source is invalid", mount.Target)
+		}
+		observedType := "file"
+		if info.IsDir() {
+			observedType = "directory"
+		}
+		if observedType != mount.SourceType {
+			return nil, fmt.Errorf("read-only mount %q source type changed", mount.Target)
+		}
+		before, err := boundedSourceContentDigest(ctx, mount.Source, info)
+		if err != nil {
+			return nil, err
+		}
+		destination := filepath.Join(root, fmt.Sprintf("%03d", index))
+		if err := copyReadOnlySnapshot(ctx, mount.Source, destination, info); err != nil {
+			return nil, err
+		}
+		afterInfo, err := os.Lstat(mount.Source)
+		if err != nil || !os.SameFile(info, afterInfo) {
+			return nil, errors.New("read-only mount source changed during snapshot")
+		}
+		after, err := boundedSourceContentDigest(ctx, mount.Source, afterInfo)
+		if err != nil {
+			return nil, err
+		}
+		stagedInfo, err := os.Lstat(destination)
+		if err != nil {
+			return nil, err
+		}
+		staged, err := boundedSourceContentDigest(ctx, destination, stagedInfo)
+		if err != nil {
+			return nil, err
+		}
+		if before != after || before != staged {
+			return nil, fmt.Errorf("read-only mount %q changed during immutable snapshot", mount.Target)
+		}
+		result[mount.Target] = destination
+	}
+	return result, nil
+}
+
+func copyReadOnlySnapshot(ctx context.Context, source, destination string, rootInfo fs.FileInfo) error {
+	if rootInfo.Mode().IsRegular() {
+		return copySnapshotFile(ctx, source, destination, rootInfo)
+	}
+	if !rootInfo.IsDir() {
+		return errors.New("read-only snapshot source has unsupported type")
+	}
+	type directoryMode struct {
+		path string
+		mode fs.FileMode
+	}
+	directories := []directoryMode{}
+	var nodes, total int64
+	err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		nodes++
+		if nodes > 20_000 {
+			return errors.New("read-only snapshot exceeds entry bound")
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := destination
+		if rel != "." {
+			target = filepath.Join(destination, rel)
+		}
+		switch {
+		case info.IsDir():
+			if err := os.Mkdir(target, 0o700); err != nil {
+				return err
+			}
+			directories = append(directories, directoryMode{target, info.Mode().Perm()})
+		case info.Mode().IsRegular():
+			if info.Size() < 0 || info.Size() > (1<<30)-total {
+				return errors.New("read-only snapshot exceeds byte bound")
+			}
+			if err := copySnapshotFile(ctx, path, target, info); err != nil {
+				return err
+			}
+			total += info.Size()
+		default:
+			return fmt.Errorf("read-only snapshot contains unsupported node %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for index := len(directories) - 1; index >= 0; index-- {
+		if err := os.Chmod(directories[index].path, directories[index].mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copySnapshotFile(ctx context.Context, source, destination string, expected fs.FileInfo) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	opened, err := input.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(expected, opened) {
+		input.Close()
+		return errors.New("read-only snapshot file changed during open")
+	}
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		input.Close()
+		return err
+	}
+	written, copyErr := io.Copy(output, &contextReader{ctx: ctx, reader: io.LimitReader(input, opened.Size()+1)})
+	after, statErr := input.Stat()
+	closeInputErr := input.Close()
+	syncErr := output.Sync()
+	closeOutputErr := output.Close()
+	if copyErr != nil || statErr != nil || closeInputErr != nil || syncErr != nil || closeOutputErr != nil || written != opened.Size() || !os.SameFile(opened, after) || after.Size() != opened.Size() || !after.ModTime().Equal(opened.ModTime()) {
+		return errors.Join(copyErr, statErr, closeInputErr, syncErr, closeOutputErr, errors.New("read-only snapshot file changed during copy"))
+	}
+	return os.Chmod(destination, opened.Mode().Perm())
+}
+
 func captureMountFacts(ctx context.Context, mounts []backend.Mount, result plan.Result) ([]jobcontract.RuntimeMountObservation, error) {
 	facts := make([]jobcontract.RuntimeMountObservation, 0, len(mounts))
 	for _, mount := range mounts {
-		role := ""
+		role, authoritySource := "", ""
 		switch mount.Target {
 		case jobHelperPath:
 			role = "helper"
@@ -987,15 +1171,16 @@ func captureMountFacts(ctx context.Context, mounts []backend.Mount, result plan.
 				}
 			}
 			for _, declared := range result.Plan.Mounts {
-				if mount.Target == declared.Target && mount.Source == declared.Source && mount.Mode == declared.Mode {
+				if mount.Target == declared.Target && mount.Mode == declared.Mode {
 					role = "declared"
+					authoritySource = declared.Source
 				}
 			}
 		}
 		if role == "" {
 			return nil, fmt.Errorf("mount %q has no retained authority role", mount.Target)
 		}
-		fact, err := captureSourceFact(ctx, mount.Source, mount.Target, mount.Mode, role, mount.Mode == "ro")
+		fact, err := captureSourceFact(ctx, mount.Source, authoritySource, mount.Target, mount.Mode, role, mount.Mode == "ro")
 		if err != nil {
 			return nil, fmt.Errorf("capture mount %q identity: %w", mount.Target, err)
 		}
@@ -1005,7 +1190,7 @@ func captureMountFacts(ctx context.Context, mounts []backend.Mount, result plan.
 	return facts, nil
 }
 
-func captureSourceFact(ctx context.Context, source, target, mode, role string, content bool) (jobcontract.RuntimeMountObservation, error) {
+func captureSourceFact(ctx context.Context, source, authoritySource, target, mode, role string, content bool) (jobcontract.RuntimeMountObservation, error) {
 	before, err := os.Lstat(source)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || (!before.IsDir() && !before.Mode().IsRegular()) {
 		return jobcontract.RuntimeMountObservation{}, errors.New("source is not a regular non-symlink file or directory")
@@ -1026,7 +1211,7 @@ func captureSourceFact(ctx context.Context, source, target, mode, role string, c
 	if before.IsDir() {
 		fileType = "directory"
 	}
-	return jobcontract.RuntimeMountObservation{Role: role, Source: filepath.Clean(source), Target: target, Mode: mode, Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: fileType, SHA256: digest, IdentityVerified: true}, nil
+	return jobcontract.RuntimeMountObservation{Role: role, AuthoritySource: authoritySource, Source: filepath.Clean(source), Target: target, Mode: mode, Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: fileType, SHA256: digest, IdentityVerified: true}, nil
 }
 
 func boundedSourceContentDigest(ctx context.Context, source string, info fs.FileInfo) (string, error) {
@@ -1135,15 +1320,15 @@ func boundedDirectoryDigest(ctx context.Context, root string) (string, error) {
 
 func verifyMountFacts(ctx context.Context, facts []jobcontract.RuntimeMountObservation) error {
 	for _, expected := range facts {
-		observed, err := captureSourceFact(ctx, expected.Source, expected.Target, expected.Mode, expected.Role, expected.SHA256 != "")
-		if err != nil || observed.Device != expected.Device || observed.Inode != expected.Inode || observed.FileType != expected.FileType || observed.Role != expected.Role || observed.SHA256 != expected.SHA256 {
+		observed, err := captureSourceFact(ctx, expected.Source, expected.AuthoritySource, expected.Target, expected.Mode, expected.Role, expected.SHA256 != "")
+		if err != nil || observed.Device != expected.Device || observed.Inode != expected.Inode || observed.FileType != expected.FileType || observed.Role != expected.Role || observed.AuthoritySource != expected.AuthoritySource || observed.SHA256 != expected.SHA256 {
 			return fmt.Errorf("mount %q source identity changed", expected.Target)
 		}
 	}
 	return nil
 }
 
-func jobMounts(layout worldfs.Layout, result plan.Result) ([]backend.Mount, error) {
+func jobMounts(layout worldfs.Layout, result plan.Result, readOnlySnapshots map[string]string) ([]backend.Mount, error) {
 	mounts := []backend.Mount{}
 	targets := []string{jobHelperPath, jobLifecyclePath}
 	for _, target := range result.Plan.Workspace {
@@ -1164,10 +1349,39 @@ func jobMounts(layout worldfs.Layout, result plan.Result) ([]backend.Mount, erro
 		if err := validateMountSource(mount.Source); err != nil {
 			return nil, fmt.Errorf("runtime control socket mount is forbidden: %s", mount.Source)
 		}
-		mounts = append(mounts, backend.Mount{Source: mount.Source, Target: mount.Target, Mode: mount.Mode})
+		observedType, err := runtimeMountSourceType(mount.Source)
+		if err != nil || observedType != mount.SourceType {
+			return nil, fmt.Errorf("mount %q source type changed after planning", mount.Target)
+		}
+		source := mount.Source
+		if mount.Mode == "ro" {
+			var ok bool
+			source, ok = readOnlySnapshots[mount.Target]
+			if !ok {
+				return nil, fmt.Errorf("read-only mount %q lacks an immutable snapshot", mount.Target)
+			}
+		}
+		mounts = append(mounts, backend.Mount{Source: source, Target: mount.Target, Mode: mount.Mode})
 		targets = append(targets, mount.Target)
 	}
 	return mounts, nil
+}
+
+func runtimeMountSourceType(source string) (string, error) {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("mount source is a symlink")
+	}
+	if info.IsDir() {
+		return "directory", nil
+	}
+	if info.Mode().IsRegular() {
+		return "file", nil
+	}
+	return "", errors.New("mount source is neither a regular file nor a directory")
 }
 
 func overlappingContainerTarget(candidate string, existing []string) bool {

@@ -45,6 +45,24 @@ func TestBuildDigestSeparatesSemanticsFromProvenance(t *testing.T) {
 	if first.Plan.Mounts[0].Source != expectedSource {
 		t.Fatalf("source not resolved: %s", first.Plan.Mounts[0].Source)
 	}
+	if first.Plan.Mounts[0].SourceType != "directory" {
+		t.Fatalf("source type=%q", first.Plan.Mounts[0].SourceType)
+	}
+}
+
+func TestDigestRegularCopyBytesMatchesCanonicalSourceDigest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copy")
+	raw := []byte("exact descriptor bytes")
+	if err := os.WriteFile(path, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	want, err := DigestSource(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DigestRegularCopyBytes(raw, 0o640); got != want {
+		t.Fatalf("got=%s want=%s", got, want)
+	}
 }
 
 func TestBuildWarnsForExplicitlyAllowedUnpinnedImage(t *testing.T) {

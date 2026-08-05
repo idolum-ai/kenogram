@@ -29,6 +29,11 @@ Notable user-visible and operational changes are recorded here.
   prove cleanup and absence by immutable ID after renames, distinguish
   content-bound read-only mounts from identity-only writable mounts, and
   cross-bind explicit mount roles and declaration sources offline.
+- Snapshot declared read-only job inputs into bounded Kenogram-owned scratch
+  before provider use, reject read/write source aliases, bind staged observations
+  to retained authority paths and source types, enforce one 512-entry runtime
+  mount bound, and deliver secrets from the exact descriptor bytes whose
+  canonical plan-copy digest was verified.
 - Add a proof-only semantic reference for transactional cutover readiness,
   including bounded provider actions, rollback, pre-commit process death,
   inherited egress, and acknowledgement-only compatibility without adding a

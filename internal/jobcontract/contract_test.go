@@ -2,6 +2,7 @@ package jobcontract
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -66,6 +67,22 @@ func TestStrictDecodeRejectsAmbiguousDocuments(t *testing.T) {
 	}
 	if _, err := ParseRequest(oversized); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized error = %v", err)
+	}
+}
+
+func TestRuntimeObservationMountBoundAccepts512AndRejects513(t *testing.T) {
+	makeObservation := func(count int) RuntimeObservation {
+		mounts := make([]RuntimeMountObservation, 0, count)
+		for index := 0; index < count; index++ {
+			mounts = append(mounts, RuntimeMountObservation{Role: "workspace", Source: fmt.Sprintf("/tmp/source-%03d", index), Target: fmt.Sprintf("/workspace/%03d", index), Mode: "rw", Device: 1, Inode: uint64(index + 1), FileType: "directory", IdentityVerified: true})
+		}
+		return RuntimeObservation{Schema: RuntimeObservationSchema, Phase: "before", ObservedAt: "2026-08-05T12:00:00Z", Provider: "podman-cli", ContainerID: strings.Repeat("c", 64), ContainerName: "job", Running: true, ImageReference: "example.invalid/job@" + testDigest, ImageDigest: testDigest, PlanSHA256: testDigest, DeclarationSHA256: testDigest, Generation: 1, NetworkMode: "none", IPCMode: "private", PIDMode: "private", UTSMode: "private", UserNSMode: "keep-id", User: "agent", Hostname: "job", WorkingDirectory: "/workspace", BoundingCaps: []string{}, MemoryBytes: 1, NanoCPUs: 1, PIDs: 1, Mounts: mounts}
+	}
+	if err := ValidateRuntimeObservation(makeObservation(MaxRuntimeMounts)); err != nil {
+		t.Fatalf("512 mounts rejected: %v", err)
+	}
+	if err := ValidateRuntimeObservation(makeObservation(MaxRuntimeMounts + 1)); err == nil || !strings.Contains(err.Error(), "inventory") {
+		t.Fatalf("513 mounts accepted: %v", err)
 	}
 }
 

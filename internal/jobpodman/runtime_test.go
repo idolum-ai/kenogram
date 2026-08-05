@@ -391,6 +391,89 @@ func TestDirectRuntimeHandsSecretToTargetOnlyThroughStdinProtocol(t *testing.T) 
 	}
 }
 
+func TestSecretReadBindsAndDeliversExactOpenedDescriptorBytes(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "token")
+	original := []byte("opened-secret")
+	if err := os.WriteFile(source, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	copy := plan.Copy{Source: source, SourceDigest: plan.DigestRegularCopyBytes(original, 0o600), Mode: "0600", Secret: true}
+	got, err := readSecretSourceWithHook(copy, func() {
+		if renameErr := os.Rename(source, source+".old"); renameErr != nil {
+			t.Fatal(renameErr)
+		}
+		if writeErr := os.WriteFile(source, []byte("replacement"), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	})
+	if err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("got=%q error=%v", got, err)
+	}
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSecretSourceWithHook(copy, func() { _ = os.WriteFile(source, []byte("mutated-open!"), 0o600) }); err == nil || (!strings.Contains(err.Error(), "planned copy identity") && !strings.Contains(err.Error(), "changed during read")) {
+		t.Fatalf("mutation error=%v", err)
+	}
+}
+
+func TestRuntimeMountAdmissionBoundIsSharedAndExact(t *testing.T) {
+	if err := validateRuntimeMountCount(1, jobcontract.MaxRuntimeMounts-3); err != nil {
+		t.Fatalf("512 mounts rejected: %v", err)
+	}
+	if err := validateRuntimeMountCount(1, jobcontract.MaxRuntimeMounts-2); err == nil || !strings.Contains(err.Error(), "512") {
+		t.Fatalf("513 mounts accepted: %v", err)
+	}
+	runtime, runner, _, invocation := runtimeFixture(t)
+	invocation.Prepared.Result.Plan.Workspace = make([]string, jobcontract.MaxRuntimeMounts-1)
+	for index := range invocation.Prepared.Result.Plan.Workspace {
+		invocation.Prepared.Result.Plan.Workspace[index] = fmt.Sprintf("/workspace/%03d", index)
+	}
+	if _, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "512") {
+		t.Fatalf("513-mount admission error=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("over-limit admission contacted provider: %v", runner.calls)
+	}
+}
+
+func TestMixedReadOnlyWritableSourceAliasesAreRejected(t *testing.T) {
+	t.Run("same inode", func(t *testing.T) {
+		dir := t.TempDir()
+		left, right := filepath.Join(dir, "left"), filepath.Join(dir, "right")
+		if err := os.WriteFile(left, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(left, right); err != nil {
+			t.Fatal(err)
+		}
+		mounts := []plan.Mount{{Source: left, SourceType: "file", Target: "/ro", Mode: "ro"}, {Source: right, SourceType: "file", Target: "/rw", Mode: "rw"}}
+		runtime, runner, _, invocation := runtimeFixture(t)
+		invocation.Prepared.Result.Plan.Mounts = mounts
+		if _, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "overlap") {
+			t.Fatalf("admission error=%v", err)
+		}
+		if len(runner.calls) != 0 {
+			t.Fatalf("aliased admission contacted provider: %v", runner.calls)
+		}
+	})
+	t.Run("canonical parent child", func(t *testing.T) {
+		root := t.TempDir()
+		child := filepath.Join(root, "child")
+		if err := os.Mkdir(child, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mounts := []plan.Mount{{Source: root, SourceType: "directory", Target: "/ro", Mode: "ro"}, {Source: child, SourceType: "directory", Target: "/rw", Mode: "rw"}}
+		if err := validateReadOnlyWritableAliases(mounts); err == nil || !strings.Contains(err.Error(), "overlap") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+}
+
 func TestDirectRuntimeRejectsPinnedImageSubstitutionAsAdmittedUnknown(t *testing.T) {
 	runtime, runner, _, invocation := runtimeFixture(t)
 	runner.imageDigest = "sha256:" + strings.Repeat("b", 64)
@@ -603,13 +686,13 @@ func TestWritableMountContentIsNeverTraversedDuringFinalization(t *testing.T) {
 	}
 }
 
-func TestReadOnlyMountContentIsRevalidatedAtFinalization(t *testing.T) {
+func TestStagedReadOnlyMountContentIsRevalidatedAtFinalization(t *testing.T) {
 	runtime, _, attached, invocation := runtimeFixture(t)
 	readonly := filepath.Join(t.TempDir(), "input")
 	if err := os.WriteFile(readonly, []byte("before"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: readonly, Target: "/readonly", Mode: "ro"})
+	invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: readonly, SourceType: "file", Target: "/readonly", Mode: "ro"})
 	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -618,7 +701,16 @@ func TestReadOnlyMountContentIsRevalidatedAtFinalization(t *testing.T) {
 	if _, err := process.Wait(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(readonly, []byte("after!"), 0o600); err != nil {
+	var staged string
+	for _, fact := range runtime.mountFacts {
+		if fact.Target == "/readonly" {
+			staged = fact.Source
+		}
+	}
+	if staged == "" || staged == readonly {
+		t.Fatalf("read-only source was not staged: %q", staged)
+	}
+	if err := os.WriteFile(staged, []byte("after!"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := process.Finalize(context.Background()); err == nil || !strings.Contains(err.Error(), "source identity changed") {
@@ -626,20 +718,57 @@ func TestReadOnlyMountContentIsRevalidatedAtFinalization(t *testing.T) {
 	}
 }
 
-func TestReadOnlyMountContentIsRevalidatedImmediatelyBeforeTargetUse(t *testing.T) {
+func TestHostMutationAfterReadOnlySnapshotCannotChangeTargetBytes(t *testing.T) {
+	runtime, runner, attached, invocation := runtimeFixture(t)
+	readonly := filepath.Join(t.TempDir(), "input")
+	if err := os.WriteFile(readonly, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: readonly, SourceType: "file", Target: "/readonly", Mode: "ro"})
+	runner.afterStart = func() { _ = os.WriteFile(readonly, []byte("after!"), 0o600) }
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil || process == nil {
+		t.Fatalf("process=%#v error=%v", process, err)
+	}
+	var staged string
+	for _, fact := range runtime.mountFacts {
+		if fact.Target == "/readonly" {
+			staged = fact.Source
+		}
+	}
+	raw, readErr := os.ReadFile(staged)
+	if readErr != nil || string(raw) != "before" || staged == readonly {
+		t.Fatalf("staged=%q raw=%q error=%v", staged, raw, readErr)
+	}
+	attached.finish(nil)
+	if _, err := process.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+}
+
+func TestStagedReadOnlyContentIsRevalidatedImmediatelyBeforeTargetUse(t *testing.T) {
 	runtime, runner, _, invocation := runtimeFixture(t)
 	readonly := filepath.Join(t.TempDir(), "input")
 	if err := os.WriteFile(readonly, []byte("before"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: readonly, Target: "/readonly", Mode: "ro"})
-	runner.afterStart = func() { _ = os.WriteFile(readonly, []byte("after!"), 0o600) }
+	invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: readonly, SourceType: "file", Target: "/readonly", Mode: "ro"})
+	runner.afterStart = func() {
+		for _, mount := range runner.mounts {
+			if mount["Destination"] == "/readonly" {
+				_ = os.WriteFile(mount["Source"].(string), []byte("tampered"), 0o600)
+			}
+		}
+	}
 	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
 	if err == nil || process == nil || !strings.Contains(err.Error(), "source identity changed") {
 		t.Fatalf("process=%#v error=%v", process, err)
-	}
-	if runtime.process != nil && runtime.process.attached != nil {
-		t.Fatal("target client started after read-only input changed")
 	}
 }
 
@@ -688,7 +817,7 @@ func TestDirectRuntimeRejectsProtectedControlSocketParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CONTAINER_HOST", "unix://"+socket)
-	invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: dir, Target: "/runtime", Mode: "ro"})
+	invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: dir, SourceType: "directory", Target: "/runtime", Mode: "ro"})
 	if _, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err == nil || !strings.Contains(err.Error(), "control socket") {
 		t.Fatalf("error=%v", err)
 	}

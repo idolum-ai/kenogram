@@ -36,7 +36,8 @@ func ValidateRuntimeObservation(value RuntimeObservation) error {
 	for _, mount := range value.Mounts {
 		validRole := mount.Role == "declared" || mount.Role == "workspace" || mount.Role == "helper" || mount.Role == "lifecycle"
 		validContent := (mount.Mode == "ro" && runtimeHexDigest.MatchString(mount.SHA256)) || (mount.Mode == "rw" && mount.SHA256 == "")
-		if !validRole || !validContent || !filepath.IsAbs(mount.Source) || filepath.Clean(mount.Source) != mount.Source || !filepath.IsAbs(mount.Target) || filepath.Clean(mount.Target) != mount.Target || (mount.Mode != "ro" && mount.Mode != "rw") || mount.Device > uint64(MaximumWireInteger) || mount.Inode == 0 || mount.Inode > uint64(MaximumWireInteger) || (mount.FileType != "file" && mount.FileType != "directory") || !mount.IdentityVerified {
+		validAuthority := (mount.Role == "declared" && filepath.IsAbs(mount.AuthoritySource) && filepath.Clean(mount.AuthoritySource) == mount.AuthoritySource) || (mount.Role != "declared" && mount.AuthoritySource == "")
+		if !validRole || !validContent || !validAuthority || !filepath.IsAbs(mount.Source) || filepath.Clean(mount.Source) != mount.Source || !filepath.IsAbs(mount.Target) || filepath.Clean(mount.Target) != mount.Target || (mount.Mode != "ro" && mount.Mode != "rw") || mount.Device > uint64(MaximumWireInteger) || mount.Inode == 0 || mount.Inode > uint64(MaximumWireInteger) || (mount.FileType != "file" && mount.FileType != "directory") || !mount.IdentityVerified {
 			return fmt.Errorf("runtime mount %q is invalid", mount.Target)
 		}
 		if _, duplicate := seen[mount.Target]; duplicate {
@@ -44,7 +45,7 @@ func ValidateRuntimeObservation(value RuntimeObservation) error {
 		}
 		seen[mount.Target] = struct{}{}
 	}
-	if len(value.Mounts) == 0 || !sort.SliceIsSorted(value.Mounts, func(i, j int) bool { return value.Mounts[i].Target < value.Mounts[j].Target }) {
+	if len(value.Mounts) == 0 || len(value.Mounts) > MaxRuntimeMounts || !sort.SliceIsSorted(value.Mounts, func(i, j int) bool { return value.Mounts[i].Target < value.Mounts[j].Target }) {
 		return errors.New("runtime mount inventory is empty or unsorted")
 	}
 	return nil

@@ -217,8 +217,24 @@ func verifyRuntimeObservations(before, after jobcontract.RuntimeObservation, res
 	}
 	for _, mount := range before.Mounts {
 		authority, exists := expected[mount.Target]
-		if !exists || authority.mode != mount.Mode || authority.role != mount.Role || (authority.source != "" && authority.source != mount.Source) {
+		if !exists || authority.mode != mount.Mode || authority.role != mount.Role || (authority.source != "" && authority.source != mount.AuthoritySource) {
 			return fmt.Errorf("runtime mount %q is undeclared or has the wrong mode", mount.Target)
+		}
+		switch mount.Role {
+		case "helper":
+			if mount.FileType != "file" {
+				return errors.New("runtime helper mount is not a file")
+			}
+		case "workspace", "lifecycle":
+			if mount.FileType != "directory" {
+				return fmt.Errorf("runtime %s mount is not a directory", mount.Role)
+			}
+		case "declared":
+			for _, retainedMount := range retained.Plan.Mounts {
+				if retainedMount.Target == mount.Target && retainedMount.SourceType != mount.FileType {
+					return fmt.Errorf("runtime declared mount %q type disagrees with retained plan", mount.Target)
+				}
+			}
 		}
 		if mount.Target == jobHelperPathForVerification && mount.SHA256 != provenance.ExecutableSHA256 {
 			return errors.New("runtime helper mount is not bound to executable provenance")

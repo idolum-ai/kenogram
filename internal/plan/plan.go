@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -49,9 +51,10 @@ type Copy struct {
 	Secret       bool   `json:"secret"`
 }
 type Mount struct {
-	Source string `json:"source"`
-	Target string `json:"target"`
-	Mode   string `json:"mode"`
+	Source     string `json:"source"`
+	SourceType string `json:"source_type"`
+	Target     string `json:"target"`
+	Mode       string `json:"mode"`
 }
 type NetworkAllow struct {
 	Host string `json:"host"`
@@ -122,7 +125,11 @@ func Build(d decl.Declaration, declarationPath string, declarationBytes []byte) 
 		if err != nil {
 			return Result{}, err
 		}
-		p.Mounts = append(p.Mounts, Mount{Source: source, Target: filepath.Clean(m.Target), Mode: m.Mode})
+		sourceType, err := mountSourceType(source)
+		if err != nil {
+			return Result{}, fmt.Errorf("inspect mount source %s: %w", m.Source, err)
+		}
+		p.Mounts = append(p.Mounts, Mount{Source: source, SourceType: sourceType, Target: filepath.Clean(m.Target), Mode: m.Mode})
 	}
 	for _, a := range d.Network.Allow {
 		p.NetworkAllow = append(p.NetworkAllow, NetworkAllow{Host: a.Host, Port: a.Port})
@@ -205,12 +212,16 @@ func ProjectEvidence(d decl.Declaration, declarationPath string, declarationByte
 		}
 		p.Copies = append(p.Copies, Copy{Source: source, SourceDigest: digest, Target: filepath.Clean(copy.Target), Mode: copy.Mode, Secret: copy.Secret})
 	}
-	for _, mount := range d.Mounts {
+	for index, mount := range d.Mounts {
 		source, err := decl.ResolveSource(dir, mount.Source)
 		if err != nil {
 			return Result{}, err
 		}
-		p.Mounts = append(p.Mounts, Mount{Source: source, Target: filepath.Clean(mount.Target), Mode: mount.Mode})
+		sourceType := retained.Mounts[index].SourceType
+		if sourceType != "file" && sourceType != "directory" {
+			return Result{}, fmt.Errorf("retained mount %d source type is invalid", index)
+		}
+		p.Mounts = append(p.Mounts, Mount{Source: source, SourceType: sourceType, Target: filepath.Clean(mount.Target), Mode: mount.Mode})
 	}
 	for _, allow := range d.Network.Allow {
 		p.NetworkAllow = append(p.NetworkAllow, NetworkAllow{Host: allow.Host, Port: allow.Port})
@@ -290,6 +301,33 @@ func DigestSource(root string) (string, error) {
 		hash.Write([]byte{'\n'})
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func mountSourceType(source string) (string, error) {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("mount source is a symlink")
+	}
+	if info.IsDir() {
+		return "directory", nil
+	}
+	if info.Mode().IsRegular() {
+		return "file", nil
+	}
+	return "", errors.New("mount source is not a regular file or directory")
+}
+
+// DigestRegularCopyBytes computes the canonical plan source digest for one
+// regular file from exactly the bytes and mode observed through an already-open
+// descriptor.
+func DigestRegularCopyBytes(raw []byte, mode fs.FileMode) string {
+	content := sha256.Sum256(raw)
+	entry := "f\x00.\x00" + hex.EncodeToString(content[:]) + "\x00" + mode.Perm().String() + "\n"
+	sum := sha256.Sum256([]byte(entry))
+	return hex.EncodeToString(sum[:])
 }
 
 // Canonical returns the fixed-field JSON encoding used for the plan fingerprint.

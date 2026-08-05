@@ -36,9 +36,10 @@ write a request conforming to `kenogram.job-request.v1`:
 ```
 
 `secret_file` must equal exactly one declaration copy target marked
-`secret = true`. Kenogram revalidates that regular source and sends its non-NUL
-bytes to the contained launcher over stdin. The value never enters provider
-argv, provider environment, plan evidence, or runtime evidence. Target output
+`secret = true`. Kenogram opens that regular source once, verifies the planned
+copy digest from the exact bounded descriptor bytes and mode, and sends those
+same non-NUL bytes to the contained launcher over stdin. The value never enters
+provider argv, provider environment, plan evidence, or runtime evidence. Target output
 and requested artifacts are target-controlled and can disclose target-visible
 values; retain them only when that is acceptable.
 
@@ -76,9 +77,15 @@ than accepting arbitrary provider JSON.
 
 Each runtime mount is explicitly classified as a declaration-owned input,
 workspace, staged helper, or lifecycle channel. The verifier cross-binds every
-declared source, target, and mode. Read-only content is bounded and revalidated;
-target-writable directories retain identity only and are never recursively
-hashed after the target has run.
+declared authority source, target, mode, and retained file-or-directory type.
+Before provider use, each declared read-only source is copied under bounded
+entry and byte limits into Kenogram-owned scratch. Only that isolated snapshot
+is mounted and content-attested; mutating the original host path afterward does
+not change target-observed bytes. Read-only and writable declared sources may
+not share an inode or overlap canonically. Target-writable directories retain
+identity only and are never recursively hashed after the target has run. The
+complete runtime inventory, including helper and lifecycle mounts, is bounded
+to 512 entries at admission and during independent validation.
 
 The Kenogram executable also acts as the image-independent holder and target
 launcher. It must therefore be a self-contained Linux binary for images that do

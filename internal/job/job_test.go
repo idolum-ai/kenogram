@@ -121,7 +121,7 @@ func fakeRuntimeObservation(invocation Invocation, phase string) []byte {
 		mounts = append(mounts, jobcontract.RuntimeMountObservation{Role: "workspace", Source: fmt.Sprintf("/tmp/kenogram-test-workspace-%d", index), Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 3), FileType: "directory", IdentityVerified: true})
 	}
 	for index, mount := range invocation.Prepared.Result.Plan.Mounts {
-		fact := jobcontract.RuntimeMountObservation{Role: "declared", Source: mount.Source, Target: mount.Target, Mode: mount.Mode, Device: 2, Inode: uint64(index + 100), FileType: "directory", IdentityVerified: true}
+		fact := jobcontract.RuntimeMountObservation{Role: "declared", AuthoritySource: mount.Source, Source: fmt.Sprintf("/tmp/kenogram-test-snapshot-%d", index), Target: mount.Target, Mode: mount.Mode, Device: 2, Inode: uint64(index + 100), FileType: mount.SourceType, IdentityVerified: true}
 		if mount.Mode == "ro" {
 			fact.SHA256 = testDigest()
 		}
@@ -195,7 +195,7 @@ func TestRuntimeVerifierCrossBindsDeclaredMountSourcesAndRuntimeRoles(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared.Result.Plan.Mounts = append(prepared.Result.Plan.Mounts, plan.Mount{Source: "/retained/input", Target: "/input", Mode: "ro"})
+	prepared.Result.Plan.Mounts = append(prepared.Result.Plan.Mounts, plan.Mount{Source: "/retained/input", SourceType: "directory", Target: "/input", Mode: "ro"})
 	provenance, _, err := Provenance("", BuildIdentity{})
 	if err != nil {
 		t.Fatal(err)
@@ -212,27 +212,42 @@ func TestRuntimeVerifierCrossBindsDeclaredMountSourcesAndRuntimeRoles(t *testing
 	for _, test := range []struct {
 		name   string
 		mutate func(*jobcontract.RuntimeObservation)
+		want   string
 	}{
 		{name: "declared source substitution", mutate: func(value *jobcontract.RuntimeObservation) {
 			for index := range value.Mounts {
 				if value.Mounts[index].Role == "declared" {
-					value.Mounts[index].Source = "/substituted/input"
+					value.Mounts[index].AuthoritySource = "/substituted/input"
 				}
 			}
-		}},
+		}, want: "undeclared"},
 		{name: "workspace role substitution", mutate: func(value *jobcontract.RuntimeObservation) {
 			for index := range value.Mounts {
 				if value.Mounts[index].Role == "workspace" {
 					value.Mounts[index].Role = "declared"
 				}
 			}
-		}},
+		}, want: "undeclared"},
+		{name: "helper type substitution", mutate: func(value *jobcontract.RuntimeObservation) {
+			for index := range value.Mounts {
+				if value.Mounts[index].Role == "helper" {
+					value.Mounts[index].FileType = "directory"
+				}
+			}
+		}, want: "helper mount is not a file"},
+		{name: "declared type substitution", mutate: func(value *jobcontract.RuntimeObservation) {
+			for index := range value.Mounts {
+				if value.Mounts[index].Role == "declared" {
+					value.Mounts[index].FileType = "file"
+				}
+			}
+		}, want: "type disagrees"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			before, after := parse("before"), parse("after")
 			test.mutate(&before)
 			test.mutate(&after)
-			if err := verifyRuntimeObservations(before, after, result, request, prepared.Result, provenance); err == nil || !strings.Contains(err.Error(), "undeclared") {
+			if err := verifyRuntimeObservations(before, after, result, request, prepared.Result, provenance); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error=%v", err)
 			}
 		})
