@@ -30,7 +30,9 @@ type Runtime interface {
 
 type Process interface {
 	Identity(context.Context) (RuntimeIdentity, error)
+	BeginWait()
 	Wait(context.Context) (jobcontract.TargetResult, error)
+	JoinWait(context.Context) error
 	BeginFinalization()
 	Finalize(context.Context) (RuntimeFinalization, error)
 	JoinFinalization(context.Context) error
@@ -246,7 +248,11 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 		finalMonotonic := time.Now()
 		finalCtx, cancelFinalize := context.WithTimeout(context.WithoutCancel(ctx), time.Duration(request.Limits.FinalizeNS))
 		defer cancelFinalize()
-		final, finalErr := finalizeProcessBounded(finalCtx, process)
+		var final RuntimeFinalization
+		finalErr := process.JoinWait(finalCtx)
+		if finalErr == nil {
+			final, finalErr = finalizeProcessBounded(finalCtx, process)
+		}
 		finalFinished := e.Now().UTC()
 		result.Finalization = interval(finalStarted, finalFinished, time.Since(finalMonotonic))
 		runtimeAfter = final.After
@@ -318,7 +324,10 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), time.Duration(request.Limits.FinalizeNS))
 	var cleanupErr error
 	if process != nil {
-		cleanupErr = process.JoinFinalization(cleanupCtx)
+		cleanupErr = process.JoinWait(cleanupCtx)
+		if cleanupErr == nil {
+			cleanupErr = process.JoinFinalization(cleanupCtx)
+		}
 	}
 	if cleanupErr == nil {
 		result.Cleanup, cleanupErr = cleanupRuntimeBounded(cleanupCtx, e.Runtime, invocation)
@@ -457,6 +466,7 @@ func identityProcessBounded(ctx context.Context, process Process) (RuntimeIdenti
 }
 
 func waitProcessBounded(ctx context.Context, process Process) (jobcontract.TargetResult, error) {
+	process.BeginWait()
 	result := make(chan targetObservation, 1)
 	go func() {
 		target, err := process.Wait(ctx)

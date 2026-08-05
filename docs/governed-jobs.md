@@ -114,10 +114,11 @@ Artifact roots beneath a bind mount are collected from that exact inspected
 mount source rather than from Podman's storage-only root mount. The deepest
 container mount boundary wins and its retained device/inode must still match;
 workspace bindings must also be the deterministic projection under Kenogram's
-private scratch. After those readers are published and finalization has joined,
-cleanup records the exact workspace source identities, destroys and proves the
-container absent, then lets a no-shell helper in the rootless user namespace
-empty only those recorded workspace roots. Failed namespace cleanup retains its
+private scratch. Wait must join before Finalize, and both workers must join
+before cleanup. Cleanup then records the exact workspace source identities, destroys and proves the
+container absent, repeats that immutable-ID proof immediately before namespace
+entry, then lets a no-shell helper in the rootless user namespace empty only
+those recorded workspace roots without recursively invoking Podman. Failed namespace cleanup retains its
 private authority record for retry after container absence. This lets cleanup
 remove mode-`000` and subordinate-UID entries without ever chmodding or deleting
 an operator-owned declared writable source. Namespace-helper process groups are

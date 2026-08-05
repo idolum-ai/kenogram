@@ -114,9 +114,9 @@ func runGovernedJobHelper(args []string, stdin io.Reader, stderr io.Writer) (int
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		identity := jobpodman.FilesystemIdentity{Device: device, Inode: inode}
-		if err := jobpodman.CleanupWorkspaceContentsAfterContainer(ctx, backend.New(nil), args[1], args[2], args[3], args[4], args[5], identity, args[8]); err != nil {
+		if err := jobpodman.CleanupWorkspaceContentsAfterContainer(ctx, args[1], args[2], args[3], args[4], args[5], identity, args[8]); err != nil {
 			fmt.Fprintln(stderr, "post-container workspace cleanup failed")
-			return 125, true
+			return jobpodman.WorkspaceCleanupExitCode(err), true
 		}
 		return 0, true
 	default:

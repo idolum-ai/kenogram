@@ -320,16 +320,19 @@ helper and lifecycle mounts to be files, workspace mounts to be directories,
 and each declared mount type to equal the type retained in the plan. The
 admitted and retained runtime inventories share the same 512-mount bound.
 
-Before cleanup mutates descriptors, processes, provider objects, or the private
-scratch, the core joins the required finalization lifecycle. An unjoined
-Finalize worker makes cleanup incomplete and leaves its authority intact.
+Before Finalize or cleanup mutates descriptors, processes, provider objects, or
+the private scratch, the core joins the required Wait lifecycle. Before cleanup
+it also joins the required Finalize lifecycle. An unjoined worker makes cleanup
+incomplete and leaves its authority intact.
 Cleanup then freshly proves the exact stopped container, owner label,
 plan/declaration labels, private scratch identity, and complete workspace mount
 inventory. It writes the sorted target/source/device/inode bindings to a
 create-only mode-`0600` authority record inside the unmounted scratch root. The
-container is re-proved, destroyed by immutable ID, and proved absent. Only then
-does the exact staged Kenogram helper enter `podman unshare`, prove that same ID
-absent, authenticate the authority record, and descriptor-remove immediate
+container is re-proved, destroyed by immutable ID, and proved absent. The
+parent repeats that immutable-ID absence proof immediately before the exact
+staged Kenogram helper enters `podman unshare`; the helper does not recursively
+invoke the provider from inside its user namespace. It authenticates the same
+ID in the authority record and descriptor-removes immediate
 child names from those exact workspace roots. The helper accepts no arbitrary
 deletion source and never traverses or mutates a declared writable mount. A
 failed namespace pass retains the record and scratch so a later Cleanup call

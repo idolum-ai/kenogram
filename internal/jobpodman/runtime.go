@@ -42,6 +42,14 @@ const workspaceCleanupAuthorityName = "workspace-cleanup-authority.json"
 const workspaceCleanupAuthoritySchema = "kenogram.workspace-cleanup-authority.v1"
 const maximumWorkspaceCleanupAuthorityBytes = 1 << 20
 
+const (
+	workspaceCleanupExitAbsence   = 120
+	workspaceCleanupExitScratch   = 121
+	workspaceCleanupExitAuthority = 122
+	workspaceCleanupExitContents  = 123
+	workspaceCleanupExitUnknown   = 124
+)
+
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var rawDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var containerIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -150,6 +158,40 @@ type workspaceCleanupAuthorityRecord struct {
 	ScratchInode      uint64                    `json:"scratch_inode"`
 	Bindings          []workspaceCleanupBinding `json:"bindings"`
 	BindingsDigest    string                    `json:"bindings_digest"`
+}
+
+type workspaceCleanupStageError struct {
+	stage string
+	err   error
+}
+
+func (e *workspaceCleanupStageError) Error() string { return e.stage + ": " + e.err.Error() }
+func (e *workspaceCleanupStageError) Unwrap() error { return e.err }
+
+func workspaceCleanupError(stage string, err error) error {
+	return &workspaceCleanupStageError{stage: stage, err: err}
+}
+
+// WorkspaceCleanupExitCode maps a typed helper-stage failure to a stable,
+// non-sensitive process exit code. The parent classifies only the code; helper
+// stderr remains generic and never reveals scratch paths or provider details.
+func WorkspaceCleanupExitCode(err error) int {
+	var staged *workspaceCleanupStageError
+	if !errors.As(err, &staged) {
+		return workspaceCleanupExitUnknown
+	}
+	switch staged.stage {
+	case "container_absence":
+		return workspaceCleanupExitAbsence
+	case "scratch_identity":
+		return workspaceCleanupExitScratch
+	case "authority_record":
+		return workspaceCleanupExitAuthority
+	case "workspace_contents":
+		return workspaceCleanupExitContents
+	default:
+		return workspaceCleanupExitUnknown
+	}
 }
 
 func New(podman *backend.Podman) *Runtime {
@@ -358,7 +400,7 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	process := &process{runtime: r, attached: attached, invocation: invocation, identity: job.RuntimeIdentity{
 		Provider: "podman-cli", Generation: generation, ImageReference: invocation.Prepared.Result.Plan.World.Base,
 		ImageDigest: imageDigest, Before: before,
-	}, done: make(chan error, 1), clientDone: make(chan struct{}), finalizeDone: make(chan struct{})}
+	}, done: make(chan error, 1), clientDone: make(chan struct{}), waitDone: make(chan struct{}), finalizeDone: make(chan struct{})}
 	r.mu.Lock()
 	r.mounts, r.process = mounts, process
 	r.mu.Unlock()
@@ -412,7 +454,7 @@ func (r *Runtime) proveOwned(ctx context.Context) (backend.Evidence, error) {
 func (r *Runtime) admittedFailure(invocation job.Invocation, cause error) (job.Process, error) {
 	done := make(chan struct{})
 	close(done)
-	process := &process{runtime: r, invocation: invocation, waited: true, waitErr: cause, clientDone: done, finalizeDone: make(chan struct{})}
+	process := &process{runtime: r, invocation: invocation, waited: true, waitErr: cause, clientDone: done, waitDone: make(chan struct{}), finalizeDone: make(chan struct{})}
 	r.mu.Lock()
 	r.process = process
 	r.mu.Unlock()
@@ -430,6 +472,16 @@ func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcon
 	r.mu.Unlock()
 	reasons := []string{}
 	if process != nil {
+		if err := process.JoinWait(ctx); err != nil {
+			return jobcontract.CleanupResult{
+				Status:            "incomplete",
+				ContainerAbsent:   false,
+				ProxyAbsent:       true,
+				ProcessGroupEmpty: false,
+				DurationNS:        int64(time.Since(started)),
+				Reasons:           []string{"SCRATCH_RETAINED_FOR_ACTIVE_WAIT", "WAIT_WORKER_PRESENT"},
+			}
+		}
 		if err := process.JoinFinalization(ctx); err != nil {
 			return jobcontract.CleanupResult{
 				Status:            "incomplete",
@@ -496,7 +548,9 @@ func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcon
 		case !exists:
 		case exists:
 			evidence, inspectErr := r.Podman.Inspect(ctx, containerID)
-			if inspectErr != nil || containerID == "" || evidence.ID != containerID || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
+			if inspectErr != nil {
+				reasons = append(reasons, "CONTAINER_INSPECT_FAILED")
+			} else if containerID == "" || evidence.ID != containerID || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
 				reasons = append(reasons, "CONTAINER_OWNERSHIP_UNPROVED")
 			} else {
 				if evidence.Running {
@@ -505,7 +559,9 @@ func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcon
 					}
 					evidence, inspectErr = r.Podman.Inspect(ctx, containerID)
 				}
-				if inspectErr != nil || evidence.Running || evidence.ID != containerID || evidence.Name == "" || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
+				if inspectErr != nil {
+					reasons = append(reasons, "STOPPED_CONTAINER_INSPECT_FAILED")
+				} else if evidence.Running || evidence.ID != containerID || evidence.Name == "" || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
 					reasons = append(reasons, "STOPPED_CONTAINER_OWNERSHIP_UNPROVED")
 				} else {
 					observedBindings, observedErr := observedWorkspaceCleanupBindings(scratch, evidence.Mounts)
@@ -539,14 +595,19 @@ func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcon
 		containerAbsent = false
 	}
 	if containerAbsent && len(workspaceBindings) != 0 {
-		if workspaceAuthorityErr != nil || PrepareWorkspaceRemovalAfterContainer(
-			ctx, r.Podman, helperSource, containerID, ownerToken,
-			invocation.Prepared.Result.PlanDigest, invocation.Prepared.Result.DeclarationDigest,
-			scratch, scratchID, workspaceAuthorityFileDigest,
-		) != nil {
-			reasons = append(reasons, "WORKSPACE_NAMESPACE_CLEANUP_FAILED")
+		if workspaceAuthorityErr != nil {
+			reasons = append(reasons, "WORKSPACE_NAMESPACE_AUTHORITY_RECORD_FAILED")
 		} else {
-			workspaceNamespaceClean = true
+			workspaceCleanupErr := PrepareWorkspaceRemovalAfterContainer(
+				ctx, r.Podman, helperSource, containerID, ownerToken,
+				invocation.Prepared.Result.PlanDigest, invocation.Prepared.Result.DeclarationDigest,
+				scratch, scratchID, workspaceAuthorityFileDigest,
+			)
+			if workspaceCleanupErr != nil {
+				reasons = append(reasons, workspaceCleanupFailureReason(workspaceCleanupErr))
+			} else {
+				workspaceNamespaceClean = true
+			}
 		}
 	}
 	if scratch != "" && containerAbsent && workspaceNamespaceClean {
@@ -679,6 +740,10 @@ func PrepareWorkspaceRemovalAfterContainer(ctx context.Context, podman *backend.
 		!digestPattern.MatchString(authorityFileDigest) {
 		return errors.New("post-container workspace cleanup authority is invalid")
 	}
+	exists, err := podman.ExistsID(ctx, containerID)
+	if err != nil || exists {
+		return workspaceCleanupError("container_absence", errors.Join(err, errors.New("container absence is unproved before namespace entry")))
+	}
 	command := []string{
 		helperSource, "_job-clean-workspaces-after-container", containerID, ownerToken,
 		planDigest, declarationDigest, scratch,
@@ -687,33 +752,50 @@ func PrepareWorkspaceRemovalAfterContainer(ctx context.Context, podman *backend.
 	return podman.RunUnshare(ctx, command)
 }
 
+func workspaceCleanupFailureReason(err error) string {
+	code := WorkspaceCleanupExitCode(err)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitCode()
+	}
+	switch code {
+	case workspaceCleanupExitAbsence:
+		return "WORKSPACE_NAMESPACE_CONTAINER_ABSENCE_UNPROVED"
+	case workspaceCleanupExitScratch:
+		return "WORKSPACE_NAMESPACE_SCRATCH_IDENTITY_FAILED"
+	case workspaceCleanupExitAuthority:
+		return "WORKSPACE_NAMESPACE_AUTHORITY_RECORD_FAILED"
+	case workspaceCleanupExitContents:
+		return "WORKSPACE_NAMESPACE_CONTENT_REMOVAL_FAILED"
+	default:
+		return "WORKSPACE_NAMESPACE_CLEANUP_FAILED"
+	}
+}
+
 // CleanupWorkspaceContentsAfterContainer is the retryable namespace helper.
-// It proves immutable container absence, authenticates the exact persisted
-// binding inventory, and removes contents only through device/inode-bound
-// Kenogram workspace roots.
-func CleanupWorkspaceContentsAfterContainer(ctx context.Context, podman *backend.Podman, containerID, ownerToken, planDigest, declarationDigest, scratch string, scratchID FilesystemIdentity, authorityFileDigest string) error {
-	if podman == nil || !containerIDPattern.MatchString(containerID) || !ownerTokenPattern.MatchString(ownerToken) ||
+// Its caller has just proved immutable container absence outside the user
+// namespace. The helper authenticates that ID in the persisted binding
+// inventory and removes contents only through device/inode-bound workspace
+// roots; it never recursively invokes Podman from inside podman unshare.
+func CleanupWorkspaceContentsAfterContainer(ctx context.Context, containerID, ownerToken, planDigest, declarationDigest, scratch string, scratchID FilesystemIdentity, authorityFileDigest string) error {
+	if !containerIDPattern.MatchString(containerID) || !ownerTokenPattern.MatchString(ownerToken) ||
 		!rawDigestPattern.MatchString(planDigest) || !rawDigestPattern.MatchString(declarationDigest) ||
 		!filepath.IsAbs(scratch) || filepath.Clean(scratch) != scratch || scratchID.Device == 0 || scratchID.Inode == 0 ||
 		!digestPattern.MatchString(authorityFileDigest) {
-		return errors.New("post-container workspace cleanup authority is invalid")
-	}
-	exists, err := podman.ExistsID(ctx, containerID)
-	if err != nil || exists {
-		return errors.Join(err, errors.New("container absence is unproved before workspace cleanup retry"))
+		return workspaceCleanupError("authority_record", errors.New("post-container workspace cleanup authority is invalid"))
 	}
 	observedScratch, err := filesystemIdentityAt(scratch)
 	if err != nil || observedScratch != scratchID {
-		return errors.New("workspace cleanup scratch identity changed")
+		return workspaceCleanupError("scratch_identity", errors.Join(err, errors.New("workspace cleanup scratch identity changed")))
 	}
 	record, err := readWorkspaceCleanupAuthority(scratch, authorityFileDigest)
 	if err != nil || record.ContainerID != containerID || record.OwnerToken != ownerToken || record.PlanDigest != planDigest ||
 		record.DeclarationDigest != declarationDigest || record.Scratch != scratch || record.ScratchDevice != scratchID.Device || record.ScratchInode != scratchID.Inode {
-		return errors.Join(err, errors.New("workspace cleanup authority record disagrees"))
+		return workspaceCleanupError("authority_record", errors.Join(err, errors.New("workspace cleanup authority record disagrees")))
 	}
 	for _, binding := range record.Bindings {
 		if err := clearWorkspaceContents(ctx, binding); err != nil {
-			return fmt.Errorf("clear workspace %q: %w", binding.Target, err)
+			return workspaceCleanupError("workspace_contents", errors.New("clear an authorized workspace root"))
 		}
 	}
 	return nil
@@ -850,6 +932,60 @@ type process struct {
 	finalizeRunning   bool
 	finalizeComplete  bool
 	finalizeDone      chan struct{}
+	waitStarted       bool
+	waitRunning       bool
+	waitComplete      bool
+	waitDone          chan struct{}
+}
+
+func (p *process) BeginWait() {
+	p.mu.Lock()
+	if p.waitDone == nil {
+		p.waitDone = make(chan struct{})
+	}
+	p.waitStarted = true
+	p.mu.Unlock()
+}
+
+func (p *process) JoinWait(ctx context.Context) error {
+	p.mu.Lock()
+	started, done := p.waitStarted, p.waitDone
+	p.mu.Unlock()
+	if !started {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *process) enterWait() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.waitStarted = true
+	if p.waitDone == nil {
+		p.waitDone = make(chan struct{})
+	}
+	if p.waitRunning || p.waitComplete {
+		return errors.New("runtime wait is already active or complete")
+	}
+	p.waitRunning = true
+	return nil
+}
+
+func (p *process) finishWait() {
+	p.mu.Lock()
+	p.waitRunning, p.waitComplete = false, true
+	close(p.waitDone)
+	p.mu.Unlock()
 }
 
 func (p *process) BeginFinalization() {
@@ -910,6 +1046,10 @@ func (p *process) Identity(ctx context.Context) (job.RuntimeIdentity, error) {
 }
 
 func (p *process) Wait(ctx context.Context) (jobcontract.TargetResult, error) {
+	if err := p.enterWait(); err != nil {
+		return jobcontract.TargetResult{Kind: "unknown"}, err
+	}
+	defer p.finishWait()
 	select {
 	case err := <-p.done:
 		return p.recordTerminal(err)
@@ -972,6 +1112,9 @@ func (p *process) finished() bool {
 }
 
 func (p *process) Finalize(ctx context.Context) (job.RuntimeFinalization, error) {
+	if err := p.JoinWait(ctx); err != nil {
+		return job.RuntimeFinalization{}, err
+	}
 	if err := p.enterFinalization(); err != nil {
 		return job.RuntimeFinalization{}, err
 	}

@@ -913,6 +913,64 @@ func TestCleanupDoesNotMutateWhileFinalizeWorkerIsUnjoined(t *testing.T) {
 	}
 }
 
+func TestCleanupDoesNotMutateWhileWaitWorkerIsUnjoined(t *testing.T) {
+	runtime, runner, _, invocation := runtimeFixture(t)
+	started, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := started.(*process)
+	process.BeginWait()
+	before := len(runner.calls)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	cleanup := runtime.Cleanup(ctx, invocation)
+	if cleanup.Status != "incomplete" || cleanup.ContainerAbsent || !slices.Contains(cleanup.Reasons, "WAIT_WORKER_PRESENT") || len(runner.calls) != before || !runner.exists {
+		t.Fatalf("cleanup=%#v calls=%v before=%d exists=%t", cleanup, runner.calls, before, runner.exists)
+	}
+	if _, err := os.Lstat(runtime.scratch); err != nil {
+		t.Fatalf("active Wait scratch was mutated: %v", err)
+	}
+	process.finishWait()
+	if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" {
+		t.Fatalf("cleanup after Wait join=%#v", cleanup)
+	}
+}
+
+func TestFinalizeDoesNotContactProviderWhileWaitWorkerIsActive(t *testing.T) {
+	runtime, runner, attached, invocation := runtimeFixture(t)
+	started, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := started.(*process)
+	process.BeginWait()
+	waitDone := make(chan error, 1)
+	go func() {
+		_, err := process.Wait(context.Background())
+		waitDone <- err
+	}()
+	before := len(runner.calls)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := process.Finalize(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Finalize error=%v", err)
+	}
+	if len(runner.calls) != before {
+		t.Fatalf("Finalize contacted provider while Wait remained active: before=%d calls=%v", before, runner.calls)
+	}
+	attached.finish(nil)
+	if err := <-waitDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Finalize(context.Background()); err != nil {
+		t.Fatalf("Finalize after Wait join: %v", err)
+	}
+	if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+}
+
 func TestCleanupRetriesExactWorkspacesAfterContainerAbsence(t *testing.T) {
 	runtime, runner, attached, invocation := runtimeFixture(t)
 	invocation.Request.Artifacts = &jobcontract.ArtifactRequest{ContainerRoot: "/workspace/artifacts", MaxEntries: 2, MaxBytes: 1024}
@@ -955,6 +1013,30 @@ func TestCleanupRetriesExactWorkspacesAfterContainerAbsence(t *testing.T) {
 	}
 	if removeIndex < 0 || helperIndex <= removeIndex {
 		t.Fatalf("workspace retry did not occur after container destroy: calls=%v", runner.calls)
+	}
+	if helperIndex == 0 || len(runner.calls[helperIndex-1]) < 4 || !slices.Equal(runner.calls[helperIndex-1], []string{"ps", "--all", "--no-trunc", "--format", "{{.ID}}"}) {
+		t.Fatalf("immutable absence was not proved immediately before namespace entry: calls=%v", runner.calls)
+	}
+}
+
+func TestWorkspaceCleanupFailureClassificationIsStableAndNonSensitive(t *testing.T) {
+	for _, test := range []struct {
+		stage  string
+		code   int
+		reason string
+	}{
+		{stage: "container_absence", code: workspaceCleanupExitAbsence, reason: "WORKSPACE_NAMESPACE_CONTAINER_ABSENCE_UNPROVED"},
+		{stage: "scratch_identity", code: workspaceCleanupExitScratch, reason: "WORKSPACE_NAMESPACE_SCRATCH_IDENTITY_FAILED"},
+		{stage: "authority_record", code: workspaceCleanupExitAuthority, reason: "WORKSPACE_NAMESPACE_AUTHORITY_RECORD_FAILED"},
+		{stage: "workspace_contents", code: workspaceCleanupExitContents, reason: "WORKSPACE_NAMESPACE_CONTENT_REMOVAL_FAILED"},
+	} {
+		err := workspaceCleanupError(test.stage, errors.New("sensitive/provider/path detail"))
+		if code := WorkspaceCleanupExitCode(err); code != test.code {
+			t.Fatalf("stage=%s code=%d want=%d", test.stage, code, test.code)
+		}
+		if reason := workspaceCleanupFailureReason(err); reason != test.reason || strings.Contains(reason, "sensitive") || strings.Contains(reason, "path") {
+			t.Fatalf("stage=%s reason=%q", test.stage, reason)
+		}
 	}
 }
 
@@ -1773,7 +1855,7 @@ func TestWorkspaceNamespaceCleanupIsExactAndIdempotent(t *testing.T) {
 	runner.exists = false
 	for attempt := 0; attempt < 2; attempt++ {
 		err = CleanupWorkspaceContentsAfterContainer(
-			context.Background(), backend.New(runner), runner.containerIDValue(),
+			context.Background(), runner.containerIDValue(),
 			runner.labels["io.kenogram.job-owner"], runner.labels["io.kenogram.plan-digest"],
 			runner.labels["io.kenogram.declaration-digest"], scratch, scratchID,
 			authorityFileDigest,

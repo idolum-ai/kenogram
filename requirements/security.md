@@ -36,8 +36,11 @@ The deepest exact inspected mount boundary and its retained source inode bind
 the read; workspace mounts must also resolve beneath the exact private scratch.
 Cleanup persists a private owner/plan/declaration/scratch-bound inventory of
 the exact workspace source devices and inodes while the stopped container is
-still provable. After immutable container absence, a namespace helper proves
-that absence and empties only the recorded Kenogram workspace roots. Failure
+still provable. After immutable container absence, the parent repeats the proof
+immediately before namespace entry; the helper binds that ID to the authority
+record without recursively invoking Podman and empties only the recorded
+Kenogram workspace roots. Wait and Finalize workers must both join before
+cleanup can mutate provider or filesystem authority. Failure
 retains the record for an idempotent post-absence retry. The finalization worker
 and every namespace-helper process group must be joined before cleanup can
 advance. Symlinks and special nodes inside a workspace are unlinked as names,
