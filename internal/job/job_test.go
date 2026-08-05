@@ -1,6 +1,7 @@
 package job
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -558,6 +559,64 @@ func TestVerifierRejectsSelfConsistentForgedPlanProjection(t *testing.T) {
 	})
 	if _, err := Verify(evidence); err == nil || !strings.Contains(err.Error(), "declaration semantics") {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestVerifierStrictlyDecodesRetainedPlan(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func([]byte) []byte
+		want   string
+	}{
+		{
+			name: "unknown authority field",
+			mutate: func(raw []byte) []byte {
+				return append(bytes.TrimSuffix(raw, []byte("}\n")), []byte(",\"authority_override\":true}\n")...)
+			},
+			want: "unknown field",
+		},
+		{
+			name: "duplicate authority field",
+			mutate: func(raw []byte) []byte {
+				return append(bytes.TrimSuffix(raw, []byte("}\n")), []byte(",\"plan_digest\":\""+strings.Repeat("0", 64)+"\"}\n")...)
+			},
+			want: "duplicate object key",
+		},
+		{
+			name: "trailing document",
+			mutate: func(raw []byte) []byte {
+				return append(append([]byte{}, raw...), []byte("{}\n")...)
+			},
+			want: "trailing",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			executor, requestRaw, evidence, _ := fixture(t)
+			if _, err := executor.Run(context.Background(), requestRaw, evidence); err != nil {
+				t.Fatal(err)
+			}
+			planPath := filepath.Join(evidence, "plan.json")
+			raw, err := os.ReadFile(planPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := test.mutate(raw)
+			if err := os.WriteFile(planPath, changed, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rewriteManifest(t, evidence, func(manifest *jobcontract.Manifest) {
+				for index := range manifest.Entries {
+					if manifest.Entries[index].Path == "plan.json" {
+						manifest.Entries[index].Size = int64(len(changed))
+						manifest.Entries[index].SHA256 = digest(changed)
+					}
+				}
+			})
+			if _, err := Verify(evidence); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

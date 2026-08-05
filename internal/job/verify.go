@@ -108,13 +108,9 @@ func Verify(evidenceDir string) (Verification, error) {
 	if digest(observed["declaration.toml"]) != request.Declaration.SHA256 || result.Identity.DeclarationSHA256 != request.Declaration.SHA256 {
 		return Verification{}, errors.New("declaration identity mismatch")
 	}
-	planDigest, err := planContentDigest(observed["plan.json"])
+	retainedPlan, planDigest, err := planContentDigest(observed["plan.json"])
 	if err != nil {
 		return Verification{}, fmt.Errorf("re-derive plan digest: %w", err)
-	}
-	var retainedPlan plan.Result
-	if err := json.Unmarshal(observed["plan.json"], &retainedPlan); err != nil {
-		return Verification{}, err
 	}
 	declaration, err := decl.Parse(observed["declaration.toml"])
 	if err != nil {

@@ -3,6 +3,7 @@
 package job
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -617,19 +618,22 @@ func Provenance(executable string, build BuildIdentity) (jobcontract.Provenance,
 	return executableProvenance(executable, build)
 }
 
-func planContentDigest(raw []byte) (string, error) {
+func planContentDigest(raw []byte) (plan.Result, string, error) {
 	if err := jobcontract.ValidateJSONDocument(raw, jobcontract.MaximumManifestBytes); err != nil {
-		return "", err
+		return plan.Result{}, "", err
 	}
 	var result plan.Result
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", err
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	if err := decoder.Decode(&result); err != nil {
+		return plan.Result{}, "", fmt.Errorf("decode retained plan: %w", err)
 	}
 	_, evidenceDigest, err := plan.EvidenceCanonical(result.Plan)
 	if err != nil {
-		return "", err
+		return plan.Result{}, "", err
 	}
-	return prefixedDigest(evidenceDigest), nil
+	return result, prefixedDigest(evidenceDigest), nil
 }
 
 func readBoundRegular(path string, maximum int) ([]byte, error) {
