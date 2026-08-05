@@ -74,6 +74,12 @@ public `kenogram.podman-runtime-observation.v1` documents retain a closed,
 strictly decoded cross-phase proof; `verify-job` re-derives its bindings rather
 than accepting arbitrary provider JSON.
 
+Each runtime mount is explicitly classified as a declaration-owned input,
+workspace, staged helper, or lifecycle channel. The verifier cross-binds every
+declared source, target, and mode. Read-only content is bounded and revalidated;
+target-writable directories retain identity only and are never recursively
+hashed after the target has run.
+
 The Kenogram executable also acts as the image-independent holder and target
 launcher. It must therefore be a self-contained Linux binary for images that do
 not provide a compatible dynamic loader. The hosted integration builds it with

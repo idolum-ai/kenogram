@@ -185,12 +185,13 @@ type RuntimeObservation struct {
 }
 
 type RuntimeMountObservation struct {
+	Role             string `json:"role"`
 	Source           string `json:"source"`
 	Target           string `json:"target"`
 	Mode             string `json:"mode"`
 	Device           uint64 `json:"device"`
 	Inode            uint64 `json:"inode"`
 	FileType         string `json:"file_type"`
-	SHA256           string `json:"sha256"`
+	SHA256           string `json:"sha256,omitempty"`
 	IdentityVerified bool   `json:"identity_verified"`
 }

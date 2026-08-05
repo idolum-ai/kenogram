@@ -3,6 +3,8 @@ package jobpodman
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -81,6 +83,7 @@ type fakePodmanRunner struct {
 	imageDigest     string
 	containerID     string
 	cancelOnCreate  func()
+	afterStart      func()
 }
 
 func (f *fakePodmanRunner) Run(ctx context.Context, _ string, args ...string) ([]byte, error) {
@@ -92,6 +95,9 @@ func (f *fakePodmanRunner) Run(ctx context.Context, _ string, args ...string) ([
 		return []byte(`{"host":{"security":{"rootless":true},"cgroupVersion":"v2","idMappings":{"uidmap":[{"size":65536}],"gidmap":[{"size":65536}]}}}`), nil
 	case "ps":
 		if f.exists {
+			if len(args) > 2 && args[2] == "--no-trunc" {
+				return []byte(f.containerIDValue() + "\n"), nil
+			}
 			return []byte(f.name + "\n"), nil
 		}
 		return []byte{}, nil
@@ -131,6 +137,9 @@ func (f *fakePodmanRunner) Run(ctx context.Context, _ string, args ...string) ([
 		return []byte(f.containerIDValue() + "\n"), nil
 	case "start":
 		f.running = true
+		if f.afterStart != nil {
+			f.afterStart()
+		}
 		return nil, nil
 	case "inspect":
 		if !f.exists {
@@ -455,14 +464,26 @@ func TestCanceledCreateUsesFreshBoundedReconciliationAndCleanup(t *testing.T) {
 	}
 }
 
-func TestDirectRuntimeNeverDeletesAReplacedOwnedName(t *testing.T) {
+func TestDirectRuntimeNeverDeletesUnrelatedReplacementAtFormerName(t *testing.T) {
 	runtime, runner, _, invocation := runtimeFixture(t)
 	if _, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	runner.containerID = strings.Repeat("d", 64)
 	cleanup := runtime.Cleanup(context.Background(), invocation)
-	if cleanup.Status != "incomplete" || cleanup.ContainerAbsent || !runner.exists || hasCall(runner.calls, "rm") || !hasReason(cleanup.Reasons, "CONTAINER_OWNERSHIP_UNPROVED") || !hasReason(cleanup.Reasons, "SCRATCH_RETAINED_FOR_UNPROVED_CONTAINER") {
+	if cleanup.Status != "complete" || !cleanup.ContainerAbsent || !runner.exists || hasCall(runner.calls, "rm") {
+		t.Fatalf("cleanup=%#v calls=%v", cleanup, runner.calls)
+	}
+}
+
+func TestOwnedContainerRenameCannotEscapeImmutableIDCleanup(t *testing.T) {
+	runtime, runner, _, invocation := runtimeFixture(t)
+	if _, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	runner.name = "externally-renamed-owned-container"
+	cleanup := runtime.Cleanup(context.Background(), invocation)
+	if cleanup.Status != "complete" || !cleanup.ContainerAbsent || runner.exists || !hasCall(runner.calls, "rm", "--force", strings.Repeat("c", 64)) {
 		t.Fatalf("cleanup=%#v calls=%v", cleanup, runner.calls)
 	}
 }
@@ -506,6 +527,27 @@ func TestStagedHelperMustMatchExecutableProvenance(t *testing.T) {
 	}
 }
 
+func TestStageHelperAcceptsKernelResolvedProcStyleExecutable(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real-executable")
+	if err := os.WriteFile(real, []byte("kernel-resolved-bytes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "self-exe")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	scratch := t.TempDir()
+	target, fact, err := stageHelper(context.Background(), func() (string, error) { return link, nil }, scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, readErr := os.ReadFile(target)
+	if readErr != nil || string(raw) != "kernel-resolved-bytes" || fact.Role != "helper" || fact.SHA256 != digestBytes(raw) {
+		t.Fatalf("target=%q fact=%#v raw=%q error=%v", target, fact, raw, readErr)
+	}
+}
+
 func TestMountInodeReplacementInvalidatesFinalization(t *testing.T) {
 	runtime, _, attached, invocation := runtimeFixture(t)
 	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
@@ -532,6 +574,78 @@ func TestMountInodeReplacementInvalidatesFinalization(t *testing.T) {
 	if _, err := process.Finalize(context.Background()); err == nil || !strings.Contains(err.Error(), "source identity changed") {
 		t.Fatalf("error=%v", err)
 	}
+}
+
+func TestWritableMountContentIsNeverTraversedDuringFinalization(t *testing.T) {
+	runtime, _, attached, invocation := runtimeFixture(t)
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached.finish(nil)
+	if _, err := process.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var workspace string
+	for _, fact := range runtime.mountFacts {
+		if fact.Target == "/workspace" {
+			workspace = fact.Source
+			if fact.SHA256 != "" {
+				t.Fatalf("writable fact claims content=%q", fact.SHA256)
+			}
+		}
+	}
+	if err := syscall.Mkfifo(filepath.Join(workspace, "target-owned-fifo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Finalize(context.Background()); err != nil {
+		t.Fatalf("target-writable content was traversed: %v", err)
+	}
+}
+
+func TestReadOnlyMountContentIsRevalidatedAtFinalization(t *testing.T) {
+	runtime, _, attached, invocation := runtimeFixture(t)
+	readonly := filepath.Join(t.TempDir(), "input")
+	if err := os.WriteFile(readonly, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: readonly, Target: "/readonly", Mode: "ro"})
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attached.finish(nil)
+	if _, err := process.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(readonly, []byte("after!"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Finalize(context.Background()); err == nil || !strings.Contains(err.Error(), "source identity changed") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestReadOnlyMountContentIsRevalidatedImmediatelyBeforeTargetUse(t *testing.T) {
+	runtime, runner, _, invocation := runtimeFixture(t)
+	readonly := filepath.Join(t.TempDir(), "input")
+	if err := os.WriteFile(readonly, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: readonly, Target: "/readonly", Mode: "ro"})
+	runner.afterStart = func() { _ = os.WriteFile(readonly, []byte("after!"), 0o600) }
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err == nil || process == nil || !strings.Contains(err.Error(), "source identity changed") {
+		t.Fatalf("process=%#v error=%v", process, err)
+	}
+	if runtime.process != nil && runtime.process.attached != nil {
+		t.Fatal("target client started after read-only input changed")
+	}
+}
+
+func digestBytes(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func TestAuthenticatedLifecyclePreservesProviderReservedTargetExit(t *testing.T) {

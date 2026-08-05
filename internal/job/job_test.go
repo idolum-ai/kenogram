@@ -114,11 +114,18 @@ func (f *fakeProcess) Finalize(context.Context) (RuntimeFinalization, error) {
 func fakeRuntimeObservation(invocation Invocation, phase string) []byte {
 	running := phase == "before"
 	mounts := []jobcontract.RuntimeMountObservation{
-		{Source: "/tmp/kenogram-test-helper", Target: "/etc/kenogram/job-exec", Mode: "ro", Device: 1, Inode: 1, FileType: "file", SHA256: invocation.Provenance.ExecutableSHA256, IdentityVerified: true},
-		{Source: "/tmp/kenogram-test-lifecycle", Target: "/etc/kenogram/job-lifecycle", Mode: "rw", Device: 1, Inode: 2, FileType: "directory", SHA256: testDigest(), IdentityVerified: true},
+		{Role: "helper", Source: "/tmp/kenogram-test-helper", Target: "/etc/kenogram/job-exec", Mode: "ro", Device: 1, Inode: 1, FileType: "file", SHA256: invocation.Provenance.ExecutableSHA256, IdentityVerified: true},
+		{Role: "lifecycle", Source: "/tmp/kenogram-test-lifecycle", Target: "/etc/kenogram/job-lifecycle", Mode: "rw", Device: 1, Inode: 2, FileType: "directory", IdentityVerified: true},
 	}
 	for index, target := range invocation.Prepared.Result.Plan.Workspace {
-		mounts = append(mounts, jobcontract.RuntimeMountObservation{Source: fmt.Sprintf("/tmp/kenogram-test-workspace-%d", index), Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 3), FileType: "directory", SHA256: testDigest(), IdentityVerified: true})
+		mounts = append(mounts, jobcontract.RuntimeMountObservation{Role: "workspace", Source: fmt.Sprintf("/tmp/kenogram-test-workspace-%d", index), Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 3), FileType: "directory", IdentityVerified: true})
+	}
+	for index, mount := range invocation.Prepared.Result.Plan.Mounts {
+		fact := jobcontract.RuntimeMountObservation{Role: "declared", Source: mount.Source, Target: mount.Target, Mode: mount.Mode, Device: 2, Inode: uint64(index + 100), FileType: "directory", IdentityVerified: true}
+		if mount.Mode == "ro" {
+			fact.SHA256 = testDigest()
+		}
+		mounts = append(mounts, fact)
 	}
 	sort.Slice(mounts, func(i, j int) bool { return mounts[i].Target < mounts[j].Target })
 	value := jobcontract.RuntimeObservation{
@@ -171,6 +178,64 @@ func TestVerifierRejectsGenericJSONSubstitutedForPodmanRuntimeContract(t *testin
 	verification, err := Verify(evidence)
 	if err != nil || verification.Status != "incomplete" {
 		t.Fatalf("generic provider evidence was not downgraded: verification=%#v error=%v", verification, err)
+	}
+}
+
+func TestRuntimeVerifierCrossBindsDeclaredMountSourcesAndRuntimeRoles(t *testing.T) {
+	_, requestRaw, _, _ := fixture(t)
+	request, err := jobcontract.ParseRequest(requestRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration, err := os.ReadFile(request.Declaration.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := app.PrepareBytes(declaration, request.Declaration.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Result.Plan.Mounts = append(prepared.Result.Plan.Mounts, plan.Mount{Source: "/retained/input", Target: "/input", Mode: "ro"})
+	provenance, _, err := Provenance("", BuildIdentity{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocation := Invocation{Request: request, Prepared: prepared, Provenance: provenance}
+	parse := func(phase string) jobcontract.RuntimeObservation {
+		value, parseErr := jobcontract.ParseRuntimeObservation(fakeRuntimeObservation(invocation, phase))
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		return value
+	}
+	result := jobcontract.Result{Identity: jobcontract.ExecutionIdentity{RuntimeProvider: "podman-cli", Generation: 1, ImageReference: prepared.Result.Plan.World.Base, ImageDigest: testDigest(), PlanSHA256: prefixedDigest(prepared.Result.EvidenceDigest), DeclarationSHA256: prefixedDigest(prepared.Result.DeclarationDigest)}}
+	for _, test := range []struct {
+		name   string
+		mutate func(*jobcontract.RuntimeObservation)
+	}{
+		{name: "declared source substitution", mutate: func(value *jobcontract.RuntimeObservation) {
+			for index := range value.Mounts {
+				if value.Mounts[index].Role == "declared" {
+					value.Mounts[index].Source = "/substituted/input"
+				}
+			}
+		}},
+		{name: "workspace role substitution", mutate: func(value *jobcontract.RuntimeObservation) {
+			for index := range value.Mounts {
+				if value.Mounts[index].Role == "workspace" {
+					value.Mounts[index].Role = "declared"
+				}
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before, after := parse("before"), parse("after")
+			test.mutate(&before)
+			test.mutate(&after)
+			if err := verifyRuntimeObservations(before, after, result, request, prepared.Result, provenance); err == nil || !strings.Contains(err.Error(), "undeclared") {
+				t.Fatalf("error=%v", err)
+			}
+		})
 	}
 }
 

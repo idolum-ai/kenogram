@@ -308,6 +308,29 @@ func (p *Podman) Exists(ctx context.Context, name string) (bool, error) {
 	}
 	return false, nil
 }
+
+// ExistsID observes an immutable full container ID without consulting its
+// mutable display name.
+func (p *Podman) ExistsID(ctx context.Context, id string) (bool, error) {
+	if len(id) != 64 {
+		return false, errors.New("container ID is invalid")
+	}
+	for _, character := range id {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false, errors.New("container ID is invalid")
+		}
+	}
+	raw, err := p.Runner.Run(ctx, p.Binary, "ps", "--all", "--no-trunc", "--format", "{{.ID}}")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == id {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 func (p *Podman) Exec(ctx context.Context, name string, detach bool, command []string) error {
 	args := []string{"exec"}
 	if detach {

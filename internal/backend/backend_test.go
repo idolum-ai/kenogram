@@ -179,6 +179,15 @@ func TestMountRootAndUnshareUseExactProviderArgv(t *testing.T) {
 		t.Fatalf("calls=%#v", f.calls)
 	}
 }
+
+func TestExistsIDUsesUntruncatedImmutableInventory(t *testing.T) {
+	id := strings.Repeat("c", 64)
+	f := &fake{out: []byte(id + "\n")}
+	exists, err := New(f).ExistsID(context.Background(), id)
+	if err != nil || !exists || !reflect.DeepEqual(f.calls[0].args, []string{"ps", "--all", "--no-trunc", "--format", "{{.ID}}"}) {
+		t.Fatalf("exists=%t error=%v calls=%#v", exists, err, f.calls)
+	}
+}
 func TestVerifyEvidence(t *testing.T) {
 	r := plan.Result{PlanDigest: "p", DeclarationDigest: "d", Plan: plan.Plan{Name: "w", World: plan.World{User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
 	e := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", IPCMode: "private", IPCIsolatedFromHost: true, PIDMode: "private", UTSMode: "private", UserNSMode: "", UIDMap: []IDMap{{ContainerID: int64(os.Getuid()), HostID: int64(os.Getuid()), Size: 1}}, GIDMap: []IDMap{{ContainerID: int64(os.Getgid()), HostID: int64(os.Getgid()), Size: 1}}, User: "agent", Hostname: "", WorkingDir: "", CapDrop: []string{"CAP_ALL"}, BoundingCaps: []string{}, SecurityOpt: []string{"no-new-privileges"}, SeccompMode: 2, Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}}

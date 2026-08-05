@@ -34,7 +34,9 @@ func ValidateRuntimeObservation(value RuntimeObservation) error {
 	}
 	seen := map[string]struct{}{}
 	for _, mount := range value.Mounts {
-		if !filepath.IsAbs(mount.Source) || filepath.Clean(mount.Source) != mount.Source || !filepath.IsAbs(mount.Target) || filepath.Clean(mount.Target) != mount.Target || (mount.Mode != "ro" && mount.Mode != "rw") || mount.Device > uint64(MaximumWireInteger) || mount.Inode == 0 || mount.Inode > uint64(MaximumWireInteger) || (mount.FileType != "file" && mount.FileType != "directory") || !runtimeHexDigest.MatchString(mount.SHA256) || !mount.IdentityVerified {
+		validRole := mount.Role == "declared" || mount.Role == "workspace" || mount.Role == "helper" || mount.Role == "lifecycle"
+		validContent := (mount.Mode == "ro" && runtimeHexDigest.MatchString(mount.SHA256)) || (mount.Mode == "rw" && mount.SHA256 == "")
+		if !validRole || !validContent || !filepath.IsAbs(mount.Source) || filepath.Clean(mount.Source) != mount.Source || !filepath.IsAbs(mount.Target) || filepath.Clean(mount.Target) != mount.Target || (mount.Mode != "ro" && mount.Mode != "rw") || mount.Device > uint64(MaximumWireInteger) || mount.Inode == 0 || mount.Inode > uint64(MaximumWireInteger) || (mount.FileType != "file" && mount.FileType != "directory") || !mount.IdentityVerified {
 			return fmt.Errorf("runtime mount %q is invalid", mount.Target)
 		}
 		if _, duplicate := seen[mount.Target]; duplicate {

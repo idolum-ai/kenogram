@@ -25,6 +25,10 @@ Notable user-visible and operational changes are recorded here.
   a strict cross-phase runtime observation schema, and an authenticated
   target-local lifecycle record that separates target timing from Podman client
   overhead.
+- Make executable staging work with Linux's kernel-resolved `/proc/self/exe`,
+  prove cleanup and absence by immutable ID after renames, distinguish
+  content-bound read-only mounts from identity-only writable mounts, and
+  cross-bind explicit mount roles and declaration sources offline.
 - Add a proof-only semantic reference for transactional cutover readiness,
   including bounded provider actions, rollback, pre-commit process death,
   inherited egress, and acknowledgement-only compatibility without adding a

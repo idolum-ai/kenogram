@@ -183,7 +183,7 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
-	helperSource, helperFact, err := stageHelper(r.executable, scratch)
+	helperSource, helperFact, err := stageHelper(ctx, r.executable, scratch)
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
@@ -198,7 +198,7 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 		return r.refuseBeforeAdmission(err)
 	}
 	mounts = append(mounts, backend.Mount{Source: helperSource, Target: jobHelperPath, Mode: "ro"}, backend.Mount{Source: lifecycleHost, Target: jobLifecyclePath, Mode: "rw", NoExec: true})
-	mountFacts, err := captureMountFacts(mounts)
+	mountFacts, err := captureMountFacts(ctx, mounts, invocation.Prepared.Result)
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
@@ -252,7 +252,7 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if err != nil {
 		return r.admittedFailure(invocation, err)
 	}
-	if err := verifyMountFacts(mountFacts, true); err != nil {
+	if err := verifyMountFacts(ctx, mountFacts); err != nil {
 		return r.admittedFailure(invocation, err)
 	}
 	before, err := runtimeEvidence("before", r.now().UTC(), evidence, invocation, imageDigest, mountFacts)
@@ -303,13 +303,13 @@ func (r *Runtime) recordOwnership(containerID string) {
 
 func (r *Runtime) proveOwned(ctx context.Context) (backend.Evidence, error) {
 	r.mu.Lock()
-	name, id, owner := r.name, r.containerID, r.ownerToken
+	id, owner := r.containerID, r.ownerToken
 	r.mu.Unlock()
-	if name == "" || !containerIDPattern.MatchString(id) || !ownerTokenPattern.MatchString(owner) {
+	if !containerIDPattern.MatchString(id) || !ownerTokenPattern.MatchString(owner) {
 		return backend.Evidence{}, errors.New("container ownership authority is incomplete")
 	}
 	evidence, err := r.Podman.Inspect(ctx, id)
-	if err != nil || evidence.ID != id || evidence.Name != name || evidence.Labels["io.kenogram.job-owner"] != owner {
+	if err != nil || evidence.ID != id || evidence.Labels["io.kenogram.job-owner"] != owner {
 		return backend.Evidence{}, errors.New("container ownership is unproved")
 	}
 	return evidence, nil
@@ -365,24 +365,24 @@ func (r *Runtime) Cleanup(ctx context.Context, _ job.Invocation) jobcontract.Cle
 			r.recordOwnership(containerID)
 		}
 	}
-	if mayOwn && name != "" {
-		exists, existsErr := r.Podman.Exists(ctx, name)
+	if mayOwn && containerID != "" {
+		exists, existsErr := r.Podman.ExistsID(ctx, containerID)
 		switch {
 		case existsErr != nil:
 			reasons = append(reasons, "CONTAINER_OWNERSHIP_UNPROVED")
 		case !exists:
 		case exists:
 			evidence, inspectErr := r.Podman.Inspect(ctx, containerID)
-			if inspectErr != nil || containerID == "" || evidence.ID != containerID || evidence.Name != name || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
+			if inspectErr != nil || containerID == "" || evidence.ID != containerID || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
 				reasons = append(reasons, "CONTAINER_OWNERSHIP_UNPROVED")
 			} else if err := r.Podman.Destroy(ctx, containerID); err != nil {
 				reasons = append(reasons, "CONTAINER_REMOVE_FAILED")
 			}
 		}
 	}
-	containerAbsent := true
-	if name != "" {
-		exists, err := r.Podman.Exists(ctx, name)
+	containerAbsent := name == ""
+	if containerID != "" {
+		exists, err := r.Podman.ExistsID(ctx, containerID)
 		if err != nil {
 			reasons = append(reasons, "CONTAINER_ABSENCE_UNPROVED")
 			containerAbsent = false
@@ -392,6 +392,9 @@ func (r *Runtime) Cleanup(ctx context.Context, _ job.Invocation) jobcontract.Cle
 				reasons = append(reasons, "CONTAINER_PRESENT")
 			}
 		}
+	} else if name != "" {
+		reasons = append(reasons, "CONTAINER_ABSENCE_UNPROVED")
+		containerAbsent = false
 	}
 	if scratch != "" && containerAbsent {
 		if err := os.RemoveAll(scratch); err != nil {
@@ -518,7 +521,7 @@ func (p *process) Finalize(ctx context.Context) (job.RuntimeFinalization, error)
 	if err := verifyStoppedEvidence(evidence, publicProviderPlan(p.invocation.Prepared.Result), p.runtime.name, p.runtime.containerID, p.runtime.ownerToken, p.identity.ImageDigest); err != nil {
 		return job.RuntimeFinalization{}, fmt.Errorf("verify stopped job runtime: %w", err)
 	}
-	if err := verifyMountFacts(p.runtime.mountFacts, false); err != nil {
+	if err := verifyMountFacts(ctx, p.runtime.mountFacts); err != nil {
 		return job.RuntimeFinalization{}, err
 	}
 	after, err := runtimeEvidence("after", p.runtime.now().UTC(), evidence, p.invocation, p.identity.ImageDigest, p.runtime.mountFacts)
@@ -682,7 +685,7 @@ func CollectArtifacts(ctx context.Context, podman *backend.Podman, containerID, 
 		return errors.New("artifact collector authority is invalid")
 	}
 	evidence, err := podman.Inspect(ctx, containerID)
-	if err != nil || evidence.Running || evidence.ID != containerID || evidence.Name != name || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
+	if err != nil || evidence.Running || evidence.ID != containerID || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
 		return errors.New("stopped artifact source identity is unproved")
 	}
 	mounted, err := podman.MountRoot(ctx, containerID)
@@ -695,7 +698,7 @@ func CollectArtifacts(ctx context.Context, podman *backend.Podman, containerID, 
 		// Unmount is destructive provider state. Re-prove immutable identity and
 		// owner immediately before issuing it.
 		proof, proofErr := podman.Inspect(unmountCtx, containerID)
-		if proofErr != nil || proof.ID != containerID || proof.Name != name || proof.Labels["io.kenogram.job-owner"] != ownerToken {
+		if proofErr != nil || proof.ID != containerID || proof.Labels["io.kenogram.job-owner"] != ownerToken {
 			retErr = errors.Join(retErr, errors.New("artifact source ownership changed before unmount"))
 			return
 		}
@@ -932,14 +935,10 @@ func runningExecutable() (string, error) {
 	return os.Executable()
 }
 
-func stageHelper(resolve func() (string, error), scratch string) (string, jobcontract.RuntimeMountObservation, error) {
+func stageHelper(ctx context.Context, resolve func() (string, error), scratch string) (string, jobcontract.RuntimeMountObservation, error) {
 	source, err := resolve()
 	if err != nil {
 		return "", jobcontract.RuntimeMountObservation{}, fmt.Errorf("resolve governed job helper: %w", err)
-	}
-	before, err := os.Lstat(source)
-	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
-		return "", jobcontract.RuntimeMountObservation{}, errors.New("governed job helper source is not a regular non-symlink file")
 	}
 	input, err := os.Open(source)
 	if err != nil {
@@ -947,34 +946,56 @@ func stageHelper(resolve func() (string, error), scratch string) (string, jobcon
 	}
 	defer input.Close()
 	info, err := input.Stat()
-	if err != nil || !info.Mode().IsRegular() || !os.SameFile(before, info) || info.Size() < 1 || info.Size() > 1<<30 {
-		return "", jobcontract.RuntimeMountObservation{}, errors.New("governed job helper is not a bounded stable regular file")
+	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 1<<30 {
+		return "", jobcontract.RuntimeMountObservation{}, errors.New("kernel-resolved governed job helper is not a bounded regular file")
 	}
 	target := filepath.Join(scratch, "job-exec")
 	output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o555)
 	if err != nil {
 		return "", jobcontract.RuntimeMountObservation{}, err
 	}
-	written, copyErr := io.Copy(output, io.LimitReader(input, (1<<30)+1))
+	written, copyErr := io.Copy(output, &contextReader{ctx: ctx, reader: io.LimitReader(input, (1<<30)+1)})
+	afterInput, inputStatErr := input.Stat()
 	syncErr := output.Sync()
 	closeErr := output.Close()
-	if copyErr != nil || syncErr != nil || closeErr != nil || written != info.Size() {
-		return "", jobcontract.RuntimeMountObservation{}, errors.Join(copyErr, syncErr, closeErr, errors.New("governed job helper copy is incomplete"))
+	if copyErr != nil || inputStatErr != nil || syncErr != nil || closeErr != nil || written != info.Size() || !os.SameFile(info, afterInput) || afterInput.Size() != info.Size() || !afterInput.ModTime().Equal(info.ModTime()) {
+		return "", jobcontract.RuntimeMountObservation{}, errors.Join(copyErr, inputStatErr, syncErr, closeErr, errors.New("governed job helper copy is incomplete or changed during copy"))
 	}
 	if err := os.Chmod(target, 0o555); err != nil {
 		return "", jobcontract.RuntimeMountObservation{}, err
 	}
-	fact, err := captureSourceFact(target, jobHelperPath, "ro")
+	fact, err := captureSourceFact(ctx, target, jobHelperPath, "ro", "helper", true)
 	if err != nil {
 		return "", jobcontract.RuntimeMountObservation{}, err
 	}
 	return target, fact, nil
 }
 
-func captureMountFacts(mounts []backend.Mount) ([]jobcontract.RuntimeMountObservation, error) {
+func captureMountFacts(ctx context.Context, mounts []backend.Mount, result plan.Result) ([]jobcontract.RuntimeMountObservation, error) {
 	facts := make([]jobcontract.RuntimeMountObservation, 0, len(mounts))
 	for _, mount := range mounts {
-		fact, err := captureSourceFact(mount.Source, mount.Target, mount.Mode)
+		role := ""
+		switch mount.Target {
+		case jobHelperPath:
+			role = "helper"
+		case jobLifecyclePath:
+			role = "lifecycle"
+		default:
+			for _, target := range result.Plan.Workspace {
+				if mount.Target == target {
+					role = "workspace"
+				}
+			}
+			for _, declared := range result.Plan.Mounts {
+				if mount.Target == declared.Target && mount.Source == declared.Source && mount.Mode == declared.Mode {
+					role = "declared"
+				}
+			}
+		}
+		if role == "" {
+			return nil, fmt.Errorf("mount %q has no retained authority role", mount.Target)
+		}
+		fact, err := captureSourceFact(ctx, mount.Source, mount.Target, mount.Mode, role, mount.Mode == "ro")
 		if err != nil {
 			return nil, fmt.Errorf("capture mount %q identity: %w", mount.Target, err)
 		}
@@ -984,7 +1005,7 @@ func captureMountFacts(mounts []backend.Mount) ([]jobcontract.RuntimeMountObserv
 	return facts, nil
 }
 
-func captureSourceFact(source, target, mode string) (jobcontract.RuntimeMountObservation, error) {
+func captureSourceFact(ctx context.Context, source, target, mode, role string, content bool) (jobcontract.RuntimeMountObservation, error) {
 	before, err := os.Lstat(source)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || (!before.IsDir() && !before.Mode().IsRegular()) {
 		return jobcontract.RuntimeMountObservation{}, errors.New("source is not a regular non-symlink file or directory")
@@ -993,20 +1014,24 @@ func captureSourceFact(source, target, mode string) (jobcontract.RuntimeMountObs
 	if !ok || stat.Dev == 0 || stat.Ino == 0 {
 		return jobcontract.RuntimeMountObservation{}, errors.New("source device and inode are unavailable")
 	}
-	digest, err := sourceContentDigest(source, before)
-	if err != nil {
-		return jobcontract.RuntimeMountObservation{}, err
+	digest := ""
+	if content {
+		observed, err := boundedSourceContentDigest(ctx, source, before)
+		if err != nil {
+			return jobcontract.RuntimeMountObservation{}, err
+		}
+		digest = "sha256:" + observed
 	}
 	fileType := "file"
 	if before.IsDir() {
 		fileType = "directory"
 	}
-	return jobcontract.RuntimeMountObservation{Source: filepath.Clean(source), Target: target, Mode: mode, Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: fileType, SHA256: "sha256:" + digest, IdentityVerified: true}, nil
+	return jobcontract.RuntimeMountObservation{Role: role, Source: filepath.Clean(source), Target: target, Mode: mode, Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: fileType, SHA256: digest, IdentityVerified: true}, nil
 }
 
-func sourceContentDigest(source string, info fs.FileInfo) (string, error) {
+func boundedSourceContentDigest(ctx context.Context, source string, info fs.FileInfo) (string, error) {
 	if info.IsDir() {
-		return plan.DigestSource(source)
+		return boundedDirectoryDigest(ctx, source)
 	}
 	file, err := os.Open(source)
 	if err != nil {
@@ -1018,7 +1043,12 @@ func sourceContentDigest(source string, info fs.FileInfo) (string, error) {
 		return "", errors.New("source identity changed during digest open")
 	}
 	hash := sha256.New()
-	if _, err := io.Copy(hash, io.LimitReader(file, (1<<30)+1)); err != nil {
+	written, copyErr := io.Copy(hash, &contextReader{ctx: ctx, reader: io.LimitReader(file, (1<<30)+1)})
+	after, statErr := file.Stat()
+	if copyErr != nil || statErr != nil || written != opened.Size() || !os.SameFile(opened, after) || after.Size() != opened.Size() || !after.ModTime().Equal(opened.ModTime()) {
+		return "", errors.Join(copyErr, statErr, errors.New("source changed during content digest"))
+	}
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	if opened.Size() > 1<<30 {
@@ -1027,10 +1057,86 @@ func sourceContentDigest(source string, info fs.FileInfo) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func verifyMountFacts(facts []jobcontract.RuntimeMountObservation, verifyDigest bool) error {
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
+}
+
+func boundedDirectoryDigest(ctx context.Context, root string) (string, error) {
+	entries := []string{}
+	var nodes, total int64
+	err := filepath.WalkDir(root, func(path string, item fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		nodes++
+		if nodes > 20_000 {
+			return errors.New("read-only mount content exceeds entry bound")
+		}
+		info, err := item.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.IsDir():
+			entries = append(entries, "d\x00"+filepath.ToSlash(rel)+"\x00"+info.Mode().Perm().String())
+		case info.Mode().IsRegular():
+			if info.Size() < 0 || info.Size() > (1<<30)-total {
+				return errors.New("read-only mount content exceeds byte bound")
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			opened, err := file.Stat()
+			if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+				file.Close()
+				return errors.New("read-only mount changed during content open")
+			}
+			hash := sha256.New()
+			written, copyErr := io.Copy(hash, &contextReader{ctx: ctx, reader: io.LimitReader(file, info.Size()+1)})
+			after, statErr := file.Stat()
+			closeErr := file.Close()
+			if copyErr != nil || statErr != nil || closeErr != nil || written != info.Size() || !os.SameFile(opened, after) || after.Size() != opened.Size() || !after.ModTime().Equal(opened.ModTime()) {
+				return errors.Join(copyErr, statErr, closeErr, errors.New("read-only mount changed during bounded digest"))
+			}
+			total += written
+			entries = append(entries, "f\x00"+filepath.ToSlash(rel)+"\x00"+hex.EncodeToString(hash.Sum(nil))+"\x00"+info.Mode().Perm().String())
+		default:
+			return fmt.Errorf("read-only mount contains unsupported node %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(entries)
+	hash := sha256.New()
+	for _, entry := range entries {
+		io.WriteString(hash, entry)
+		hash.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func verifyMountFacts(ctx context.Context, facts []jobcontract.RuntimeMountObservation) error {
 	for _, expected := range facts {
-		observed, err := captureSourceFact(expected.Source, expected.Target, expected.Mode)
-		if err != nil || observed.Device != expected.Device || observed.Inode != expected.Inode || observed.FileType != expected.FileType || (verifyDigest && observed.SHA256 != expected.SHA256) {
+		observed, err := captureSourceFact(ctx, expected.Source, expected.Target, expected.Mode, expected.Role, expected.SHA256 != "")
+		if err != nil || observed.Device != expected.Device || observed.Inode != expected.Inode || observed.FileType != expected.FileType || observed.Role != expected.Role || observed.SHA256 != expected.SHA256 {
 			return fmt.Errorf("mount %q source identity changed", expected.Target)
 		}
 	}

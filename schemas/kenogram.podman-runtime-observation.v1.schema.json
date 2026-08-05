@@ -44,12 +44,17 @@
     "absolute_path": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^\\u0000]*$"},
     "mount": {
       "type": "object", "additionalProperties": false,
-      "required": ["source", "target", "mode", "device", "inode", "file_type", "sha256", "identity_verified"],
+      "required": ["role", "source", "target", "mode", "device", "inode", "file_type", "identity_verified"],
       "properties": {
+        "role": {"enum": ["declared", "workspace", "helper", "lifecycle"]},
         "source": {"$ref": "#/$defs/absolute_path"}, "target": {"$ref": "#/$defs/absolute_path"},
         "mode": {"enum": ["ro", "rw"]}, "device": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "inode": {"$ref": "#/$defs/wire_positive"},
         "file_type": {"enum": ["file", "directory"]}, "sha256": {"$ref": "#/$defs/digest"}, "identity_verified": {"const": true}
-      }
+      },
+      "oneOf": [
+        {"required": ["sha256"], "properties": {"mode": {"const": "ro"}}},
+        {"not": {"required": ["sha256"]}, "properties": {"mode": {"const": "rw"}}}
+      ]
     }
   }
 }

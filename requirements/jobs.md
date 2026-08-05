@@ -263,15 +263,20 @@ unbounded `podman cp` as artifact authority.
 Every container uses `network=none`; a request with `network.allow` is refused
 rather than silently broadened. The target command is absolute and its requested
 working directory must equal the declared world workdir, keeping the inspected
-configuration and execution authority identical. Declared bind mounts have source device, inode,
-type, and content digest captured before creation, retain
-their exact read-only/read-write mode, and cannot overlap known Podman or Docker
-control sockets. Runtime memory, CPU, PID, user, namespace, capability,
+configuration and execution authority identical. Declared bind mounts have
+source device, inode, and type captured before creation. Read-only inputs and
+the staged helper additionally receive a bounded content digest that is
+revalidated immediately before target admission and again before finalization
+use. Target-writable workspace and lifecycle directories intentionally carry no
+unchanged-content claim and are never recursively hashed during finalization.
+Mounts retain their exact read-only/read-write mode and cannot overlap known
+Podman or Docker control sockets. Runtime memory, CPU, PID, user, namespace, capability,
 seccomp, image, mount, and ownership facts are independently inspected before
 target admission. Cleanup re-inspects both the immutable container ID and the
 random ownership label before every destructive stop, kill, unmount, or
-removal. Every post-create provider call is addressed by immutable container
-ID. A canceled or reply-lost create is reconciled under a fresh bounded context,
+removal. Every post-create provider call, cleanup check, and absence proof is
+addressed by immutable container ID; a later rename cannot hide an owned
+container. A canceled or reply-lost create is reconciled under a fresh bounded context,
 and Kenogram never deletes a name whose identity or ownership has changed.
 
 Podman reserves exit statuses for provider/invocation failures, so the adapter

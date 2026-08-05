@@ -201,18 +201,23 @@ func verifyRuntimeObservations(before, after jobcontract.RuntimeObservation, res
 	if !reflect.DeepEqual(stableBefore, stableAfter) {
 		return errors.New("stable runtime enforcement facts changed across phases")
 	}
-	expected := map[string]string{jobHelperPathForVerification: "ro", jobLifecyclePathForVerification: "rw"}
+	type expectedMount struct{ mode, role, source string }
+	expected := map[string]expectedMount{
+		jobHelperPathForVerification:    {mode: "ro", role: "helper"},
+		jobLifecyclePathForVerification: {mode: "rw", role: "lifecycle"},
+	}
 	for _, target := range retained.Plan.Workspace {
-		expected[target] = "rw"
+		expected[target] = expectedMount{mode: "rw", role: "workspace"}
 	}
 	for _, mount := range retained.Plan.Mounts {
-		expected[mount.Target] = mount.Mode
+		expected[mount.Target] = expectedMount{mode: mount.Mode, role: "declared", source: mount.Source}
 	}
 	if len(before.Mounts) != len(expected) {
 		return errors.New("runtime mount inventory disagrees with retained plan")
 	}
 	for _, mount := range before.Mounts {
-		if expected[mount.Target] != mount.Mode {
+		authority, exists := expected[mount.Target]
+		if !exists || authority.mode != mount.Mode || authority.role != mount.Role || (authority.source != "" && authority.source != mount.Source) {
 			return fmt.Errorf("runtime mount %q is undeclared or has the wrong mode", mount.Target)
 		}
 		if mount.Target == jobHelperPathForVerification && mount.SHA256 != provenance.ExecutableSHA256 {
