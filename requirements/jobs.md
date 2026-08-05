@@ -1,10 +1,11 @@
 # Governed job contract
 
-Status: implemented provider-independent core. The schemas, independent Go
-semantic validators, create-only publisher, bounded executor, and offline
-verifier are implemented. `kenogram verify-job` and `kenogram version --json`
-are active. `kenogram job` has its final CLI and runtime injection boundary but
-fails closed until K5 supplies a directly attached one-shot provider.
+Status: implemented direct Linux provider and provider-independent core. The
+schemas, independent Go semantic validators, create-only publisher, bounded
+executor, offline verifier, and direct one-shot Podman CLI adapter are active.
+The adapter deliberately refuses declared egress until a job-scoped proxy can
+be proven. Darwin either hands the exact invocation to an explicitly configured
+Linux Apple container machine or fails closed without namespace claims.
 
 A governed job is one noninteractive, bounded target execution inside a fresh
 Kenogram generation. It is distinct from the persistent-world service model.
@@ -205,10 +206,11 @@ Ergograph and other consumers must independently parse and verify the retained
 bytes. They do not import Kenogram packages, and Kenogram does not import their
 model, ledger, qualification, or release code.
 
-## K5 direct-provider obligation
+## K5 direct provider
 
-K5 must implement the `job.Runtime` / `job.Process` interface without invoking
-the persistent `App.Up`/`Destroy` lifecycle. The adapter must prove:
+The direct adapter implements `job.Runtime` / `job.Process` without invoking
+the persistent `App.Up`/`Destroy` lifecycle or contacting a Docker-compatible
+daemon API. It invokes the Podman CLI with exact argv and proves:
 
 - a fresh bounded generation and immutable observed image digest;
 - attached target admission with stdout and stderr connected directly to the
@@ -222,8 +224,51 @@ the persistent `App.Up`/`Destroy` lifecycle. The adapter must prove:
 - cancellation followed by bounded forced escalation; and
 - post-cleanup absence of the container, proxy, and target process group.
 
+The declared image never supplies the inert holder or environment launcher.
+The executing Kenogram binary is mounted read-only at the declaration-reserved
+`/etc/kenogram/job-exec` path and supplies both. Public and secret environment
+values cross to that launcher only over a bounded binary stdin protocol. Secret
+bytes are read from the uniquely bound declaration-owned regular source after
+content revalidation; they never enter provider argv, the provider environment,
+or retained evidence. Copy staging is removed immediately after provider copy;
+ordinary scratch is removed only after container absence so uncertain ownership
+cannot redirect cleanup. The launched target receives exactly the requested
+environment and an already-consumed stdin.
+
+Because that helper executes inside the declared image, the Linux Kenogram
+binary must be self-contained when the image has no compatible dynamic loader.
+The real integration builds with `CGO_ENABLED=0`; release-candidate packaging
+must separately prove the distributed Linux artifact is equally self-contained.
+
+Requested artifacts are collected only after the target is terminal and the
+container is stopped. A second staged Kenogram helper enters `podman unshare`,
+re-proves the immutable container ID and owner label, mounts the stopped root
+inside that user namespace, and copies only descriptor-opened regular files
+under the requested count, byte, traversal, and caller deadline bounds. It
+always attempts an unmount before returning. The adapter does not use an
+unbounded `podman cp` as artifact authority.
+
+Every container uses `network=none`; a request with `network.allow` is refused
+rather than silently broadened. Declared bind mounts are inode-checked, retain
+their exact read-only/read-write mode, and cannot overlap known Podman or Docker
+control sockets. Runtime memory, CPU, PID, user, namespace, capability,
+seccomp, image, mount, and ownership facts are independently inspected before
+target admission. Cleanup re-inspects both the immutable container ID and the
+random ownership label before exact name removal and never deletes a name whose
+identity or ownership has changed.
+
+Podman reserves exit statuses 125–127 for provider/invocation failures, while
+signal conventions overlap the higher range. The adapter therefore reports
+statuses 125–255 as `unknown` rather than misclassifying infrastructure or
+signal loss as a completely observed target exit. Nonzero target exits 1–124
+remain complete target observations.
+
 The core treats every returned field as untrusted: malformed target, cleanup,
-runtime, artifact, or identity evidence is refused or downgraded. Linux CI must
-exercise the adapter against a real provider before `kenogram job` is described
-as operational. Apple handoff and a contained Docker-compatible endpoint remain
-separate later work and cannot be inferred from K5.
+runtime, artifact, or identity evidence is refused or downgraded. Unit tests
+prove provider-hostile behavior without platform claims. The opt-in Linux
+integration owns real rootless Podman enforcement evidence for exact image,
+success and nonzero exit, timeout and orphan cleanup, network-none, read-only
+mounts, secret delivery, artifact extraction, and runtime-socket absence.
+Darwin compilation and CLI handoff are not evidence of local macOS namespace
+enforcement; without a configured Linux machine those facts remain unknown and
+the adapter refuses admission.

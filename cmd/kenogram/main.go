@@ -31,7 +31,12 @@ import (
 	"github.com/idolum-ai/kenogram/internal/worldfs"
 )
 
-func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+func main() {
+	if code, handled := runGovernedJobHelper(os.Args[1:], os.Stdin, os.Stderr); handled {
+		os.Exit(code)
+	}
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printHelp(stderr)

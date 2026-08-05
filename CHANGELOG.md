@@ -4,14 +4,18 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
-- Implement the provider-independent governed-job core: closed schemas,
+- Implement the governed-job core and direct one-shot Podman CLI provider:
+  exact-image and declaration authority, closed schemas,
   create-only evidence, bounded execution/finalization/cleanup, artifact
   inventories, executable provenance, offline re-verification, and final CLI
-  injection points. Bound context-ignoring provider and artifact operations,
+  execution. Bind an inert Kenogram-owned holder and target launcher read-only,
+  deliver public and secret target environment only through bounded stdin,
+  enforce network-none and exact mounts/resources, and re-prove ownership before
+  exact container removal. Bound context-ignoring provider and artifact operations,
   make cleanup unavoidable after admission, keep verifier work independent of
   manifest claims, cross-bind secret-safe plan and runtime image identity, and
-  make seal durability descriptor-rooted. A direct one-shot provider and
-  release claim remain later work. Raise the module API floor to Go 1.25 for the standard-library
+  make seal durability descriptor-rooted. Declared job egress, a hosted Linux
+  release-candidate replay, and a release claim remain later work. Raise the module API floor to Go 1.25 for the standard-library
   descriptor-owned `os.Root` boundary used on macOS and for evidence paths;
   the pinned build toolchain remains Go 1.26.5.
 - Add a proof-only semantic reference for transactional cutover readiness,

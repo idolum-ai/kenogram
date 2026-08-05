@@ -87,6 +87,15 @@ func TestGovernedJobCLIRejectsInvalidRequestBeforeProviderSelection(t *testing.T
 	}
 }
 
+func TestGovernedJobHelperRejectsMalformedHandoffWithoutEchoingInput(t *testing.T) {
+	secret := "must-not-echo"
+	var stderr bytes.Buffer
+	code, handled := runGovernedJobHelper([]string{"_job-exec", "/bin/true"}, strings.NewReader(secret), &stderr)
+	if !handled || code != 125 || strings.Contains(stderr.String(), secret) || !strings.Contains(stderr.String(), "invalid") {
+		t.Fatalf("handled=%t code=%d stderr=%q", handled, code, stderr.String())
+	}
+}
+
 func TestGovernedJobCLIRejectsMalformedDeclarationBeforeSemanticIdentity(t *testing.T) {
 	prior := governedJobRuntime
 	governedJobRuntime = func() job.Runtime { return unusedJobRuntime{} }

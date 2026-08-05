@@ -143,6 +143,42 @@ func TestCreateExactArgv(t *testing.T) {
 		t.Fatalf("got %#v", f.calls)
 	}
 }
+
+func TestCreateGovernedJobUsesOnlyCallerOwnedHelper(t *testing.T) {
+	f := &fake{}
+	p := New(f)
+	r := plan.Result{PlanDigest: "pd", DeclarationDigest: "dd", Plan: plan.Plan{Name: "w", World: plan.World{Hostname: "h", Base: "sha256:" + strings.Repeat("a", 64), Workdir: "/workspace", User: "0"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
+	_, err := p.CreateGovernedJob(context.Background(), "owned-job", r, 1, []Mount{{Source: "/host/kenogram", Target: "/etc/kenogram/job-exec", Mode: "ro"}}, map[string]string{"z": "last", "a": "first"}, "/etc/kenogram/job-exec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(f.calls[0].args, " ")
+	if !strings.HasSuffix(joined, "--entrypoint /etc/kenogram/job-exec "+r.Plan.World.Base+" _job-hold") {
+		t.Fatalf("argv=%q", joined)
+	}
+	if strings.Index(joined, "--label a=first") > strings.Index(joined, "--label z=last") {
+		t.Fatalf("additional labels are not deterministic: %q", joined)
+	}
+	if strings.Contains(joined, "docker.sock") || strings.Contains(joined, "podman.sock") {
+		t.Fatalf("provider socket leaked into argv: %q", joined)
+	}
+}
+
+func TestMountRootAndUnshareUseExactProviderArgv(t *testing.T) {
+	f := &fake{out: []byte("/run/user/1000/containers/root\n")}
+	p := New(f)
+	root, err := p.MountRoot(context.Background(), "owned-job")
+	if err != nil || root != "/run/user/1000/containers/root" {
+		t.Fatalf("root=%q error=%v", root, err)
+	}
+	f.out = nil
+	if err := p.RunUnshare(context.Background(), []string{"/opt/kenogram", "_job-collect", "owned-job"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 2 || !reflect.DeepEqual(f.calls[0].args, []string{"mount", "owned-job"}) || !reflect.DeepEqual(f.calls[1].args, []string{"unshare", "/opt/kenogram", "_job-collect", "owned-job"}) {
+		t.Fatalf("calls=%#v", f.calls)
+	}
+}
 func TestVerifyEvidence(t *testing.T) {
 	r := plan.Result{PlanDigest: "p", DeclarationDigest: "d", Plan: plan.Plan{Name: "w", World: plan.World{User: "agent"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
 	e := Evidence{Name: "kenogram-w-g1", Running: true, NetworkMode: "none", IPCMode: "private", IPCIsolatedFromHost: true, PIDMode: "private", UTSMode: "private", UserNSMode: "", UIDMap: []IDMap{{ContainerID: int64(os.Getuid()), HostID: int64(os.Getuid()), Size: 1}}, GIDMap: []IDMap{{ContainerID: int64(os.Getgid()), HostID: int64(os.Getgid()), Size: 1}}, User: "agent", Hostname: "", WorkingDir: "", CapDrop: []string{"CAP_ALL"}, BoundingCaps: []string{}, SecurityOpt: []string{"no-new-privileges"}, SeccompMode: 2, Memory: 2, NanoCPUs: 1_000_000_000, PIDs: 3, Labels: map[string]string{"io.kenogram.world": "w", "io.kenogram.generation": "1", "io.kenogram.plan-digest": "p", "io.kenogram.declaration-digest": "d"}}

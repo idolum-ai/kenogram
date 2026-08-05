@@ -39,7 +39,7 @@ evaluation but outside the supported Linux runtime promise.
 | Lifecycle | Durable rollback/commit transition, persisted-runtime 15-boundary SIGKILL recovery-only matrix, stopped-commit restart, terminal transition destruction, replay-safe service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Syscall-granular power-loss testing and exhaustive non-`up` action failpoints | Before stable |
 | History | Tamper/truncated-tail unit tests plus E2E tombstone outcomes | Power-loss testing on multiple filesystems | Before stable |
 | Experimental Apple transport | Canonical shell-inert argv envelope, explicit stdin/TTY flags, remote exit-status preservation, graceful signal forwarding, Darwin/arm64 cross-build, and native macOS launcher smoke test | Real Apple machine argv/TTY/signal proof, nested rootless Podman, and the full lifecycle/network matrix | Experimental |
-| Governed jobs | Closed bounded schemas and validators; context-ignoring-provider deadline regressions; unavoidable cleanup after admission; bounded artifact readers; fixed-authority offline verification; secret-safe verifiable plan projection; declared/observed image cross-binding; descriptor-owned create-only evidence and seal durability; Darwin descriptor-safe replacement regression | K5 direct one-shot provider, Linux real-runtime differential proof, contained provider, and Apple evidence handoff remain absent | Experimental |
+| Governed jobs | Closed bounded schemas and validators; context-ignoring-provider deadline regressions; unavoidable cleanup after admission; bounded artifact readers; fixed-authority offline verification; secret-safe verifiable plan projection; declared/observed image cross-binding; descriptor-owned create-only evidence and seal durability; direct one-shot Podman CLI provider; hostile ownership/image/socket/secret tests; opt-in Linux exact-image, target, timeout/orphan, network-none, mount, secret, artifact, and cleanup proof | Declared job egress remains refused; Darwin uses explicit Linux-machine handoff and makes no local namespace claim; release-candidate hosted replay remains required | Experimental |
 | Executable provenance | Closed release/development identity schema and semantic placeholder rejection | Machine JSON output, full-SHA release packaging, canonical release manifest, and external attestation are intentionally absent | Experimental |
 
 ### Design evidence outside the binding contract
@@ -83,5 +83,9 @@ evaluation but outside the supported Linux runtime promise.
 - `go test ./internal/jobcontract ./internal/job` proves the governed-job and
   executable-provenance documents plus hostile publication, cancellation,
   artifact, and offline re-verification behavior.
+- `go test ./internal/jobenv ./internal/jobpodman` proves the bounded secret-safe
+  stdin handoff and adversarial direct-provider state machine. The governed-job
+  scenarios are included in opt-in `make integration` on Linux with rootless
+  Podman; Darwin compilation does not replace that enforcement proof.
 - `make stdlib-only` rejects third-party Go modules.
 - `make check` runs the fast local quality gate; runtime proofs remain separate.
