@@ -179,14 +179,16 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 	}
 
 	invocation := Invocation{Request: request, Prepared: prepared, Provenance: provenance}
-	cleanupDone := false
+	cleanupOwned := false
+	var startDone <-chan struct{}
 	defer func() {
-		if cleanupDone {
+		if cleanupOwned {
 			return
 		}
+		cleanupOwned = true
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Duration(request.Limits.FinalizeNS))
 		defer cancel()
-		_, _ = cleanupRuntimeBounded(cleanupCtx, e.Runtime, invocation)
+		_, _ = cleanupRuntimeAfterStartBounded(cleanupCtx, startDone, e.Runtime, invocation, time.Duration(request.Limits.FinalizeNS))
 	}()
 	result := jobcontract.Result{
 		Schema: jobcontract.ResultSchema, JobID: request.JobID, Status: "refused",
@@ -203,7 +205,7 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 
 	executionCtx, cancelExecution := context.WithTimeout(ctx, time.Duration(request.Limits.TimeoutNS))
 	executionStarted := executionCtx.Err() == nil
-	process, startErr := startRuntimeBounded(executionCtx, e.Runtime, invocation, stdout, stderr, time.Duration(request.Limits.FinalizeNS))
+	process, startErr, startDone := startRuntimeBounded(executionCtx, e.Runtime, invocation, stdout, stderr)
 	admitted := process != nil || (executionStarted && (errors.Is(startErr, context.DeadlineExceeded) || errors.Is(startErr, context.Canceled)))
 	if startErr == nil && process == nil {
 		startErr = errors.New("runtime returned no process observation")
@@ -227,6 +229,10 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 		startErr = errors.Join(startErr, identityErr)
 	}
 	if startErr != nil && admitted {
+		runtimeBefore = nil
+		result.Identity.Generation = 0
+		result.Identity.RuntimeProvider = ""
+		result.Identity.ImageDigest = ""
 		result.Status = "incomplete"
 		result.Target = jobcontract.TargetResult{Kind: "unknown"}
 		result.Reasons = []string{"RUNTIME_START_OBSERVATION_FAILED"}
@@ -261,16 +267,28 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 		if runtimeErr := jobcontract.ValidateJSONDocument(runtimeAfter, jobcontract.MaximumManifestBytes); runtimeErr != nil {
 			finalErr = errors.Join(finalErr, runtimeErr)
 		}
-		if result.Identity.RuntimeProvider == "podman-cli" && finalErr == nil {
+		if result.Identity.RuntimeProvider == "podman-cli" {
 			beforeObservation, beforeErr := jobcontract.ParseRuntimeObservation(runtimeBefore)
-			afterObservation, afterErr := jobcontract.ParseRuntimeObservation(runtimeAfter)
-			observationErr := errors.Join(beforeErr, afterErr)
-			if observationErr == nil {
-				observationErr = verifyRuntimeObservations(beforeObservation, afterObservation, result, request, prepared.Result, provenance)
+			var observationErr error
+			if len(runtimeAfter) == 0 {
+				observationErr = beforeErr
+				if observationErr == nil {
+					observationErr = verifyRuntimeBeforeObservation(beforeObservation, result, request, prepared.Result, provenance)
+				}
+			} else {
+				afterObservation, afterErr := jobcontract.ParseRuntimeObservation(runtimeAfter)
+				observationErr = errors.Join(beforeErr, afterErr)
+				if observationErr == nil {
+					observationErr = verifyRuntimeObservations(beforeObservation, afterObservation, result, request, prepared.Result, provenance)
+				}
 			}
 			if observationErr != nil {
 				finalErr = fmt.Errorf("runtime observation contract: %w", observationErr)
 				result.Reasons = appendReason(result.Reasons, "RUNTIME_OBSERVATION_INVALID")
+				runtimeBefore, runtimeAfter = nil, nil
+				result.Identity.Generation = 0
+				result.Identity.RuntimeProvider = ""
+				result.Identity.ImageDigest = ""
 			}
 		}
 		if finalErr != nil {
@@ -331,11 +349,11 @@ func (e Executor) Run(ctx context.Context, requestRaw []byte, evidenceDir string
 			cleanupErr = process.JoinFinalization(cleanupCtx)
 		}
 	}
+	cleanupOwned = true
 	if cleanupErr == nil {
-		result.Cleanup, cleanupErr = cleanupRuntimeBounded(cleanupCtx, e.Runtime, invocation)
+		result.Cleanup, cleanupErr = cleanupRuntimeAfterStartBounded(cleanupCtx, startDone, e.Runtime, invocation, time.Duration(request.Limits.FinalizeNS))
 	}
 	cancelCleanup()
-	cleanupDone = true
 	result.Cleanup.DurationNS = boundedDuration(time.Since(cleanupStarted))
 	if cleanupErr != nil {
 		result.Cleanup = jobcontract.CleanupResult{Status: "incomplete", DurationNS: boundedDuration(time.Since(cleanupStarted)), Reasons: []string{"CLEANUP_DEADLINE_EXCEEDED"}}
@@ -439,34 +457,56 @@ type runtimeStartObservation struct {
 	err     error
 }
 
-func startRuntimeBounded(ctx context.Context, runtime Runtime, invocation Invocation, stdout, stderr io.Writer, cleanupTimeout time.Duration) (Process, error) {
+func startRuntimeBounded(ctx context.Context, runtime Runtime, invocation Invocation, stdout, stderr io.Writer) (Process, error, <-chan struct{}) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		done := make(chan struct{})
+		close(done)
+		return nil, err, done
 	}
 	result := make(chan runtimeStartObservation, 1)
+	done := make(chan struct{})
 	go func() {
 		process, err := runtime.Start(ctx, invocation, stdout, stderr)
 		result <- runtimeStartObservation{process: process, err: err}
+		close(done)
 	}()
 	select {
 	case observed := <-result:
 		if err := ctx.Err(); err != nil {
-			return observed.process, errors.Join(observed.err, err)
+			return observed.process, errors.Join(observed.err, err), done
 		}
-		return observed.process, observed.err
+		return observed.process, observed.err, done
 	case <-ctx.Done():
-		go func() {
-			<-result
-			lateCleanup(runtime, invocation, cleanupTimeout)
-		}()
-		return nil, ctx.Err()
+		return nil, ctx.Err(), done
 	}
 }
 
-func lateCleanup(runtime Runtime, invocation Invocation, timeout time.Duration) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	_, _ = cleanupRuntimeBounded(ctx, runtime, invocation)
+type cleanupObservation struct {
+	result jobcontract.CleanupResult
+	err    error
+}
+
+// cleanupRuntimeAfterStartBounded gives one worker exclusive cleanup
+// ownership. It never calls Cleanup until the possibly cancellation-ignoring
+// Start call has joined. If the observer deadline expires first, the worker
+// remains responsible for teardown after Start eventually returns.
+func cleanupRuntimeAfterStartBounded(ctx context.Context, startDone <-chan struct{}, runtime Runtime, invocation Invocation, timeout time.Duration) (jobcontract.CleanupResult, error) {
+	result := make(chan cleanupObservation, 1)
+	go func() {
+		if startDone != nil {
+			<-startDone
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		cleaned, err := cleanupRuntimeBounded(cleanupCtx, runtime, invocation)
+		result <- cleanupObservation{result: cleaned, err: err}
+	}()
+	select {
+	case observed := <-result:
+		return observed.result, observed.err
+	case <-ctx.Done():
+		return jobcontract.CleanupResult{}, ctx.Err()
+	}
 }
 
 type targetObservation struct {
@@ -700,7 +740,7 @@ func planContentDigest(raw []byte) (plan.Result, string, error) {
 	if err := decoder.Decode(&result); err != nil {
 		return plan.Result{}, "", fmt.Errorf("decode retained plan: %w", err)
 	}
-	_, evidenceDigest, err := plan.EvidenceCanonical(result.Plan)
+	_, evidenceDigest, err := plan.EvidenceCanonicalWithAnchor(result.Plan, result.SourceAnchor)
 	if err != nil {
 		return plan.Result{}, "", err
 	}

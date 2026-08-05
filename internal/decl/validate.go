@@ -2,6 +2,7 @@ package decl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -214,11 +215,40 @@ func ResolveSource(dir, source string) (string, error) {
 	if filepath.IsAbs(source) {
 		return canonicalPlatformPath(filepath.Clean(source)), nil
 	}
-	canonicalDir, err := filepath.EvalSymlinks(filepath.Clean(dir))
+	canonicalDir, err := CanonicalSourceAnchor(dir)
 	if err != nil {
 		return "", fmt.Errorf("resolve declaration directory: %w", err)
 	}
 	return filepath.Clean(filepath.Join(canonicalDir, source)), nil
+}
+
+// CanonicalSourceAnchor resolves the trusted producer-side declaration
+// directory once. Retained job evidence carries this anchor so an offline
+// verifier can re-project relative sources lexically without reopening the
+// producer filesystem.
+func CanonicalSourceAnchor(dir string) (string, error) {
+	clean := filepath.Clean(dir)
+	if !filepath.IsAbs(clean) {
+		return "", errors.New("declaration source anchor must be absolute")
+	}
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+// ResolveEvidenceSource replays producer source resolution using only the
+// retained canonical anchor and declaration text. It performs no filesystem
+// lookup and therefore has the same answer on an isolated audit host.
+func ResolveEvidenceSource(anchor, source string) (string, error) {
+	if !filepath.IsAbs(anchor) || filepath.Clean(anchor) != anchor {
+		return "", errors.New("retained source anchor must be absolute and clean")
+	}
+	if filepath.IsAbs(source) {
+		return canonicalPlatformPath(filepath.Clean(source)), nil
+	}
+	return filepath.Clean(filepath.Join(anchor, source)), nil
 }
 func sourceExists(dir, source string) error {
 	if source == "" {

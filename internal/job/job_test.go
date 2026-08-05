@@ -27,8 +27,11 @@ type fakeRuntime struct {
 	startErr     error
 	cleanup      jobcontract.CleanupResult
 	cleaned      atomic.Bool
+	cleanupCalls atomic.Int64
 	startBlock   <-chan struct{}
 	cleanupBlock <-chan struct{}
+	cleanupEnter chan struct{}
+	cleanupOnce  sync.Once
 }
 
 func (f *fakeRuntime) Start(_ context.Context, invocation Invocation, stdout, stderr io.Writer) (Process, error) {
@@ -45,6 +48,10 @@ func (f *fakeRuntime) Start(_ context.Context, invocation Invocation, stdout, st
 }
 
 func (f *fakeRuntime) Cleanup(context.Context, Invocation) jobcontract.CleanupResult {
+	f.cleanupCalls.Add(1)
+	if f.cleanupEnter != nil {
+		f.cleanupOnce.Do(func() { close(f.cleanupEnter) })
+	}
 	if f.cleanupBlock != nil {
 		<-f.cleanupBlock
 	}
@@ -781,6 +788,143 @@ func TestExecutorBoundsContextIgnoringRuntimePhases(t *testing.T) {
 	}
 }
 
+func TestCancellationIgnoringStartJoinsBeforeSingleCleanupOwnerMutates(t *testing.T) {
+	executor, requestRaw, evidence, runtime := fixture(t)
+	releaseStart := make(chan struct{})
+	runtime.startBlock = releaseStart
+	runtime.cleanupEnter = make(chan struct{})
+	var request jobcontract.Request
+	if err := json.Unmarshal(requestRaw, &request); err != nil {
+		t.Fatal(err)
+	}
+	request.Limits.TimeoutNS = int64(10 * time.Millisecond)
+	request.Limits.FinalizeNS = int64(20 * time.Millisecond)
+	requestRaw, _ = json.Marshal(request)
+	done := make(chan Outcome, 1)
+	go func() {
+		outcome, err := executor.Run(context.Background(), requestRaw, evidence)
+		if err != nil {
+			t.Errorf("run: %v", err)
+		}
+		done <- outcome
+	}()
+	var outcome Outcome
+	select {
+	case outcome = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("bounded execution did not return")
+	}
+	if outcome.Result.Cleanup.Status != "incomplete" || !contains(outcome.Result.Reasons, "CLEANUP_INCOMPLETE") {
+		t.Fatalf("result=%#v", outcome.Result)
+	}
+	select {
+	case <-runtime.cleanupEnter:
+		t.Fatal("cleanup raced the still-running Start call")
+	default:
+	}
+	close(releaseStart)
+	select {
+	case <-runtime.cleanupEnter:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cleanup owner did not resume after Start joined")
+	}
+	if calls := runtime.cleanupCalls.Load(); calls != 1 {
+		t.Fatalf("cleanup owners = %d, want exactly one", calls)
+	}
+	if _, err := Verify(evidence); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOfflineVerifierDoesNotReopenProducerSourcePaths(t *testing.T) {
+	executor, requestRaw, evidence, _ := fixture(t)
+	var request jobcontract.Request
+	if err := json.Unmarshal(requestRaw, &request); err != nil {
+		t.Fatal(err)
+	}
+	producerDir := filepath.Dir(request.Declaration.Path)
+	source := filepath.Join(producerDir, "input")
+	if err := os.WriteFile(source, []byte("producer-only"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	declaration, err := os.ReadFile(request.Declaration.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration = append(declaration, []byte("\n[[mounts]]\nsource = \"input\"\ntarget = \"/input\"\nmode = \"ro\"\n")...)
+	if err := os.WriteFile(request.Declaration.Path, declaration, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request.Declaration.SHA256 = digest(declaration)
+	requestRaw, _ = json.Marshal(request)
+	if _, err := executor.Run(context.Background(), requestRaw, evidence); err != nil {
+		t.Fatal(err)
+	}
+	auditEvidence := filepath.Join(t.TempDir(), "evidence")
+	if err := os.Rename(evidence, auditEvidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(producerDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(auditEvidence); err != nil {
+		t.Fatalf("relocated offline evidence consulted producer filesystem: %v", err)
+	}
+}
+
+func TestIncompleteRuntimeEvidenceCannotContradictResultIdentity(t *testing.T) {
+	executor, requestRaw, evidence, runtime := fixture(t)
+	runtime.cleanup = jobcontract.CleanupResult{Status: "incomplete", DurationNS: 1, Reasons: []string{"CONTAINER_PRESENT"}}
+	if _, err := executor.Run(context.Background(), requestRaw, evidence); err != nil {
+		t.Fatal(err)
+	}
+	readObservation := func(name string) jobcontract.RuntimeObservation {
+		raw, err := os.ReadFile(filepath.Join(evidence, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := jobcontract.ParseRuntimeObservation(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	before, after := readObservation("runtime-before.json"), readObservation("runtime-after.json")
+	before.Generation, after.Generation = 2, 2
+	beforeRaw, _ := json.Marshal(before)
+	afterRaw, _ := json.Marshal(after)
+	beforeRaw, afterRaw = append(beforeRaw, '\n'), append(afterRaw, '\n')
+	resultPath := filepath.Join(evidence, "result.json")
+	resultRaw, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := jobcontract.ParseResult(resultRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Identity.RuntimeSHA256 = runtimeEvidenceDigest(beforeRaw, afterRaw)
+	resultRaw, _ = json.Marshal(result)
+	resultRaw = append(resultRaw, '\n')
+	for name, raw := range map[string][]byte{"runtime-before.json": beforeRaw, "runtime-after.json": afterRaw, "result.json": resultRaw} {
+		if err := os.WriteFile(filepath.Join(evidence, name), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rewriteManifest(t, evidence, func(manifest *jobcontract.Manifest) {
+		manifest.ResultSHA256 = digest(resultRaw)
+		for index := range manifest.Entries {
+			if raw, ok := map[string][]byte{"runtime-before.json": beforeRaw, "runtime-after.json": afterRaw, "result.json": resultRaw}[manifest.Entries[index].Path]; ok {
+				manifest.Entries[index].Size = int64(len(raw))
+				manifest.Entries[index].SHA256 = digest(raw)
+			}
+		}
+	})
+	if _, err := Verify(evidence); err == nil || !strings.Contains(err.Error(), "runtime observation disagrees with result identity") {
+		t.Fatalf("contradictory incomplete runtime evidence accepted: %v", err)
+	}
+}
+
 type blockingArtifactReader struct {
 	read         <-chan struct{}
 	close        <-chan struct{}
@@ -1081,7 +1225,7 @@ func TestVerifierRejectsSelfConsistentForgedPlanProjection(t *testing.T) {
 	}
 	forgedDigest := "sha256:" + strings.Repeat("b", 64)
 	retained.Plan.World.Base = "example.invalid/forged@" + forgedDigest
-	_, evidenceDigest, err := plan.EvidenceCanonical(retained.Plan)
+	_, evidenceDigest, err := plan.EvidenceCanonicalWithAnchor(retained.Plan, retained.SourceAnchor)
 	if err != nil {
 		t.Fatal(err)
 	}

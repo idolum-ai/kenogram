@@ -35,6 +35,10 @@ Notable user-visible and operational changes are recorded here.
   prove cleanup and absence by immutable ID after renames, distinguish
   content-bound read-only mounts from identity-only writable mounts, and
   cross-bind explicit mount roles and declaration sources offline.
+- Make governed-job audit projection independent of producer filesystem paths,
+  strictly cross-bind incomplete runtime observations, serialize cleanup after
+  cancellation-ignoring start, isolate private scratch from declared parents,
+  and bind workspace deletion to the opened directory identity.
 - Snapshot declared read-only job inputs into bounded Kenogram-owned scratch
   before provider use, reject read/write source aliases, bind staged observations
   to retained authority paths and source types, enforce one 512-entry runtime

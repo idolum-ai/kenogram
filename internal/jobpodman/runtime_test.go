@@ -852,7 +852,7 @@ func TestDirectRuntimeHandsSecretToTargetOnlyThroughStdinProtocol(t *testing.T) 
 		t.Fatal(err)
 	}
 	invocation.Prepared.Result.Plan.Copies = append(invocation.Prepared.Result.Plan.Copies, plan.Copy{Source: source, SourceDigest: digest, Target: "/run/token", Mode: "0600", Secret: true})
-	_, publicDigest, err := plan.EvidenceCanonical(invocation.Prepared.Result.Plan)
+	_, publicDigest, err := plan.EvidenceCanonicalWithAnchor(invocation.Prepared.Result.Plan, invocation.Prepared.Result.SourceAnchor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1141,6 +1141,78 @@ func TestCanceledSourceRestagingNeverCreatesAndCleansPromptly(t *testing.T) {
 	}
 	if _, err := os.Lstat(scratch); !os.IsNotExist(err) {
 		t.Fatalf("scratch remains after cancellation: %v", err)
+	}
+}
+
+func TestDeclaredSourcesCannotOverlapPrivateScratchAuthority(t *testing.T) {
+	for _, mode := range []string{"ro", "rw"} {
+		t.Run(mode+" parent mount", func(t *testing.T) {
+			runtime, runner, _, invocation := runtimeFixture(t)
+			parent := t.TempDir()
+			var scratchRoot string
+			runtime.tempDir = func(_, pattern string) (string, error) {
+				var err error
+				scratchRoot, err = os.MkdirTemp(parent, pattern)
+				return scratchRoot, err
+			}
+			invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{Source: parent, SourceType: "directory", Target: "/host-parent", Mode: mode})
+			process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+			if err == nil || process != nil || !strings.Contains(err.Error(), "overlaps the private runtime scratch authority") {
+				t.Fatalf("process=%#v error=%v", process, err)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("overlap refusal contacted provider: %v", runner.calls)
+			}
+			if scratchRoot == "" {
+				t.Fatal("overlap test did not allocate private root")
+			}
+			if _, err := os.Lstat(scratchRoot); !os.IsNotExist(err) {
+				t.Fatalf("refused private scratch root remains: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceCleanupRejectsRenameSubstitutionAtDescriptorOpen(t *testing.T) {
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "workspace")
+	original := filepath.Join(parent, "original")
+	replacement := filepath.Join(parent, "replacement")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "owned"), []byte("owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(replacement, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(replacement, "victim")
+	if err := os.WriteFile(victim, []byte("do-not-delete"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := filesystemIdentityAt(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := workspaceCleanupBinding{Target: "/workspace", Source: workspace, Device: identity.Device, Inode: identity.Inode}
+	opener := func(path string) (*os.Root, error) {
+		if err := os.Rename(workspace, original); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(replacement, workspace); err != nil {
+			return nil, err
+		}
+		return os.OpenRoot(path)
+	}
+	if err := clearWorkspaceContentsWithOpen(context.Background(), binding, opener); err == nil || !strings.Contains(err.Error(), "opened workspace root identity changed") {
+		t.Fatalf("pathname replacement was accepted: %v", err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(workspace, "victim")); err != nil || string(raw) != "do-not-delete" {
+		t.Fatalf("replacement contents were mutated: %q %v", raw, err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(original, "owned")); err != nil || string(raw) != "owned" {
+		t.Fatalf("original authority was mutated: %q %v", raw, err)
 	}
 }
 

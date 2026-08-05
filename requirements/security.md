@@ -23,7 +23,11 @@ made about aliases the host does not make inspectable.
 
 Kenogram-owned ephemeral workspace roots use `portable-writable-v1`: the exact
 bind root is `0777`, while every enclosing scratch directory remains `0700` and
-host-private. Runtime evidence revalidates the root's identity and exact policy
+host-private. Each job is allocated beneath a dedicated private runtime-owned
+root. After allocation, every declared copy and mount source is rejected when
+its canonical path overlaps, or its identity aliases, that root or the job
+scratch; mounting a process-wide temporary parent can never expose newly
+created private state. Runtime evidence revalidates the root's identity and exact policy
 before target admission and finalization. This projection is never applied to
 operator-owned declared writable sources; those retain their authored modes
 and remain target-visible authority by explicit declaration. An artifact root
@@ -46,6 +50,9 @@ and every namespace-helper process group must be joined before cleanup can
 advance. Symlinks and special nodes inside a workspace are unlinked as names,
 not followed or interpreted. Declared writable sources are never cleanup
 targets, even when the target made their contents inaccessible to the host.
+The namespace cleanup helper opens each recorded workspace before comparing
+the opened directory's device and inode with retained authority; pathname
+checks and destructive descriptor-relative traversal are never separated.
 
 Relative sources resolve against the declaration directory, not the caller's
 working directory. Missing sources fail validation. Every file and directory in

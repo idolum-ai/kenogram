@@ -97,6 +97,11 @@ source executable becomes `0555`. No staged node is writable. Only that
 normalized snapshot is mounted and content-attested; retained evidence names it
 with a digest-bound semantic source, carries the original authority digest, and
 names `portable-readonly-v1` instead of exposing a deleted temporary path.
+
+The retained public plan includes the producer-canonical source anchor used for
+relative declarations. `verify-job` replays source paths lexically from that
+value and never consults the producer's live declaration directory or mount
+tree. Sealed evidence can therefore move to an isolated audit host.
 Declared writable evidence uses the exact retained authority source. Mutating
 the original read-only host path afterward does not change target-observed
 bytes. Read-only and writable
@@ -129,7 +134,9 @@ entry, then lets a no-shell helper in the rootless user namespace empty only
 those recorded workspace roots without recursively invoking Podman. Failed namespace cleanup retains its
 private authority record for retry after container absence. This lets cleanup
 remove mode-`000` and subordinate-UID entries without ever chmodding or deleting
-an operator-owned declared writable source. Namespace-helper process groups are
+an operator-owned declared writable source. Every cleanup root is opened and
+its descriptor identity is rechecked before enumeration, preventing a
+rename/substitution race. Namespace-helper process groups are
 killed and joined at deadline; container and scratch absence remain mandatory
 cleanup evidence.
 

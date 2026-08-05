@@ -168,7 +168,7 @@ func TestRenderDoesNotReadOrPrintSourceContents(t *testing.T) {
 	if err := json.Unmarshal(encoded, &retained); err != nil {
 		t.Fatal(err)
 	}
-	_, evidenceDigest, err := EvidenceCanonical(retained.Plan)
+	_, evidenceDigest, err := EvidenceCanonicalWithAnchor(retained.Plan, retained.SourceAnchor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestRenderDoesNotReadOrPrintSourceContents(t *testing.T) {
 	if retained.PlanDigest != retained.EvidenceDigest {
 		t.Fatalf("retained plan digest=%q evidence digest=%q", retained.PlanDigest, retained.EvidenceDigest)
 	}
-	projected, err := ProjectEvidence(d, path, data, retained.Plan)
+	projected, err := ProjectEvidence(d, data, retained)
 	if err != nil {
 		t.Fatal(err)
 	}

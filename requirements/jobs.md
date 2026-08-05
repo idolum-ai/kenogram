@@ -70,9 +70,11 @@ adapter and must independently run `verify-job`.
 The core wraps admission, terminal observation, finalization, artifact opens
 and reads, and cleanup in caller-owned deadlines. A provider that ignores its
 context cannot make the caller wait without bound or produce a complete result.
-Cleanup is deferred immediately before provider admission and is therefore not
-skipped by later publication or artifact failures; a late admission response
-also triggers a bounded cleanup attempt.
+Cleanup ownership is established immediately before provider admission and is
+therefore not skipped by later publication or artifact failures. A
+cancellation-ignoring `Start` must join before that single owner calls cleanup;
+if the observer deadline expires first, the sealed cleanup is incomplete while
+the same owner waits and performs bounded teardown after `Start` returns.
 
 ## Request authority and bounds
 
@@ -123,6 +125,12 @@ Kenogram opens the source once, bounds and reads that descriptor, derives the
 canonical plan-copy digest from exactly those bytes and that descriptor's mode,
 compares it with the operational plan digest, and delivers those same bytes.
 Replacing the source pathname after open cannot substitute the delivered value.
+
+The retained plan binds the producer-canonical declaration source anchor.
+Relative copy and mount sources are re-projected lexically from that retained
+anchor. Offline verification never resolves, stats, or follows the producer's
+original declaration or source paths, so relocation to an isolated audit host
+cannot change the projection.
 
 The request never inherits ambient command, environment, timeout, output, or
 artifact authority. A consumer may refuse a request it cannot implement; it
@@ -232,8 +240,12 @@ path NUL kind NUL decimal-size NUL sha256-digest LF
 files, recomputes every entry and content-root digest, validates every
 versioned document, and cross-checks job/request/result/provenance identities. It never
 starts a target, contacts a provider, or upgrades runtime-reported fields to
-host-observed facts. For a complete result it strictly decodes both runtime
-phases, requires `before` running and `after` stopped, re-derives containment
+host-observed facts. Every non-placeholder runtime document is strictly
+decoded and cross-bound even when the aggregate result is incomplete or
+refused. The `{}` placeholder is accepted only when observed runtime identity
+is empty and a typed start/observation failure explains the absence. For a
+complete result the verifier requires both runtime phases, requires `before`
+running and `after` stopped, re-derives containment
 and resource constraints, cross-binds plan/result/provider identity, and
 requires stable facts and mount identities to agree across phases. Generic
 JSON cannot substitute for the runtime contract. For declared egress it also
@@ -371,6 +383,9 @@ invoke the provider from inside its user namespace. It authenticates the same
 ID in the authority record and descriptor-removes immediate
 child names from those exact workspace roots. The helper accepts no arbitrary
 deletion source and never traverses or mutates a declared writable mount. A
+workspace root is descriptor-opened first and the opened directory device and
+inode must equal the retained binding before any child is enumerated or
+removed; a pathname replacement therefore cannot acquire deletion authority. A
 failed namespace pass retains the record and scratch so a later Cleanup call
 can retry after container absence. Provider namespace helpers run in a dedicated
 process group which is killed and joined at deadline. Cleanup is complete only

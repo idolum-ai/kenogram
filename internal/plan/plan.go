@@ -77,6 +77,7 @@ type Result struct {
 	PlanDigest        string   `json:"plan_digest"`
 	EvidenceDigest    string   `json:"evidence_digest"`
 	DeclarationDigest string   `json:"declaration_digest"`
+	SourceAnchor      string   `json:"source_anchor,omitempty"`
 	Warnings          []string `json:"warnings"`
 	Plan              Plan     `json:"plan"`
 }
@@ -84,7 +85,7 @@ type Result struct {
 func (r Result) MarshalJSON() ([]byte, error) {
 	type wire Result
 	safe := r
-	redacted, digest, err := EvidenceCanonical(r.Plan)
+	redacted, digest, err := evidenceCanonicalForResult(r)
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +111,10 @@ func BuildContext(ctx context.Context, d decl.Declaration, declarationPath strin
 	}
 	if err := decl.ValidateContext(ctx, d, dir); err != nil {
 		return Result{}, err
+	}
+	sourceAnchor, err := decl.CanonicalSourceAnchor(dir)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve declaration source anchor: %w", err)
 	}
 	p := Plan{
 		Version: d.Version, Name: d.Name, AllowUnpinned: d.AllowUnpinned,
@@ -173,11 +178,11 @@ func BuildContext(ctx context.Context, d decl.Declaration, declarationPath strin
 		return Result{}, err
 	}
 	planSum, declarationSum := sha256.Sum256(canonical), sha256.Sum256(declarationBytes)
-	_, evidenceDigest, err := EvidenceCanonical(p)
+	_, evidenceDigest, err := EvidenceCanonicalWithAnchor(p, sourceAnchor)
 	if err != nil {
 		return Result{}, err
 	}
-	result := Result{PlanDigest: hex.EncodeToString(planSum[:]), EvidenceDigest: evidenceDigest, DeclarationDigest: hex.EncodeToString(declarationSum[:]), Warnings: []string{}, Plan: p}
+	result := Result{PlanDigest: hex.EncodeToString(planSum[:]), EvidenceDigest: evidenceDigest, DeclarationDigest: hex.EncodeToString(declarationSum[:]), SourceAnchor: sourceAnchor, Warnings: []string{}, Plan: p}
 	if !decl.ImagePinned(d.World.Base) {
 		result.Warnings = append(result.Warnings, "UNPINNED BASE IMAGE: reproducibility depends on mutable external state")
 	}
@@ -203,18 +208,48 @@ func EvidenceCanonical(p Plan) (Plan, string, error) {
 	return redacted, hex.EncodeToString(sum[:]), nil
 }
 
+// EvidenceCanonicalWithAnchor binds the public plan to the producer-canonical
+// source anchor without making ordinary operational plan identity depend on
+// the declaration checkout location.
+func EvidenceCanonicalWithAnchor(p Plan, sourceAnchor string) (Plan, string, error) {
+	if !filepath.IsAbs(sourceAnchor) || filepath.Clean(sourceAnchor) != sourceAnchor {
+		return Plan{}, "", errors.New("source anchor must be absolute and clean")
+	}
+	redacted, _, err := EvidenceCanonical(p)
+	if err != nil {
+		return Plan{}, "", err
+	}
+	var canonical bytes.Buffer
+	encoder := json.NewEncoder(&canonical)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(struct {
+		SourceAnchor string `json:"source_anchor"`
+		Plan         Plan   `json:"plan"`
+	}{SourceAnchor: sourceAnchor, Plan: redacted}); err != nil {
+		return Plan{}, "", err
+	}
+	sum := sha256.Sum256(canonical.Bytes())
+	return redacted, hex.EncodeToString(sum[:]), nil
+}
+
+func evidenceCanonicalForResult(result Result) (Plan, string, error) {
+	if result.SourceAnchor == "" {
+		return EvidenceCanonical(result.Plan)
+	}
+	return EvidenceCanonicalWithAnchor(result.Plan, result.SourceAnchor)
+}
+
 // ProjectEvidence strictly re-derives the retained public plan from the
 // declaration. Non-secret source digests are retained content observations;
 // secret digests must already be the literal redaction marker.
-func ProjectEvidence(d decl.Declaration, declarationPath string, declarationBytes []byte, retained Plan) (Result, error) {
-	dir, err := filepath.Abs(filepath.Dir(declarationPath))
-	if err != nil {
+func ProjectEvidence(d decl.Declaration, declarationBytes []byte, retained Result) (Result, error) {
+	if !filepath.IsAbs(retained.SourceAnchor) || filepath.Clean(retained.SourceAnchor) != retained.SourceAnchor {
+		return Result{}, errors.New("retained source anchor must be absolute and clean")
+	}
+	if err := decl.ValidateEvidence(d, retained.SourceAnchor); err != nil {
 		return Result{}, err
 	}
-	if err := decl.ValidateEvidence(d, dir); err != nil {
-		return Result{}, err
-	}
-	if len(retained.Copies) != len(d.Copies) || len(retained.Mounts) != len(d.Mounts) {
+	if len(retained.Plan.Copies) != len(d.Copies) || len(retained.Plan.Mounts) != len(d.Mounts) {
 		return Result{}, fmt.Errorf("retained plan copy or mount cardinality disagrees with declaration")
 	}
 	p := Plan{
@@ -231,11 +266,11 @@ func ProjectEvidence(d decl.Declaration, declarationPath string, declarationByte
 		}
 	}
 	for index, copy := range d.Copies {
-		source, err := decl.ResolveSource(dir, copy.Source)
+		source, err := decl.ResolveEvidenceSource(retained.SourceAnchor, copy.Source)
 		if err != nil {
 			return Result{}, err
 		}
-		digest := retained.Copies[index].SourceDigest
+		digest := retained.Plan.Copies[index].SourceDigest
 		if copy.Secret {
 			if digest != "<redacted>" {
 				return Result{}, fmt.Errorf("retained secret copy %d is not redacted", index)
@@ -246,11 +281,11 @@ func ProjectEvidence(d decl.Declaration, declarationPath string, declarationByte
 		p.Copies = append(p.Copies, Copy{Source: source, SourceDigest: digest, Target: filepath.Clean(copy.Target), Mode: copy.Mode, Secret: copy.Secret})
 	}
 	for index, mount := range d.Mounts {
-		source, err := decl.ResolveSource(dir, mount.Source)
+		source, err := decl.ResolveEvidenceSource(retained.SourceAnchor, mount.Source)
 		if err != nil {
 			return Result{}, err
 		}
-		sourceType := retained.Mounts[index].SourceType
+		sourceType := retained.Plan.Mounts[index].SourceType
 		if sourceType != "file" && sourceType != "directory" {
 			return Result{}, fmt.Errorf("retained mount %d source type is invalid", index)
 		}
@@ -272,12 +307,12 @@ func ProjectEvidence(d decl.Declaration, declarationPath string, declarationByte
 	for _, service := range d.Services {
 		p.Services = append(p.Services, Service{Name: service.Name, Command: append([]string{}, service.Command...), Autostart: service.Autostart, Restart: service.Restart})
 	}
-	_, evidenceDigest, err := EvidenceCanonical(p)
+	_, evidenceDigest, err := EvidenceCanonicalWithAnchor(p, retained.SourceAnchor)
 	if err != nil {
 		return Result{}, err
 	}
 	declarationSum := sha256.Sum256(declarationBytes)
-	result := Result{PlanDigest: evidenceDigest, EvidenceDigest: evidenceDigest, DeclarationDigest: hex.EncodeToString(declarationSum[:]), Warnings: []string{}, Plan: p}
+	result := Result{PlanDigest: evidenceDigest, EvidenceDigest: evidenceDigest, DeclarationDigest: hex.EncodeToString(declarationSum[:]), SourceAnchor: retained.SourceAnchor, Warnings: []string{}, Plan: p}
 	if !decl.ImagePinned(d.World.Base) {
 		result.Warnings = append(result.Warnings, "UNPINNED BASE IMAGE: reproducibility depends on mutable external state")
 	}
@@ -344,7 +379,7 @@ func Canonical(p Plan) ([]byte, error) {
 
 // JSON returns the stable machine-readable result.
 func JSON(result Result) ([]byte, error) {
-	_, evidenceDigest, err := EvidenceCanonical(result.Plan)
+	_, evidenceDigest, err := evidenceCanonicalForResult(result)
 	if err != nil {
 		return nil, err
 	}

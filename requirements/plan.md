@@ -43,9 +43,14 @@ bytes. Both are printed by dry-run and present in JSON output.
 
 Machine JSON also carries `evidence_digest`, the independently recomputable
 SHA-256 of the same plan after each secret copy's content digest is replaced by
-the literal `<redacted>`. The operational `plan_digest` continues to change
-when secret source bytes change, but an offline evidence consumer is not asked
-to guess those bytes in order to verify the retained public projection.
+the literal `<redacted>`. When planning has a producer filesystem context, the
+machine result also retains its canonical declaration-directory
+`source_anchor`, and that anchor participates in `evidence_digest`. Relative
+sources can therefore be re-projected lexically on an isolated audit host
+without reopening the producer checkout. The operational `plan_digest` remains
+independent of checkout location and continues to change when secret source
+bytes change, but an offline evidence consumer is not asked to guess those
+bytes in order to verify the retained public projection.
 
 These digests establish provenance and conservative operational equality. They
 do not define behavioral or ontological identity: different realizations may

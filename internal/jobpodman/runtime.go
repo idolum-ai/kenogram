@@ -116,6 +116,7 @@ type Runtime struct {
 	name              string
 	containerID       string
 	ownerToken        string
+	scratchRoot       string
 	scratch           string
 	scratchID         FilesystemIdentity
 	helperSource      string
@@ -268,22 +269,30 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 		return nil, fmt.Errorf("create job owner token: %w", err)
 	}
 	name := jobContainerName(invocation.Request.JobID, ownerToken)
-	scratch, err := r.tempDir("", "kenogram-job-")
+	scratchRoot, err := r.tempDir("", "kenogram-jobs-")
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(scratch, 0o700); err != nil {
-		os.RemoveAll(scratch)
+	if err := os.Chmod(scratchRoot, 0o700); err != nil {
+		os.RemoveAll(scratchRoot)
+		return nil, err
+	}
+	scratch := filepath.Join(scratchRoot, "job")
+	if err := os.Mkdir(scratch, 0o700); err != nil {
+		os.RemoveAll(scratchRoot)
 		return nil, err
 	}
 	scratchID, err := filesystemIdentityAt(scratch)
 	if err != nil {
-		os.RemoveAll(scratch)
+		os.RemoveAll(scratchRoot)
 		return nil, err
 	}
 	r.mu.Lock()
-	r.name, r.ownerToken, r.scratch, r.scratchID, r.mayOwn = name, ownerToken, scratch, scratchID, false
+	r.name, r.ownerToken, r.scratchRoot, r.scratch, r.scratchID, r.mayOwn = name, ownerToken, scratchRoot, scratch, scratchID, false
 	r.mu.Unlock()
+	if err := validateRuntimeOwnedPathIsolation(invocation.Prepared.Result.Plan, scratchRoot, scratch); err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
 	if err := ctx.Err(); err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
@@ -454,14 +463,14 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 
 func (r *Runtime) refuseBeforeAdmission(cause error) (job.Process, error) {
 	r.mu.Lock()
-	scratch, snapshots := r.scratch, r.readOnlySnapshots
-	r.name, r.ownerToken, r.scratch, r.helperSource, r.scratchID = "", "", "", "", FilesystemIdentity{}
+	scratchRoot, snapshots := r.scratchRoot, r.readOnlySnapshots
+	r.name, r.ownerToken, r.scratchRoot, r.scratch, r.helperSource, r.scratchID = "", "", "", "", "", FilesystemIdentity{}
 	r.mu.Unlock()
-	if scratch != "" {
+	if scratchRoot != "" {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		permissionErr := prepareReadOnlySnapshotsRemoval(cleanupCtx, snapshots)
 		cancel()
-		removeErr := os.RemoveAll(scratch)
+		removeErr := os.RemoveAll(scratchRoot)
 		if removeErr != nil || permissionErr != nil {
 			if removeErr != nil {
 				removeErr = fmt.Errorf("remove refused-job scratch: %w", removeErr)
@@ -706,7 +715,7 @@ func (r *Runtime) admittedFailure(invocation job.Invocation, cause error) (job.P
 func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcontract.CleanupResult {
 	started := time.Now()
 	r.mu.Lock()
-	name, containerID, ownerToken, scratch, scratchID, helperSource, mayOwn, process := r.name, r.containerID, r.ownerToken, r.scratch, r.scratchID, r.helperSource, r.mayOwn, r.process
+	name, containerID, ownerToken, scratchRoot, scratch, scratchID, helperSource, mayOwn, process := r.name, r.containerID, r.ownerToken, r.scratchRoot, r.scratch, r.scratchID, r.helperSource, r.mayOwn, r.process
 	readOnlySnapshots := r.readOnlySnapshots
 	mountFacts := append([]jobcontract.RuntimeMountObservation{}, r.mountFacts...)
 	mounts := append([]backend.Mount{}, r.mounts...)
@@ -876,6 +885,14 @@ func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcon
 		}
 		if _, err := os.Lstat(scratch); !os.IsNotExist(err) {
 			reasons = append(reasons, "SCRATCH_ABSENCE_UNPROVED")
+		}
+		if scratchRoot != "" {
+			if err := os.Remove(scratchRoot); err != nil && !os.IsNotExist(err) {
+				reasons = append(reasons, "SCRATCH_ROOT_REMOVE_FAILED")
+			}
+			if _, err := os.Lstat(scratchRoot); !os.IsNotExist(err) {
+				reasons = append(reasons, "SCRATCH_ROOT_ABSENCE_UNPROVED")
+			}
 		}
 	} else if scratch != "" && !containerAbsent {
 		reasons = append(reasons, "SCRATCH_RETAINED_FOR_UNPROVED_CONTAINER")
@@ -1146,18 +1163,23 @@ func mountHasCleanupHardeningOptions(mount backend.EvidenceMount) bool {
 }
 
 func clearWorkspaceContents(ctx context.Context, binding workspaceCleanupBinding) error {
+	return clearWorkspaceContentsWithOpen(ctx, binding, os.OpenRoot)
+}
+
+func clearWorkspaceContentsWithOpen(ctx context.Context, binding workspaceCleanupBinding, openRoot func(string) (*os.Root, error)) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	identity, err := filesystemIdentityAt(binding.Source)
-	if err != nil || identity != (FilesystemIdentity{Device: binding.Device, Inode: binding.Inode}) {
-		return errors.New("workspace root identity changed")
-	}
-	root, err := os.OpenRoot(binding.Source)
+	root, err := openRoot(binding.Source)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
+	opened, err := root.Stat(".")
+	identity, identityErr := filesystemIdentity(opened)
+	if err != nil || identityErr != nil || identity != (FilesystemIdentity{Device: binding.Device, Inode: binding.Inode}) {
+		return errors.Join(err, identityErr, errors.New("opened workspace root identity changed"))
+	}
 	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return err
@@ -2007,6 +2029,40 @@ func validateRuntimeMountPaths(result plan.Plan) error {
 	return nil
 }
 
+func validateRuntimeOwnedPathIsolation(result plan.Plan, scratchRoot, scratch string) error {
+	rootInfo, rootErr := os.Lstat(scratchRoot)
+	scratchInfo, scratchErr := os.Lstat(scratch)
+	if rootErr != nil || scratchErr != nil || !rootInfo.IsDir() || !scratchInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || scratchInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.Join(rootErr, scratchErr, errors.New("runtime-owned scratch authority is invalid"))
+	}
+	type sourceAuthority struct {
+		kind   string
+		source string
+	}
+	sources := make([]sourceAuthority, 0, len(result.Copies)+len(result.Mounts))
+	for _, copy := range result.Copies {
+		sources = append(sources, sourceAuthority{kind: "copy", source: copy.Source})
+	}
+	for _, mount := range result.Mounts {
+		sources = append(sources, sourceAuthority{kind: "mount", source: mount.Source})
+	}
+	canonicalRoot, canonicalScratch := canonicalHostPath(scratchRoot), canonicalHostPath(scratch)
+	for _, authority := range sources {
+		canonicalSource := canonicalHostPath(authority.source)
+		if hostPathsOverlap(canonicalSource, canonicalRoot) || hostPathsOverlap(canonicalSource, canonicalScratch) {
+			return fmt.Errorf("declared %s source overlaps the private runtime scratch authority", authority.kind)
+		}
+		info, err := os.Lstat(authority.source)
+		if err != nil {
+			return fmt.Errorf("inspect declared %s source for scratch isolation: %w", authority.kind, err)
+		}
+		if os.SameFile(info, rootInfo) || os.SameFile(info, scratchInfo) {
+			return fmt.Errorf("declared %s source aliases the private runtime scratch authority", authority.kind)
+		}
+	}
+	return nil
+}
+
 func validateBackendMountPaths(mounts []backend.Mount) error {
 	for _, mount := range mounts {
 		if err := backend.ValidateMountArgumentPath(mount.Source); err != nil {
@@ -2282,6 +2338,13 @@ func captureSourceFact(ctx context.Context, source, authoritySource, target, mod
 func filesystemIdentityAt(path string) (FilesystemIdentity, error) {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return FilesystemIdentity{}, errors.New("filesystem identity is not a non-symlink directory")
+	}
+	return filesystemIdentity(info)
+}
+
+func filesystemIdentity(info fs.FileInfo) (FilesystemIdentity, error) {
+	if info == nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return FilesystemIdentity{}, errors.New("filesystem identity is not a non-symlink directory")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)

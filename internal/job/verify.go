@@ -119,7 +119,7 @@ func Verify(evidenceDir string) (Verification, error) {
 	if err != nil {
 		return Verification{}, err
 	}
-	expectedPlan, err := plan.ProjectEvidence(declaration, request.Declaration.Path, observed["declaration.toml"], retainedPlan.Plan)
+	expectedPlan, err := plan.ProjectEvidence(declaration, observed["declaration.toml"], retainedPlan)
 	if err != nil {
 		return Verification{}, fmt.Errorf("re-project retained plan: %w", err)
 	}
@@ -149,6 +149,14 @@ func Verify(evidenceDir string) (Verification, error) {
 	if runtimeEvidenceDigest(observed["runtime-before.json"], observed["runtime-after.json"]) != result.Identity.RuntimeSHA256 {
 		return Verification{}, errors.New("runtime evidence identity mismatch")
 	}
+	before, hasBefore, beforeErr := parseRetainedRuntimeObservation(observed["runtime-before.json"])
+	after, hasAfter, afterErr := parseRetainedRuntimeObservation(observed["runtime-after.json"])
+	if err := errors.Join(beforeErr, afterErr); err != nil {
+		return Verification{}, fmt.Errorf("strictly parse retained runtime evidence: %w", err)
+	}
+	if err := verifyRetainedRuntimeEvidence(before, hasBefore, after, hasAfter, result, request, retainedPlan, provenance); err != nil {
+		return Verification{}, err
+	}
 	egressRaw, hasEgress := observed["egress.json"]
 	if len(retainedPlan.Plan.NetworkAllow) == 0 {
 		if hasEgress || result.Identity.EgressSHA256 != "" {
@@ -164,23 +172,15 @@ func Verify(evidenceDir string) (Verification, error) {
 		}
 		if hasEgress {
 			egress, egressErr := jobcontract.ParseEgressEvidence(egressRaw)
-			before, beforeErr := jobcontract.ParseRuntimeObservation(observed["runtime-before.json"])
-			if err := errors.Join(egressErr, beforeErr); err != nil {
+			if err := egressErr; err != nil {
 				return Verification{}, err
+			}
+			if !hasBefore {
+				return Verification{}, errors.New("retained egress lacks a strict before-runtime observation")
 			}
 			if err := verifyEgressEvidence(egress, retainedPlan, result, before); err != nil {
 				return Verification{}, err
 			}
-		}
-	}
-	if result.Status == "complete" {
-		before, beforeErr := jobcontract.ParseRuntimeObservation(observed["runtime-before.json"])
-		after, afterErr := jobcontract.ParseRuntimeObservation(observed["runtime-after.json"])
-		if beforeErr != nil || afterErr != nil {
-			return Verification{}, errors.Join(errors.New("complete result lacks strict runtime observations"), beforeErr, afterErr)
-		}
-		if err := verifyRuntimeObservations(before, after, result, request, retainedPlan, provenance); err != nil {
-			return Verification{}, err
 		}
 	}
 	if err := verifyArtifacts(request, manifest, observed); err != nil {
@@ -200,14 +200,65 @@ func Verify(evidenceDir string) (Verification, error) {
 	return Verification{Schema: "kenogram.job-verification.v1", JobID: manifest.JobID, Status: result.Status, Entries: len(manifest.Entries)}, nil
 }
 
+func parseRetainedRuntimeObservation(raw []byte) (jobcontract.RuntimeObservation, bool, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("{}")) {
+		return jobcontract.RuntimeObservation{}, false, nil
+	}
+	observation, err := jobcontract.ParseRuntimeObservation(raw)
+	return observation, true, err
+}
+
+func verifyRetainedRuntimeEvidence(before jobcontract.RuntimeObservation, hasBefore bool, after jobcontract.RuntimeObservation, hasAfter bool, result jobcontract.Result, request jobcontract.Request, retained plan.Result, provenance jobcontract.Provenance) error {
+	if !hasBefore && !hasAfter {
+		if result.Identity.RuntimeProvider != "" || result.Identity.Generation != 0 || result.Identity.ImageDigest != "" {
+			return errors.New("absent runtime observations contradict retained runtime identity")
+		}
+		if !slices.Contains(result.Reasons, "RUNTIME_START_FAILED") && !slices.Contains(result.Reasons, "RUNTIME_START_OBSERVATION_FAILED") && !slices.Contains(result.Reasons, "RUNTIME_OBSERVATION_INVALID") {
+			return errors.New("absent runtime observations lack a justified start failure")
+		}
+		return nil
+	}
+	if !hasBefore {
+		return errors.New("after-runtime observation exists without its before-runtime authority")
+	}
+	if err := verifyRuntimeBeforeObservation(before, result, request, retained, provenance); err != nil {
+		return err
+	}
+	if hasAfter {
+		return verifyRuntimeObservations(before, after, result, request, retained, provenance)
+	}
+	if result.Status == "complete" || !slices.Contains(result.Reasons, "FINALIZATION_FAILED") {
+		return errors.New("missing after-runtime observation lacks a justified finalization failure")
+	}
+	return nil
+}
+
 func verifyRuntimeObservations(before, after jobcontract.RuntimeObservation, result jobcontract.Result, request jobcontract.Request, retained plan.Result, provenance jobcontract.Provenance) error {
-	if before.Phase != "before" || after.Phase != "after" || !before.Running || after.Running {
+	if err := verifyRuntimeBeforeObservation(before, result, request, retained, provenance); err != nil {
+		return err
+	}
+	if after.Phase != "after" || after.Running {
 		return errors.New("runtime observation phases or running states disagree")
 	}
 	if before.ContainerID != after.ContainerID || before.ContainerName != after.ContainerName ||
 		before.ImageReference != after.ImageReference || before.ImageDigest != after.ImageDigest ||
 		before.PlanSHA256 != after.PlanSHA256 || before.DeclarationSHA256 != after.DeclarationSHA256 || before.Generation != after.Generation {
 		return errors.New("runtime identity changed across phases")
+	}
+	stableBefore, stableAfter := before, after
+	stableBefore.Phase, stableAfter.Phase, stableBefore.ObservedAt, stableAfter.ObservedAt, stableBefore.Running, stableAfter.Running = "", "", "", "", false, false
+	// Live-process-only fields are deliberately absent after stop.
+	stableBefore.IPCIsolated, stableBefore.UIDIdentity, stableBefore.GIDIdentity, stableBefore.NoNewPrivileges, stableBefore.SeccompMode, stableBefore.BoundingCaps = false, false, false, false, 0, []string{}
+	stableBefore.EgressAdmission = nil
+	if !reflect.DeepEqual(stableBefore, stableAfter) {
+		return errors.New("stable runtime enforcement facts changed across phases")
+	}
+	return nil
+}
+
+func verifyRuntimeBeforeObservation(before jobcontract.RuntimeObservation, result jobcontract.Result, request jobcontract.Request, retained plan.Result, provenance jobcontract.Provenance) error {
+	if before.Phase != "before" || !before.Running {
+		return errors.New("before-runtime observation phase or running state disagrees")
 	}
 	if before.ImageReference != result.Identity.ImageReference || before.ImageDigest != result.Identity.ImageDigest || before.Generation != result.Identity.Generation || before.PlanSHA256 != result.Identity.PlanSHA256 || before.DeclarationSHA256 != result.Identity.DeclarationSHA256 {
 		return errors.New("runtime observation disagrees with result identity")
@@ -226,14 +277,6 @@ func verifyRuntimeObservations(before, after jobcontract.RuntimeObservation, res
 	}
 	if len(retained.Plan.NetworkAllow) != 0 && before.EgressAdmission == nil {
 		return errors.New("declared egress lacks an independently retained runtime admission")
-	}
-	stableBefore, stableAfter := before, after
-	stableBefore.Phase, stableAfter.Phase, stableBefore.ObservedAt, stableAfter.ObservedAt, stableBefore.Running, stableAfter.Running = "", "", "", "", false, false
-	// Live-process-only fields are deliberately absent after stop.
-	stableBefore.IPCIsolated, stableBefore.UIDIdentity, stableBefore.GIDIdentity, stableBefore.NoNewPrivileges, stableBefore.SeccompMode, stableBefore.BoundingCaps = false, false, false, false, 0, []string{}
-	stableBefore.EgressAdmission = nil
-	if !reflect.DeepEqual(stableBefore, stableAfter) {
-		return errors.New("stable runtime enforcement facts changed across phases")
 	}
 	type expectedMount struct{ mode, role, source string }
 	expected := map[string]expectedMount{
