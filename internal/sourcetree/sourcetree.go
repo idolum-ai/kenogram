@@ -236,6 +236,65 @@ func ContentDigest(ctx context.Context, source string) (string, error) {
 	return Digest(ctx, source)
 }
 
+// ProjectReadOnly makes a private staging copy readable and traversable by an
+// arbitrary contained identity without making any node writable. Regular-file
+// executability is retained as a boolean property and propagated to every
+// contained identity. The caller must keep the staging parent host-private.
+func ProjectReadOnly(ctx context.Context, source string) error {
+	return rewritePermissions(ctx, source, func(info fs.FileInfo) (fs.FileMode, bool) {
+		if info.IsDir() {
+			return 0o555, true
+		}
+		if !info.Mode().IsRegular() {
+			return 0, false
+		}
+		mode := fs.FileMode(0o444)
+		if info.Mode().Perm()&0o111 != 0 {
+			mode |= 0o111
+		}
+		return mode, true
+	})
+}
+
+// PrepareRemoval restores owner write permission only to directories in a
+// bounded staging tree. It is used after the contained runtime is absent so a
+// host-private read-only projection can be removed without broadening files.
+func PrepareRemoval(ctx context.Context, source string) error {
+	return rewritePermissions(ctx, source, func(info fs.FileInfo) (fs.FileMode, bool) {
+		if info.IsDir() {
+			return 0o700, true
+		}
+		return 0, false
+	})
+}
+
+func rewritePermissions(ctx context.Context, source string, projected func(fs.FileInfo) (fs.FileMode, bool)) error {
+	return Inspect(ctx, source, func(entry Entry) error {
+		mode, ok := projected(entry.Info)
+		if !ok {
+			return nil
+		}
+		path := source
+		if entry.Relative != "." {
+			path = filepath.Join(source, filepath.FromSlash(entry.Relative))
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		opened, statErr := file.Stat()
+		if statErr != nil || !os.SameFile(entry.Info, opened) || opened.Mode().Type() != entry.Info.Mode().Type() || opened.Mode().Perm() != entry.Info.Mode().Perm() || opened.Size() != entry.Info.Size() || !opened.ModTime().Equal(entry.Info.ModTime()) {
+			return errors.Join(statErr, file.Close(), fmt.Errorf("staged source changed before permission projection at %s", entry.Relative))
+		}
+		chmodErr := file.Chmod(mode)
+		after, afterErr := file.Stat()
+		if chmodErr != nil || afterErr != nil || !os.SameFile(opened, after) || after.Mode().Type() != opened.Mode().Type() || after.Mode().Perm() != mode {
+			return errors.Join(chmodErr, afterErr, file.Close(), fmt.Errorf("staged source permission projection failed at %s", entry.Relative))
+		}
+		return file.Close()
+	})
+}
+
 // Copy creates a bounded, create-only content-and-mode snapshot at target.
 func Copy(ctx context.Context, source, target string) (retErr error) {
 	directories := []Entry{}

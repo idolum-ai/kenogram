@@ -969,6 +969,139 @@ func TestWritableMountContentIsNeverTraversedDuringFinalization(t *testing.T) {
 	}
 }
 
+func TestReadOnlySnapshotProjectsPrivateSourcesWithoutMutatingAuthority(t *testing.T) {
+	t.Run("0600 regular file", func(t *testing.T) {
+		source := filepath.Join(t.TempDir(), "private-input")
+		if err := os.WriteFile(source, []byte("private\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before, err := sourcetree.Digest(context.Background(), source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorityInfo, err := os.Lstat(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorityStat := authorityInfo.Sys().(*syscall.Stat_t)
+		snapshots, err := snapshotReadOnlyMounts(context.Background(), t.TempDir(), []plan.Mount{{Source: source, SourceType: "file", Target: "/input", Mode: "ro"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot := snapshots["/input"]
+		staged, err := os.Stat(snapshot.path)
+		if err != nil || staged.Mode().Perm() != 0o444 || staged.Mode().Perm()&0o222 != 0 {
+			t.Fatalf("staged=%v error=%v", staged, err)
+		}
+		raw, err := os.ReadFile(snapshot.path)
+		if err != nil || string(raw) != "private\n" {
+			t.Fatalf("raw=%q error=%v", raw, err)
+		}
+		projected, err := sourcetree.Digest(context.Background(), snapshot.path)
+		if err != nil || snapshot.authorityDigest != "sha256:"+before || snapshot.digest != "sha256:"+projected || snapshot.authorityDigest == snapshot.digest || snapshot.policy != jobcontract.RuntimeReadOnlyPermissionPolicy {
+			t.Fatalf("snapshot=%#v digest=%q error=%v", snapshot, projected, err)
+		}
+		after, err := sourcetree.Digest(context.Background(), source)
+		sourceInfo, statErr := os.Stat(source)
+		if err != nil || statErr != nil {
+			t.Fatalf("source digest/stat errors=%v/%v", err, statErr)
+		}
+		afterStat := sourceInfo.Sys().(*syscall.Stat_t)
+		if before != after || sourceInfo.Mode().Perm() != 0o600 || !os.SameFile(authorityInfo, sourceInfo) || authorityStat.Dev != afterStat.Dev || authorityStat.Ino != afterStat.Ino || authorityStat.Uid != afterStat.Uid || authorityStat.Gid != afterStat.Gid {
+			t.Fatalf("source before=%q after=%q mode=%v errors=%v/%v", before, after, sourceInfo.Mode().Perm(), err, statErr)
+		}
+	})
+
+	t.Run("0700 nested tree", func(t *testing.T) {
+		source := t.TempDir()
+		if err := os.Chmod(source, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		nested := filepath.Join(source, "nested")
+		if err := os.Mkdir(nested, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nested, "data"), []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nested, "tool"), []byte("tool"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		before, err := sourcetree.Digest(context.Background(), source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshots, err := snapshotReadOnlyMounts(context.Background(), t.TempDir(), []plan.Mount{{Source: source, SourceType: "directory", Target: "/input", Mode: "ro"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot := snapshots["/input"]
+		for relative, want := range map[string]os.FileMode{".": 0o555, "nested": 0o555, "nested/data": 0o444, "nested/tool": 0o555} {
+			info, err := os.Stat(filepath.Join(snapshot.path, filepath.FromSlash(relative)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != want || info.Mode().Perm()&0o222 != 0 {
+				t.Fatalf("%s mode=%v want=%v error=%v", relative, info.Mode().Perm(), want, err)
+			}
+		}
+		after, err := sourcetree.Digest(context.Background(), source)
+		if err != nil || before != after {
+			t.Fatalf("source before=%q after=%q error=%v", before, after, err)
+		}
+		for relative, want := range map[string]os.FileMode{".": 0o700, "nested": 0o700, "nested/data": 0o600, "nested/tool": 0o700} {
+			info, err := os.Stat(filepath.Join(source, filepath.FromSlash(relative)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != want {
+				t.Fatalf("source %s mode=%v want=%v error=%v", relative, info.Mode().Perm(), want, err)
+			}
+		}
+		if err := sourcetree.PrepareRemoval(context.Background(), snapshot.path); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	for _, test := range []struct {
+		name  string
+		build func(string) error
+	}{
+		{name: "symlink", build: func(root string) error { return os.Symlink("outside", filepath.Join(root, "link")) }},
+		{name: "special node", build: func(root string) error { return syscall.Mkfifo(filepath.Join(root, "fifo"), 0o600) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := t.TempDir()
+			if err := test.build(source); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := snapshotReadOnlyMounts(context.Background(), t.TempDir(), []plan.Mount{{Source: source, SourceType: "directory", Target: "/input", Mode: "ro"}}); err == nil {
+				t.Fatal("invalid private source tree was projected")
+			}
+		})
+	}
+
+	t.Run("partial projection remains removable", func(t *testing.T) {
+		source := t.TempDir()
+		if err := os.WriteFile(filepath.Join(source, "data"), []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		scratch := t.TempDir()
+		_, err := snapshotReadOnlyMountsWithProject(context.Background(), scratch, []plan.Mount{{Source: source, SourceType: "directory", Target: "/input", Mode: "ro"}}, func(_ context.Context, staged string) error {
+			if err := os.Chmod(staged, 0o555); err != nil {
+				return err
+			}
+			return errors.New("injected projection failure")
+		})
+		if err == nil || !strings.Contains(err.Error(), "injected projection failure") {
+			t.Fatalf("error=%v", err)
+		}
+		if err := os.RemoveAll(filepath.Join(scratch, "read-only-mounts")); err != nil {
+			t.Fatalf("partially projected scratch is not removable: %v", err)
+		}
+	})
+}
+
 func TestStagedReadOnlyMountContentIsRevalidatedAtFinalization(t *testing.T) {
 	runtime, _, attached, invocation := runtimeFixture(t)
 	readonly := filepath.Join(t.TempDir(), "input")
@@ -987,6 +1120,9 @@ func TestStagedReadOnlyMountContentIsRevalidatedAtFinalization(t *testing.T) {
 	staged := mountedSource(runtime, "/readonly")
 	if staged == "" || staged == readonly {
 		t.Fatalf("read-only source was not staged: %q", staged)
+	}
+	if err := os.Chmod(staged, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(staged, []byte("after!"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1009,9 +1145,13 @@ func TestHostMutationAfterReadOnlySnapshotCannotChangeTargetBytes(t *testing.T) 
 		t.Fatalf("process=%#v error=%v", process, err)
 	}
 	staged := mountedSource(runtime, "/readonly")
+	projectedDigest, digestErr := sourcetree.Digest(context.Background(), staged)
+	if digestErr != nil {
+		t.Fatal(digestErr)
+	}
 	for _, fact := range runtime.mountFacts {
-		if fact.Target == "/readonly" && (!strings.HasPrefix(fact.Source, "kenogram-snapshot:sha256:") || fact.Source == staged || filepath.IsAbs(fact.Source)) {
-			t.Fatalf("retained semantic source leaked or aliased staging path: fact=%q staged=%q", fact.Source, staged)
+		if fact.Target == "/readonly" && (!strings.HasPrefix(fact.Source, "kenogram-snapshot:sha256:") || fact.Source == staged || filepath.IsAbs(fact.Source) || fact.SHA256 != "sha256:"+projectedDigest || fact.AuthoritySHA256 == "" || fact.PermissionPolicy != jobcontract.RuntimeReadOnlyPermissionPolicy) {
+			t.Fatalf("retained snapshot authority is incomplete or aliases staging: fact=%#v staged=%q", fact, staged)
 		}
 	}
 	raw, readErr := os.ReadFile(staged)
@@ -1040,6 +1180,7 @@ func TestStagedReadOnlyContentIsRevalidatedImmediatelyBeforeTargetUse(t *testing
 	runner.afterStart = func() {
 		for _, mount := range runner.mounts {
 			if mount["Destination"] == "/readonly" {
+				_ = os.Chmod(mount["Source"].(string), 0o600)
 				_ = os.WriteFile(mount["Source"].(string), []byte("tampered"), 0o600)
 			}
 		}

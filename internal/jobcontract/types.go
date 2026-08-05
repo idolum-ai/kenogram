@@ -188,6 +188,8 @@ type RuntimeObservation struct {
 type RuntimeMountObservation struct {
 	Role             string `json:"role"`
 	AuthoritySource  string `json:"authority_source,omitempty"`
+	AuthoritySHA256  string `json:"authority_sha256,omitempty"`
+	PermissionPolicy string `json:"permission_policy,omitempty"`
 	Source           string `json:"source"`
 	Target           string `json:"target"`
 	Mode             string `json:"mode"`

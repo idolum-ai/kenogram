@@ -82,11 +82,16 @@ Each runtime mount is explicitly classified as a declaration-owned input,
 workspace, staged helper, or lifecycle channel. The verifier cross-binds every
 declared authority source, target, mode, and retained file-or-directory type.
 Before provider use, each declared read-only source is copied under bounded
-entry and byte limits into Kenogram-owned scratch. Only that isolated snapshot
-is mounted and content-attested; retained evidence names it with a digest-bound
-semantic source instead of a deleted temporary path. Declared writable evidence
-uses the exact retained authority source. Mutating the original read-only host
-path afterward does not change target-observed bytes. Read-only and writable
+entry and byte limits into host-private Kenogram-owned scratch. Kenogram proves
+an exact content-and-mode copy, then makes only the staged copy portable across
+rootless UID mappings: directories are `0555`, ordinary files are `0444`, and a
+source executable becomes `0555`. No staged node is writable. Only that
+normalized snapshot is mounted and content-attested; retained evidence names it
+with a digest-bound semantic source, carries the original authority digest, and
+names `portable-readonly-v1` instead of exposing a deleted temporary path.
+Declared writable evidence uses the exact retained authority source. Mutating
+the original read-only host path afterward does not change target-observed
+bytes. Read-only and writable
 declared sources may not share an inode or overlap canonically. Writable source
 trees are bounded and recursively inspected before creation: any socket or
 other special descendant fails closed, and accessible known runtime endpoint

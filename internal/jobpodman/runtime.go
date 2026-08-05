@@ -95,22 +95,23 @@ type Runtime struct {
 	token      func() (string, error)
 	executable func() (string, error)
 
-	mu            sync.Mutex
-	name          string
-	containerID   string
-	ownerToken    string
-	scratch       string
-	helperSource  string
-	mayOwn        bool
-	process       *process
-	mounts        []backend.Mount
-	artifactRoots []*os.Root
-	mountFacts    []jobcontract.RuntimeMountObservation
-	lifecycleKey  []byte
-	lifecycleFile string
-	lifecycleID   joblifecycle.FileIdentity
-	forced        bool
-	started       bool
+	mu                sync.Mutex
+	name              string
+	containerID       string
+	ownerToken        string
+	scratch           string
+	helperSource      string
+	mayOwn            bool
+	process           *process
+	mounts            []backend.Mount
+	artifactRoots     []*os.Root
+	mountFacts        []jobcontract.RuntimeMountObservation
+	readOnlySnapshots map[string]readOnlySnapshot
+	lifecycleKey      []byte
+	lifecycleFile     string
+	lifecycleID       joblifecycle.FileIdentity
+	forced            bool
+	started           bool
 }
 
 func New(podman *backend.Podman) *Runtime {
@@ -199,6 +200,9 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
+	r.mu.Lock()
+	r.readOnlySnapshots = readOnlySnapshots
+	r.mu.Unlock()
 	helperSource, helperFact, err := stageHelper(ctx, r.executable, scratch)
 	if err != nil {
 		return r.refuseBeforeAdmission(err)
@@ -222,8 +226,11 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 	if err := validateWritableBackendMounts(ctx, mounts); err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
-	mountFacts, err := captureMountFacts(ctx, mounts, invocation.Prepared.Result)
+	mountFacts, err := captureMountFacts(ctx, mounts, invocation.Prepared.Result, readOnlySnapshots)
 	if err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	if err := verifyReadOnlySnapshotFacts(mountFacts, readOnlySnapshots); err != nil {
 		return r.refuseBeforeAdmission(err)
 	}
 	// stageHelper already captured this exact file. Binding the two observations
@@ -321,12 +328,19 @@ func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, 
 
 func (r *Runtime) refuseBeforeAdmission(cause error) (job.Process, error) {
 	r.mu.Lock()
-	scratch := r.scratch
+	scratch, snapshots := r.scratch, r.readOnlySnapshots
 	r.name, r.ownerToken, r.scratch, r.helperSource = "", "", "", ""
 	r.mu.Unlock()
 	if scratch != "" {
-		if err := os.RemoveAll(scratch); err != nil {
-			return nil, errors.Join(cause, fmt.Errorf("remove refused-job scratch: %w", err))
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		permissionErr := prepareReadOnlySnapshotsRemoval(cleanupCtx, snapshots)
+		cancel()
+		removeErr := os.RemoveAll(scratch)
+		if removeErr != nil || permissionErr != nil {
+			if removeErr != nil {
+				removeErr = fmt.Errorf("remove refused-job scratch: %w", removeErr)
+			}
+			return nil, errors.Join(cause, permissionErr, removeErr)
 		}
 	}
 	return nil, cause
@@ -366,6 +380,7 @@ func (r *Runtime) Cleanup(ctx context.Context, _ job.Invocation) jobcontract.Cle
 	started := time.Now()
 	r.mu.Lock()
 	name, containerID, ownerToken, scratch, mayOwn, process := r.name, r.containerID, r.ownerToken, r.scratch, r.mayOwn, r.process
+	readOnlySnapshots := r.readOnlySnapshots
 	artifactRoots := append([]*os.Root{}, r.artifactRoots...)
 	forced := r.forced
 	r.mu.Unlock()
@@ -434,6 +449,9 @@ func (r *Runtime) Cleanup(ctx context.Context, _ job.Invocation) jobcontract.Cle
 		containerAbsent = false
 	}
 	if scratch != "" && containerAbsent {
+		if err := prepareReadOnlySnapshotsRemoval(ctx, readOnlySnapshots); err != nil {
+			reasons = append(reasons, "READ_ONLY_SNAPSHOT_PERMISSION_RESTORE_FAILED")
+		}
 		if err := os.RemoveAll(scratch); err != nil {
 			reasons = append(reasons, "SCRATCH_REMOVE_FAILED")
 		}
@@ -446,6 +464,16 @@ func (r *Runtime) Cleanup(ctx context.Context, _ job.Invocation) jobcontract.Cle
 	}
 	sort.Strings(reasons)
 	return jobcontract.CleanupResult{Status: status, ContainerAbsent: containerAbsent, ProxyAbsent: true, ProcessGroupEmpty: containerAbsent, Forced: forced, DurationNS: int64(time.Since(started)), Reasons: reasons}
+}
+
+func prepareReadOnlySnapshotsRemoval(ctx context.Context, snapshots map[string]readOnlySnapshot) error {
+	var result error
+	for _, snapshot := range snapshots {
+		if err := sourcetree.PrepareRemoval(ctx, snapshot.path); err != nil && !os.IsNotExist(err) {
+			result = errors.Join(result, err)
+		}
+	}
+	return result
 }
 
 type process struct {
@@ -1124,8 +1152,30 @@ func validateReadOnlyWritableAliases(mounts []plan.Mount) error {
 	return nil
 }
 
-func snapshotReadOnlyMounts(ctx context.Context, scratch string, mounts []plan.Mount) (map[string]string, error) {
-	result := map[string]string{}
+type readOnlySnapshot struct {
+	path            string
+	authorityDigest string
+	digest          string
+	policy          string
+}
+
+func snapshotReadOnlyMounts(ctx context.Context, scratch string, mounts []plan.Mount) (map[string]readOnlySnapshot, error) {
+	return snapshotReadOnlyMountsWithProject(ctx, scratch, mounts, sourcetree.ProjectReadOnly)
+}
+
+func snapshotReadOnlyMountsWithProject(ctx context.Context, scratch string, mounts []plan.Mount, project func(context.Context, string) error) (result map[string]readOnlySnapshot, retErr error) {
+	result = map[string]readOnlySnapshot{}
+	stagedPaths := []string{}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		for _, path := range stagedPaths {
+			retErr = errors.Join(retErr, sourcetree.PrepareRemoval(cleanupCtx, path))
+		}
+	}()
 	root := filepath.Join(scratch, "read-only-mounts")
 	if err := os.Mkdir(root, 0o700); err != nil {
 		return nil, err
@@ -1145,7 +1195,7 @@ func snapshotReadOnlyMounts(ctx context.Context, scratch string, mounts []plan.M
 		if observedType != mount.SourceType {
 			return nil, fmt.Errorf("read-only mount %q source type changed", mount.Target)
 		}
-		before, err := boundedSourceContentDigest(ctx, mount.Source, info)
+		before, err := boundedSourceTreeDigest(ctx, mount.Source, info)
 		if err != nil {
 			return nil, err
 		}
@@ -1153,11 +1203,12 @@ func snapshotReadOnlyMounts(ctx context.Context, scratch string, mounts []plan.M
 		if err := sourcetree.Copy(ctx, mount.Source, destination); err != nil {
 			return nil, err
 		}
+		stagedPaths = append(stagedPaths, destination)
 		afterInfo, err := os.Lstat(mount.Source)
 		if err != nil || !os.SameFile(info, afterInfo) {
 			return nil, errors.New("read-only mount source changed during snapshot")
 		}
-		after, err := boundedSourceContentDigest(ctx, mount.Source, afterInfo)
+		after, err := boundedSourceTreeDigest(ctx, mount.Source, afterInfo)
 		if err != nil {
 			return nil, err
 		}
@@ -1165,19 +1216,49 @@ func snapshotReadOnlyMounts(ctx context.Context, scratch string, mounts []plan.M
 		if err != nil {
 			return nil, err
 		}
-		staged, err := boundedSourceContentDigest(ctx, destination, stagedInfo)
+		staged, err := boundedSourceTreeDigest(ctx, destination, stagedInfo)
 		if err != nil {
 			return nil, err
 		}
 		if before != after || before != staged {
 			return nil, fmt.Errorf("read-only mount %q changed during immutable snapshot", mount.Target)
 		}
-		result[mount.Target] = destination
+		if err := project(ctx, destination); err != nil {
+			return nil, fmt.Errorf("project read-only mount %q permissions: %w", mount.Target, err)
+		}
+		projectedInfo, err := os.Lstat(destination)
+		if err != nil || !os.SameFile(stagedInfo, projectedInfo) {
+			return nil, errors.Join(err, fmt.Errorf("read-only mount %q identity changed during permission projection", mount.Target))
+		}
+		projected, err := boundedSourceTreeDigest(ctx, destination, projectedInfo)
+		if err != nil {
+			return nil, err
+		}
+		result[mount.Target] = readOnlySnapshot{
+			path: destination, authorityDigest: "sha256:" + before,
+			digest: "sha256:" + projected, policy: jobcontract.RuntimeReadOnlyPermissionPolicy,
+		}
 	}
 	return result, nil
 }
 
-func captureMountFacts(ctx context.Context, mounts []backend.Mount, result plan.Result) ([]jobcontract.RuntimeMountObservation, error) {
+func verifyReadOnlySnapshotFacts(facts []jobcontract.RuntimeMountObservation, snapshots map[string]readOnlySnapshot) error {
+	for target, snapshot := range snapshots {
+		matched := false
+		for _, fact := range facts {
+			if fact.Target == target && fact.Role == "declared" && fact.Mode == "ro" && fact.AuthoritySHA256 == snapshot.authorityDigest && fact.SHA256 == snapshot.digest && fact.PermissionPolicy == snapshot.policy {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("read-only mount %q normalized snapshot digest is absent from runtime evidence", target)
+		}
+	}
+	return nil
+}
+
+func captureMountFacts(ctx context.Context, mounts []backend.Mount, result plan.Result, snapshots map[string]readOnlySnapshot) ([]jobcontract.RuntimeMountObservation, error) {
 	facts := make([]jobcontract.RuntimeMountObservation, 0, len(mounts))
 	for _, mount := range mounts {
 		role, authoritySource := "", ""
@@ -1206,6 +1287,10 @@ func captureMountFacts(ctx context.Context, mounts []backend.Mount, result plan.
 		if err != nil {
 			return nil, fmt.Errorf("capture mount %q identity: %w", mount.Target, err)
 		}
+		if snapshot, ok := snapshots[mount.Target]; ok {
+			fact.AuthoritySHA256 = snapshot.authorityDigest
+			fact.PermissionPolicy = snapshot.policy
+		}
 		facts = append(facts, fact)
 	}
 	sort.Slice(facts, func(i, j int) bool { return facts[i].Target < facts[j].Target })
@@ -1223,7 +1308,13 @@ func captureSourceFact(ctx context.Context, source, authoritySource, target, mod
 	}
 	digest := ""
 	if content {
-		observed, err := boundedSourceContentDigest(ctx, source, before)
+		var observed string
+		var err error
+		if role == "declared" {
+			observed, err = boundedSourceTreeDigest(ctx, source, before)
+		} else {
+			observed, err = boundedSourceContentDigest(ctx, source, before)
+		}
 		if err != nil {
 			return jobcontract.RuntimeMountObservation{}, err
 		}
@@ -1248,6 +1339,18 @@ func boundedSourceContentDigest(ctx context.Context, source string, info fs.File
 	after, err := os.Lstat(source)
 	if err != nil || !os.SameFile(info, after) || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) {
 		return "", errors.New("source changed during bounded content digest")
+	}
+	return digest, nil
+}
+
+func boundedSourceTreeDigest(ctx context.Context, source string, info fs.FileInfo) (string, error) {
+	digest, err := sourcetree.Digest(ctx, source)
+	if err != nil {
+		return "", err
+	}
+	after, err := os.Lstat(source)
+	if err != nil || !os.SameFile(info, after) || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) || info.Mode().Perm() != after.Mode().Perm() {
+		return "", errors.New("source changed during bounded content-and-mode digest")
 	}
 	return digest, nil
 }
@@ -1283,7 +1386,7 @@ func verifyMountFacts(ctx context.Context, facts []jobcontract.RuntimeMountObser
 	return nil
 }
 
-func jobMounts(layout worldfs.Layout, result plan.Result, readOnlySnapshots map[string]string) ([]backend.Mount, error) {
+func jobMounts(layout worldfs.Layout, result plan.Result, readOnlySnapshots map[string]readOnlySnapshot) ([]backend.Mount, error) {
 	mounts := []backend.Mount{}
 	targets := []string{jobHelperPath, jobLifecyclePath}
 	for _, target := range result.Plan.Workspace {
@@ -1310,11 +1413,11 @@ func jobMounts(layout worldfs.Layout, result plan.Result, readOnlySnapshots map[
 		}
 		source := mount.Source
 		if mount.Mode == "ro" {
-			var ok bool
-			source, ok = readOnlySnapshots[mount.Target]
+			snapshot, ok := readOnlySnapshots[mount.Target]
 			if !ok {
 				return nil, fmt.Errorf("read-only mount %q lacks an immutable snapshot", mount.Target)
 			}
+			source = snapshot.path
 		}
 		mounts = append(mounts, backend.Mount{Source: source, Target: mount.Target, Mode: mount.Mode})
 		targets = append(targets, mount.Target)

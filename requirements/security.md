@@ -11,7 +11,11 @@ state may retain a source digest, but never copied bytes.
 
 For governed one-shot jobs, declared read-only mounts are a narrower case: the
 runtime snapshots them into Kenogram-owned scratch under the shared bounded
-source-tree walker and retains a digest-derived semantic source. Declared
+source-tree walker, proves an exact content-and-mode copy, then normalizes only
+the private staged copy under `portable-readonly-v1`. Directories become `0555`;
+files become `0444` plus execute bits for every contained identity only when the
+source was executable; no staged node remains writable. Evidence retains both
+the original authority digest and normalized delivered digest. Declared
 writable source trees are descriptor-root inspected and reject every socket or
 other special descendant before provider creation. Device/inode comparison also
 rejects aliases of accessible known container-runtime endpoints; no claim is

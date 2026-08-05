@@ -13,6 +13,8 @@ import (
 var runtimeHexDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var runtimeContainerID = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+const RuntimeReadOnlyPermissionPolicy = "portable-readonly-v1"
+
 func ValidateRuntimeObservation(value RuntimeObservation) error {
 	if value.Schema != RuntimeObservationSchema || (value.Phase != "before" && value.Phase != "after") || value.Provider != "podman-cli" {
 		return errors.New("runtime observation schema, phase, or provider is invalid")
@@ -38,8 +40,10 @@ func ValidateRuntimeObservation(value RuntimeObservation) error {
 		validRoleType := mount.Role == "declared" || ((mount.Role == "helper" || mount.Role == "lifecycle") && mount.FileType == "file") || (mount.Role == "workspace" && mount.FileType == "directory")
 		validContent := (mount.Mode == "ro" && runtimeHexDigest.MatchString(mount.SHA256)) || (mount.Mode == "rw" && mount.SHA256 == "")
 		validAuthority := (mount.Role == "declared" && filepath.IsAbs(mount.AuthoritySource) && filepath.Clean(mount.AuthoritySource) == mount.AuthoritySource) || (mount.Role != "declared" && mount.AuthoritySource == "")
+		declaredReadOnly := mount.Role == "declared" && mount.Mode == "ro"
+		validProjection := (declaredReadOnly && runtimeHexDigest.MatchString(mount.AuthoritySHA256) && mount.PermissionPolicy == RuntimeReadOnlyPermissionPolicy) || (!declaredReadOnly && mount.AuthoritySHA256 == "" && mount.PermissionPolicy == "")
 		expectedSource, sourceErr := RuntimeMountSource(mount.Role, mount.Target, mount.Mode, mount.AuthoritySource, mount.SHA256)
-		if !validRole || !validRoleType || !validContent || !validAuthority || sourceErr != nil || mount.Source != expectedSource || !filepath.IsAbs(mount.Target) || filepath.Clean(mount.Target) != mount.Target || (mount.Mode != "ro" && mount.Mode != "rw") || mount.Device > uint64(MaximumWireInteger) || mount.Inode == 0 || mount.Inode > uint64(MaximumWireInteger) || (mount.FileType != "file" && mount.FileType != "directory") || !mount.IdentityVerified {
+		if !validRole || !validRoleType || !validContent || !validAuthority || !validProjection || sourceErr != nil || mount.Source != expectedSource || !filepath.IsAbs(mount.Target) || filepath.Clean(mount.Target) != mount.Target || (mount.Mode != "ro" && mount.Mode != "rw") || mount.Device > uint64(MaximumWireInteger) || mount.Inode == 0 || mount.Inode > uint64(MaximumWireInteger) || (mount.FileType != "file" && mount.FileType != "directory") || !mount.IdentityVerified {
 			return fmt.Errorf("runtime mount %q is invalid", mount.Target)
 		}
 		if _, duplicate := seen[mount.Target]; duplicate {

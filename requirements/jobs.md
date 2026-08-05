@@ -274,22 +274,28 @@ working directory must equal the declared world workdir, keeping the inspected
 configuration and execution authority identical. Declared bind mounts have
 their file-or-directory type retained in the plan. Every declared read-only
 source is copied under bounded entry and byte limits into a create-only,
-Kenogram-owned scratch snapshot before provider use. Provider mounts and runtime
-content facts refer to that snapshot through a stable
-`kenogram-snapshot:sha256:...` semantic source rather than its mutable temporary
-host pathname; a separate `authority_source` binds it to the declaration path.
+Kenogram-owned snapshot beneath a host-private `0700` staging parent. Kenogram
+first proves that the source before and after copying and the exact staged copy
+share one content-and-mode digest. It then applies `portable-readonly-v1` only
+to the staging copy: directories are `0555`; regular files are `0444` plus
+`0111` exactly when any source execute bit was present; no projected node has a
+write bit. Provider mounts and runtime facts refer to the normalized projection
+through a stable `kenogram-snapshot:sha256:...` semantic source rather than its
+temporary host pathname. `authority_source` binds the declaration path,
+`authority_sha256` binds the exact original content and mode, `sha256` binds the
+normalized delivered projection, and `permission_policy` names the transform.
+Only declared read-only mounts may carry those projection fields.
 Declared writable mount `source` equals that exact authority path. Workspace
 and lifecycle sources use deterministic Kenogram-owned semantic references.
-The original and snapshot digests must agree across the
-copy, and the snapshot is revalidated immediately before target admission and
+The normalized snapshot is revalidated immediately before target admission and
 again before finalization. A declared writable source may not be the same inode
 as, or canonically overlap, any declared read-only source. Target-writable
-workspace and lifecycle directories intentionally carry no unchanged-content
-claim and are never recursively hashed during finalization. Offline verification
-requires helper mounts to be files, workspace and lifecycle mounts to be
-directories, and each declared mount type to equal the type retained in the
-plan. The admitted and retained runtime inventories share the same 512-mount
-bound.
+workspaces intentionally carry no unchanged-content claim and are never
+recursively hashed during finalization. The lifecycle channel is one exact
+precreated regular file, not a writable directory. Offline verification requires
+helper and lifecycle mounts to be files, workspace mounts to be directories,
+and each declared mount type to equal the type retained in the plan. The
+admitted and retained runtime inventories share the same 512-mount bound.
 Planning, content digests, copy staging, read-only snapshotting, and writable
 source inspection share one descriptor-rooted, cancellation-aware walker capped
 at 20,000 entries, 1 GiB, depth 128, and 4,096 relative-path bytes. Writable

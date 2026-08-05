@@ -131,6 +131,8 @@ func fakeRuntimeObservation(invocation Invocation, phase string) []byte {
 		fact := jobcontract.RuntimeMountObservation{Role: "declared", AuthoritySource: mount.Source, Target: mount.Target, Mode: mount.Mode, Device: 2, Inode: uint64(index + 100), FileType: mount.SourceType, IdentityVerified: true}
 		if mount.Mode == "ro" {
 			fact.SHA256 = testDigest()
+			fact.AuthoritySHA256 = testDigest()
+			fact.PermissionPolicy = jobcontract.RuntimeReadOnlyPermissionPolicy
 		}
 		fact.Source = source(fact.Role, fact.Target, fact.Mode, fact.AuthoritySource, fact.SHA256)
 		mounts = append(mounts, fact)
@@ -347,6 +349,17 @@ func TestRuntimeVerifierCrossBindsDeclaredMountSourcesAndRuntimeRoles(t *testing
 			}
 		})
 	}
+	t.Run("read-only authority digest phase drift", func(t *testing.T) {
+		before, after := parse("before"), parse("after")
+		for index := range before.Mounts {
+			if before.Mounts[index].Role == "declared" && before.Mounts[index].Mode == "ro" {
+				before.Mounts[index].AuthoritySHA256 = "sha256:" + strings.Repeat("b", 64)
+			}
+		}
+		if err := verifyRuntimeObservations(before, after, result, request, prepared.Result, provenance); err == nil || !strings.Contains(err.Error(), "changed across phases") {
+			t.Fatalf("error=%v", err)
+		}
+	})
 }
 
 func TestExecutorRefusesExistingEvidenceLeaf(t *testing.T) {

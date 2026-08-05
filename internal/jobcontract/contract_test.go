@@ -109,6 +109,59 @@ func TestRuntimeMountSourcesBindAuthorityOrImmutableContent(t *testing.T) {
 	}
 }
 
+func TestRuntimeObservationBindsPortableReadOnlyProjection(t *testing.T) {
+	authority := "/host/private"
+	source, err := RuntimeMountSource("declared", "/input", "ro", authority, testDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := RuntimeMountObservation{
+		Role: "declared", AuthoritySource: authority, AuthoritySHA256: testDigest,
+		PermissionPolicy: RuntimeReadOnlyPermissionPolicy, Source: source, Target: "/input", Mode: "ro",
+		Device: 1, Inode: 1, FileType: "file", SHA256: testDigest, IdentityVerified: true,
+	}
+	if err := ValidateRuntimeObservation(runtimeObservationWithMount(valid)); err != nil {
+		t.Fatalf("valid projection rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*RuntimeMountObservation)
+	}{
+		{name: "missing authority digest", mutate: func(value *RuntimeMountObservation) { value.AuthoritySHA256 = "" }},
+		{name: "unknown policy", mutate: func(value *RuntimeMountObservation) { value.PermissionPolicy = "portable-readonly-v2" }},
+		{name: "missing policy", mutate: func(value *RuntimeMountObservation) { value.PermissionPolicy = "" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mount := valid
+			test.mutate(&mount)
+			if err := ValidateRuntimeObservation(runtimeObservationWithMount(mount)); err == nil {
+				t.Fatal("invalid read-only projection accepted")
+			}
+		})
+	}
+
+	for _, mount := range []RuntimeMountObservation{
+		{Role: "declared", AuthoritySource: authority, AuthoritySHA256: testDigest, PermissionPolicy: RuntimeReadOnlyPermissionPolicy, Source: authority, Target: "/output", Mode: "rw", Device: 1, Inode: 1, FileType: "directory", IdentityVerified: true},
+		{Role: "helper", AuthoritySHA256: testDigest, PermissionPolicy: RuntimeReadOnlyPermissionPolicy, Source: "kenogram-snapshot:" + testDigest, Target: "/helper", Mode: "ro", Device: 1, Inode: 1, FileType: "file", SHA256: testDigest, IdentityVerified: true},
+		{Role: "workspace", AuthoritySHA256: testDigest, PermissionPolicy: RuntimeReadOnlyPermissionPolicy, Source: "kenogram-workspace:" + testDigest, Target: "/workspace", Mode: "rw", Device: 1, Inode: 1, FileType: "directory", IdentityVerified: true},
+		{Role: "lifecycle", AuthoritySHA256: testDigest, PermissionPolicy: RuntimeReadOnlyPermissionPolicy, Source: RuntimeLifecycleSource, Target: "/etc/kenogram/target-lifecycle.json", Mode: "rw", Device: 1, Inode: 1, FileType: "file", IdentityVerified: true},
+	} {
+		if err := ValidateRuntimeObservation(runtimeObservationWithMount(mount)); err == nil {
+			t.Fatalf("projection metadata accepted on %s/%s", mount.Role, mount.Mode)
+		}
+	}
+}
+
+func runtimeObservationWithMount(mount RuntimeMountObservation) RuntimeObservation {
+	return RuntimeObservation{
+		Schema: RuntimeObservationSchema, Phase: "before", ObservedAt: "2026-08-05T12:00:00Z", Provider: "podman-cli",
+		ContainerID: strings.Repeat("c", 64), ContainerName: "job", Running: true,
+		ImageReference: "example.invalid/job@" + testDigest, ImageDigest: testDigest, PlanSHA256: testDigest, DeclarationSHA256: testDigest, Generation: 1,
+		NetworkMode: "none", IPCMode: "private", PIDMode: "private", UTSMode: "private", UserNSMode: "keep-id", User: "agent", Hostname: "job", WorkingDirectory: "/workspace",
+		BoundingCaps: []string{}, MemoryBytes: 1, NanoCPUs: 1, PIDs: 1, Mounts: []RuntimeMountObservation{mount},
+	}
+}
+
 func TestRequestRejectsAuthorityAndBoundViolations(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

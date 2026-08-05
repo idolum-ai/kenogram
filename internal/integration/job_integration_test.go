@@ -111,8 +111,16 @@ secret = true
 	t.Run("keep-id declared user writes the bounded lifecycle slot", func(t *testing.T) {
 		jobID := "direct-provider-keep-id-user"
 		cleanupJobContainers(t, jobID)
-		declarationPath, declarationRaw := writeJobDeclarationForUser(t, tmp, imageID, fmt.Sprint(os.Getuid()), "")
-		request := governedRequest(jobID, declarationPath, declarationRaw, []string{"/usr/local/bin/job-target", "--success"})
+		mountSource := filepath.Join(t.TempDir(), "private-input")
+		if err := os.Mkdir(mountSource, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(mountSource, "read-only.txt"), []byte("mounted\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		extra := fmt.Sprintf("\n[[mounts]]\nsource = %q\ntarget = \"/input\"\nmode = \"ro\"\n", mountSource)
+		declarationPath, declarationRaw := writeJobDeclarationForUser(t, tmp, imageID, fmt.Sprint(os.Getuid()), extra)
+		request := governedRequest(jobID, declarationPath, declarationRaw, []string{"/usr/local/bin/job-target", "--read-only"})
 		result, evidenceDir := runGovernedJob(t, tmp, bin, request, false)
 		if result.Status != "complete" || result.Target.ExitStatus == nil || *result.Target.ExitStatus != 0 {
 			t.Fatalf("result=%#v", result)

@@ -20,6 +20,8 @@ func main() {
 		fmt.Println("success")
 	case "--proof":
 		runProof()
+	case "--read-only":
+		runReadOnly()
 	case "--hang-orphan":
 		child := exec.Command(os.Args[0], "--child")
 		if err := child.Start(); err != nil {
@@ -34,6 +36,35 @@ func main() {
 	default:
 		os.Exit(40)
 	}
+}
+
+func runReadOnly() {
+	raw, err := os.ReadFile("/input/read-only.txt")
+	if err != nil || string(raw) != "mounted\n" {
+		fmt.Fprintln(os.Stderr, "read-only mount missing")
+		os.Exit(43)
+	}
+	if err := os.WriteFile("/input/read-only.txt", []byte("changed"), 0o600); err == nil {
+		fmt.Fprintln(os.Stderr, "read-only file accepted a write")
+		os.Exit(44)
+	}
+	if err := os.WriteFile("/input/must-not-write", []byte("x"), 0o600); err == nil {
+		fmt.Fprintln(os.Stderr, "read-only directory accepted a write")
+		os.Exit(45)
+	}
+	if err := os.Chmod("/input/read-only.txt", 0o600); err == nil {
+		fmt.Fprintln(os.Stderr, "read-only file accepted chmod")
+		os.Exit(46)
+	}
+	if err := os.Rename("/input/read-only.txt", "/input/renamed"); err == nil {
+		fmt.Fprintln(os.Stderr, "read-only file accepted rename")
+		os.Exit(47)
+	}
+	if err := os.Remove("/input/read-only.txt"); err == nil {
+		fmt.Fprintln(os.Stderr, "read-only file accepted unlink")
+		os.Exit(48)
+	}
+	fmt.Println("private read-only mount is portable")
 }
 
 func runProof() {
