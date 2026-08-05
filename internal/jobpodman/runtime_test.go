@@ -1100,6 +1100,51 @@ func TestReadOnlySnapshotProjectsPrivateSourcesWithoutMutatingAuthority(t *testi
 			t.Fatalf("partially projected scratch is not removable: %v", err)
 		}
 	})
+
+	for _, test := range []struct {
+		name   string
+		mutate func(string) error
+	}{
+		{name: "projector byte mutation", mutate: func(staged string) error {
+			path := filepath.Join(staged, "data")
+			if err := os.Chmod(path, 0o600); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, []byte("changed"), 0o600); err != nil {
+				return err
+			}
+			return sourcetree.ProjectReadOnly(context.Background(), staged)
+		}},
+		{name: "projector path mutation", mutate: func(staged string) error {
+			if err := os.Chmod(staged, 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(staged, "extra"), []byte("extra"), 0o600); err != nil {
+				return err
+			}
+			return sourcetree.ProjectReadOnly(context.Background(), staged)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := t.TempDir()
+			if err := os.WriteFile(filepath.Join(source, "data"), []byte("data"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			scratch := t.TempDir()
+			_, err := snapshotReadOnlyMountsWithProject(context.Background(), scratch, []plan.Mount{{Source: source, SourceType: "directory", Target: "/input", Mode: "ro"}}, func(ctx context.Context, staged string) error {
+				if err := sourcetree.ProjectReadOnly(ctx, staged); err != nil {
+					return err
+				}
+				return test.mutate(staged)
+			})
+			if err == nil || !strings.Contains(err.Error(), "changed content or inventory") {
+				t.Fatalf("error=%v", err)
+			}
+			if err := os.RemoveAll(filepath.Join(scratch, "read-only-mounts")); err != nil {
+				t.Fatalf("rejected projection scratch is not removable: %v", err)
+			}
+		})
+	}
 }
 
 func TestStagedReadOnlyMountContentIsRevalidatedAtFinalization(t *testing.T) {

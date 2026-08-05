@@ -108,25 +108,12 @@ secret = true
 		assertNoOwnedContainers(t, tmp, jobID)
 	})
 
-	t.Run("keep-id declared user writes the bounded lifecycle slot", func(t *testing.T) {
-		jobID := "direct-provider-keep-id-user"
-		cleanupJobContainers(t, jobID)
-		mountSource := filepath.Join(t.TempDir(), "private-input")
-		if err := os.Mkdir(mountSource, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(mountSource, "read-only.txt"), []byte("mounted\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		extra := fmt.Sprintf("\n[[mounts]]\nsource = %q\ntarget = \"/input\"\nmode = \"ro\"\n", mountSource)
-		declarationPath, declarationRaw := writeJobDeclarationForUser(t, tmp, imageID, fmt.Sprint(os.Getuid()), extra)
-		request := governedRequest(jobID, declarationPath, declarationRaw, []string{"/usr/local/bin/job-target", "--read-only"})
-		result, evidenceDir := runGovernedJob(t, tmp, bin, request, false)
-		if result.Status != "complete" || result.Target.ExitStatus == nil || *result.Target.ExitStatus != 0 {
-			t.Fatalf("result=%#v", result)
-		}
-		assertVerifiedJob(t, tmp, bin, evidenceDir, "complete")
-		assertNoOwnedContainers(t, tmp, jobID)
+	t.Run("mapped root consumes the complete private read-only projection", func(t *testing.T) {
+		runPrivateReadOnlyJob(t, tmp, bin, imageID, "0", "direct-provider-root-read-only")
+	})
+
+	t.Run("keep-id user consumes the complete private read-only projection", func(t *testing.T) {
+		runPrivateReadOnlyJob(t, tmp, bin, imageID, fmt.Sprint(os.Getuid()), "direct-provider-keep-id-read-only")
 	})
 
 	t.Run("timeout kills orphan and seals unknown", func(t *testing.T) {
@@ -145,6 +132,27 @@ secret = true
 		assertVerifiedJob(t, tmp, bin, evidenceDir, "incomplete")
 		assertNoOwnedContainers(t, tmp, jobID)
 	})
+}
+
+func runPrivateReadOnlyJob(t *testing.T, dir, bin, imageID, user, jobID string) {
+	t.Helper()
+	cleanupJobContainers(t, jobID)
+	mountSource := filepath.Join(t.TempDir(), "private-input")
+	if err := os.Mkdir(mountSource, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mountSource, "read-only.txt"), []byte("mounted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	extra := fmt.Sprintf("\n[[mounts]]\nsource = %q\ntarget = \"/input\"\nmode = \"ro\"\n", mountSource)
+	declarationPath, declarationRaw := writeJobDeclarationForUser(t, dir, imageID, user, extra)
+	request := governedRequest(jobID, declarationPath, declarationRaw, []string{"/usr/local/bin/job-target", "--read-only"})
+	result, evidenceDir := runGovernedJob(t, dir, bin, request, false)
+	if result.Status != "complete" || result.Target.ExitStatus == nil || *result.Target.ExitStatus != 0 {
+		t.Fatalf("result=%#v", result)
+	}
+	assertVerifiedJob(t, dir, bin, evidenceDir, "complete")
+	assertNoOwnedContainers(t, dir, jobID)
 }
 
 func writeJobDeclaration(t *testing.T, dir, imageID, extra string) (string, []byte) {

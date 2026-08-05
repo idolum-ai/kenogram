@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -103,6 +104,33 @@ func TestCopyDoesNotRemovePreexistingTarget(t *testing.T) {
 	raw, err := os.ReadFile(target)
 	if err != nil || string(raw) != "preexisting" {
 		t.Fatalf("target=%q error=%v", raw, err)
+	}
+}
+
+func TestCopyRejectsSpecialNodesWithoutPartialTarget(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		build func(string) error
+	}{
+		{name: "symlink", build: func(root string) error { return os.Symlink("ordinary", filepath.Join(root, "z-special")) }},
+		{name: "fifo", build: func(root string) error { return syscall.Mkfifo(filepath.Join(root, "z-special"), 0o600) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := t.TempDir()
+			if err := os.WriteFile(filepath.Join(source, "ordinary"), []byte("ordinary"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := test.build(source); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(t.TempDir(), "snapshot")
+			if err := Copy(context.Background(), source, target); err == nil || !strings.Contains(err.Error(), "non-regular") {
+				t.Fatalf("error=%v", err)
+			}
+			if _, err := os.Lstat(target); !os.IsNotExist(err) {
+				t.Fatalf("partial target remains: %v", err)
+			}
+		})
 	}
 }
 

@@ -1216,7 +1216,7 @@ func snapshotReadOnlyMountsWithProject(ctx context.Context, scratch string, moun
 		if err != nil {
 			return nil, err
 		}
-		staged, err := boundedSourceTreeDigest(ctx, destination, stagedInfo)
+		staged, expectedProjection, err := boundedSourceTreeAndProjectionDigests(ctx, destination, stagedInfo)
 		if err != nil {
 			return nil, err
 		}
@@ -1233,6 +1233,9 @@ func snapshotReadOnlyMountsWithProject(ctx context.Context, scratch string, moun
 		projected, err := boundedSourceTreeDigest(ctx, destination, projectedInfo)
 		if err != nil {
 			return nil, err
+		}
+		if projected != expectedProjection {
+			return nil, fmt.Errorf("read-only mount %q permission projection changed content or inventory", mount.Target)
 		}
 		result[mount.Target] = readOnlySnapshot{
 			path: destination, authorityDigest: "sha256:" + before,
@@ -1344,15 +1347,20 @@ func boundedSourceContentDigest(ctx context.Context, source string, info fs.File
 }
 
 func boundedSourceTreeDigest(ctx context.Context, source string, info fs.FileInfo) (string, error) {
-	digest, err := sourcetree.Digest(ctx, source)
+	digest, _, err := boundedSourceTreeAndProjectionDigests(ctx, source, info)
+	return digest, err
+}
+
+func boundedSourceTreeAndProjectionDigests(ctx context.Context, source string, info fs.FileInfo) (string, string, error) {
+	digest, projected, err := sourcetree.DigestAndReadOnlyProjection(ctx, source)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	after, err := os.Lstat(source)
 	if err != nil || !os.SameFile(info, after) || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) || info.Mode().Perm() != after.Mode().Perm() {
-		return "", errors.New("source changed during bounded content-and-mode digest")
+		return "", "", errors.New("source changed during bounded content-and-mode digest")
 	}
-	return digest, nil
+	return digest, projected, nil
 }
 
 type contextReader struct {

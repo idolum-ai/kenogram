@@ -184,30 +184,51 @@ func (r *countingReader) Read(buffer []byte) (int, error) {
 // Digest returns the canonical content-and-mode fingerprint used by plans and
 // runtime source attestations.
 func Digest(ctx context.Context, source string) (string, error) {
-	entries := []string{}
+	exact, _, err := DigestAndReadOnlyProjection(ctx, source)
+	return exact, err
+}
+
+// ReadOnlyProjectionDigest derives the canonical digest that
+// ProjectReadOnly must produce without mutating the exact source tree.
+func ReadOnlyProjectionDigest(ctx context.Context, source string) (string, error) {
+	_, projected, err := DigestAndReadOnlyProjection(ctx, source)
+	return projected, err
+}
+
+// DigestAndReadOnlyProjection computes the exact and portable-read-only
+// inventories in one bounded traversal so both digests bind the same bytes,
+// paths, types, and source modes.
+func DigestAndReadOnlyProjection(ctx context.Context, source string) (string, string, error) {
+	exactEntries, projectedEntries := []string{}, []string{}
 	err := Walk(ctx, source, func(entry Entry) error {
 		switch {
 		case entry.Info.IsDir():
-			entries = append(entries, "d\x00"+entry.Relative+"\x00"+entry.Info.Mode().Perm().String())
+			exactEntries = append(exactEntries, "d\x00"+entry.Relative+"\x00"+entry.Info.Mode().Perm().String())
+			projectedEntries = append(projectedEntries, "d\x00"+entry.Relative+"\x00"+portableReadOnlyMode(entry.Info).String())
 		case entry.Info.Mode().IsRegular():
 			hash := sha256.New()
 			if _, err := io.Copy(hash, entry.Reader); err != nil {
 				return err
 			}
-			entries = append(entries, "f\x00"+entry.Relative+"\x00"+hex.EncodeToString(hash.Sum(nil))+"\x00"+entry.Info.Mode().Perm().String())
+			content := hex.EncodeToString(hash.Sum(nil))
+			exactEntries = append(exactEntries, "f\x00"+entry.Relative+"\x00"+content+"\x00"+entry.Info.Mode().Perm().String())
+			projectedEntries = append(projectedEntries, "f\x00"+entry.Relative+"\x00"+content+"\x00"+portableReadOnlyMode(entry.Info).String())
 		}
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	sort.Strings(entries)
-	hash := sha256.New()
-	for _, entry := range entries {
-		_, _ = io.WriteString(hash, entry)
-		_, _ = hash.Write([]byte{'\n'})
+	canonical := func(entries []string) string {
+		sort.Strings(entries)
+		hash := sha256.New()
+		for _, entry := range entries {
+			_, _ = io.WriteString(hash, entry)
+			_, _ = hash.Write([]byte{'\n'})
+		}
+		return hex.EncodeToString(hash.Sum(nil))
 	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return canonical(exactEntries), canonical(projectedEntries), nil
 }
 
 // ContentDigest preserves the runtime mount observation convention: a regular
@@ -242,18 +263,22 @@ func ContentDigest(ctx context.Context, source string) (string, error) {
 // contained identity. The caller must keep the staging parent host-private.
 func ProjectReadOnly(ctx context.Context, source string) error {
 	return rewritePermissions(ctx, source, func(info fs.FileInfo) (fs.FileMode, bool) {
-		if info.IsDir() {
-			return 0o555, true
-		}
-		if !info.Mode().IsRegular() {
+		if !info.IsDir() && !info.Mode().IsRegular() {
 			return 0, false
 		}
-		mode := fs.FileMode(0o444)
-		if info.Mode().Perm()&0o111 != 0 {
-			mode |= 0o111
-		}
-		return mode, true
+		return portableReadOnlyMode(info), true
 	})
+}
+
+func portableReadOnlyMode(info fs.FileInfo) fs.FileMode {
+	if info.IsDir() {
+		return 0o555
+	}
+	mode := fs.FileMode(0o444)
+	if info.Mode().Perm()&0o111 != 0 {
+		mode |= 0o111
+	}
+	return mode
 }
 
 // PrepareRemoval restores owner write permission only to directories in a
@@ -288,7 +313,7 @@ func rewritePermissions(ctx context.Context, source string, projected func(fs.Fi
 		}
 		chmodErr := file.Chmod(mode)
 		after, afterErr := file.Stat()
-		if chmodErr != nil || afterErr != nil || !os.SameFile(opened, after) || after.Mode().Type() != opened.Mode().Type() || after.Mode().Perm() != mode {
+		if chmodErr != nil || afterErr != nil || !os.SameFile(opened, after) || after.Mode().Type() != opened.Mode().Type() || after.Mode().Perm() != mode || after.Size() != opened.Size() || !after.ModTime().Equal(opened.ModTime()) {
 			return errors.Join(chmodErr, afterErr, file.Close(), fmt.Errorf("staged source permission projection failed at %s", entry.Relative))
 		}
 		return file.Close()
@@ -318,6 +343,9 @@ func Copy(ctx context.Context, source, target string) (retErr error) {
 			}
 			directories = append(directories, entry)
 			return nil
+		}
+		if !entry.Info.Mode().IsRegular() || entry.Reader == nil {
+			return fmt.Errorf("source snapshot contains a non-regular file at %s", entry.Relative)
 		}
 		output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
