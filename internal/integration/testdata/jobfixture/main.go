@@ -64,7 +64,38 @@ func runReadOnly() {
 		fmt.Fprintln(os.Stderr, "read-only file accepted unlink")
 		os.Exit(48)
 	}
-	fmt.Println("private read-only mount is portable")
+	probePortableWorkspace(49)
+	fmt.Println("private read-only and writable workspace mounts are portable")
+}
+
+func probePortableWorkspace(exitCode int) {
+	root := "/workspace/portable-writable-probe"
+	if err := os.Mkdir(root, 0o700); err != nil {
+		fmt.Fprintln(os.Stderr, "portable workspace directory could not be created")
+		os.Exit(exitCode)
+	}
+	first := filepath.Join(root, "first")
+	second := filepath.Join(root, "second")
+	if err := os.WriteFile(first, []byte("portable\n"), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, "portable workspace file could not be written")
+		os.Exit(exitCode + 1)
+	}
+	if err := os.Chmod(first, 0o640); err != nil {
+		fmt.Fprintln(os.Stderr, "portable workspace file could not be chmodded")
+		os.Exit(exitCode + 2)
+	}
+	if err := os.Rename(first, second); err != nil {
+		fmt.Fprintln(os.Stderr, "portable workspace file could not be renamed")
+		os.Exit(exitCode + 3)
+	}
+	if err := os.Remove(second); err != nil {
+		fmt.Fprintln(os.Stderr, "portable workspace file could not be removed")
+		os.Exit(exitCode + 4)
+	}
+	if err := os.Remove(root); err != nil {
+		fmt.Fprintln(os.Stderr, "portable workspace directory could not be removed")
+		os.Exit(exitCode + 5)
+	}
 }
 
 func runProof() {
@@ -98,11 +129,11 @@ func runProof() {
 			os.Exit(46)
 		}
 	}
-	if err := os.Mkdir("/artifacts", 0o700); err != nil {
+	if err := os.Mkdir("/workspace/artifacts", 0o700); err != nil {
 		fmt.Fprintln(os.Stderr, "artifact root could not be created")
 		os.Exit(47)
 	}
-	if err := os.WriteFile(filepath.Join("/artifacts", "report.json"), []byte("{\"proof\":true}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join("/workspace/artifacts", "report.json"), []byte("{\"proof\":true}\n"), 0o600); err != nil {
 		fmt.Fprintln(os.Stderr, "artifact could not be written")
 		os.Exit(48)
 	}

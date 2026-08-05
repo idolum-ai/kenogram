@@ -75,7 +75,7 @@ secret = true
 			{Name: "KENOGRAM_RETAINED", PublicValue: &public},
 			{Name: "KENOGRAM_SECRET", SecretFile: "/usr/local/bin/secret-token"},
 		}
-		request.Artifacts = &jobcontract.ArtifactRequest{ContainerRoot: "/artifacts", MaxEntries: 2, MaxBytes: 4096}
+		request.Artifacts = &jobcontract.ArtifactRequest{ContainerRoot: "/workspace/artifacts", MaxEntries: 2, MaxBytes: 4096}
 		result, evidenceDir := runGovernedJob(t, tmp, bin, request, false)
 		if result.Status != "complete" || result.Target.Kind != "exited" || result.Target.ExitStatus == nil || *result.Target.ExitStatus != 7 {
 			t.Fatalf("result=%#v", result)

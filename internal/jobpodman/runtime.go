@@ -1327,11 +1327,22 @@ func captureSourceFact(ctx context.Context, source, authoritySource, target, mod
 	if before.IsDir() {
 		fileType = "directory"
 	}
+	permissionPolicy := ""
+	switch {
+	case role == "workspace":
+		const permissionBits = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+		if before.Mode()&permissionBits != 0o777 {
+			return jobcontract.RuntimeMountObservation{}, errors.New("workspace source does not satisfy portable-writable-v1")
+		}
+		permissionPolicy = jobcontract.RuntimeWorkspacePermissionPolicy
+	case role == "declared" && mode == "ro":
+		permissionPolicy = jobcontract.RuntimeReadOnlyPermissionPolicy
+	}
 	semanticSource, err := jobcontract.RuntimeMountSource(role, target, mode, authoritySource, digest)
 	if err != nil {
 		return jobcontract.RuntimeMountObservation{}, err
 	}
-	return jobcontract.RuntimeMountObservation{Role: role, AuthoritySource: authoritySource, Source: semanticSource, Target: target, Mode: mode, Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: fileType, SHA256: digest, IdentityVerified: true}, nil
+	return jobcontract.RuntimeMountObservation{Role: role, AuthoritySource: authoritySource, PermissionPolicy: permissionPolicy, Source: semanticSource, Target: target, Mode: mode, Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: fileType, SHA256: digest, IdentityVerified: true}, nil
 }
 
 func boundedSourceContentDigest(ctx context.Context, source string, info fs.FileInfo) (string, error) {
@@ -1387,7 +1398,7 @@ func verifyMountFacts(ctx context.Context, facts []jobcontract.RuntimeMountObser
 			return fmt.Errorf("mount %q observed source is unavailable", expected.Target)
 		}
 		observed, err := captureSourceFact(ctx, observedSource, expected.AuthoritySource, expected.Target, expected.Mode, expected.Role, expected.SHA256 != "")
-		if err != nil || observed.Source != expected.Source || observed.Device != expected.Device || observed.Inode != expected.Inode || observed.FileType != expected.FileType || observed.Role != expected.Role || observed.AuthoritySource != expected.AuthoritySource || observed.SHA256 != expected.SHA256 {
+		if err != nil || observed.Source != expected.Source || observed.Device != expected.Device || observed.Inode != expected.Inode || observed.FileType != expected.FileType || observed.Role != expected.Role || observed.AuthoritySource != expected.AuthoritySource || observed.SHA256 != expected.SHA256 || observed.PermissionPolicy != expected.PermissionPolicy {
 			return fmt.Errorf("mount %q source identity changed", expected.Target)
 		}
 	}
@@ -1401,7 +1412,7 @@ func jobMounts(layout worldfs.Layout, result plan.Result, readOnlySnapshots map[
 		if overlappingContainerTarget(target, targets) {
 			return nil, fmt.Errorf("workspace target %q overlaps another runtime-owned target", target)
 		}
-		source, err := layout.EnsureWorkspace(target)
+		source, err := layout.EnsurePortableWritableWorkspace(target)
 		if err != nil {
 			return nil, err
 		}

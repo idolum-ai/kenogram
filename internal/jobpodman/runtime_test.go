@@ -943,6 +943,110 @@ func TestMountInodeReplacementInvalidatesFinalization(t *testing.T) {
 	}
 }
 
+func TestPortableWritableWorkspaceIsPrivateOutsideAndPortableInside(t *testing.T) {
+	runtime, _, attached, invocation := runtimeFixture(t)
+	declaredWritable := filepath.Join(t.TempDir(), "operator-owned")
+	if err := os.Mkdir(declaredWritable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	invocation.Prepared.Result.Plan.Mounts = append(invocation.Prepared.Result.Plan.Mounts, plan.Mount{
+		Source: declaredWritable, SourceType: "directory", Target: "/operator-owned", Mode: "rw",
+	})
+	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratchInfo, scratchErr := os.Stat(runtime.scratch)
+	workspace := mountedSource(runtime, "/workspace")
+	workspaceInfo, workspaceErr := os.Stat(workspace)
+	declaredInfo, declaredErr := os.Stat(declaredWritable)
+	if scratchErr != nil || scratchInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("outer scratch mode=%v error=%v", scratchInfo, scratchErr)
+	}
+	if workspaceErr != nil || workspaceInfo.Mode().Perm() != 0o777 {
+		t.Fatalf("portable workspace mode=%v error=%v", workspaceInfo, workspaceErr)
+	}
+	relative, err := filepath.Rel(runtime.scratch, workspace)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		t.Fatalf("workspace %q is outside scratch %q: relative=%q error=%v", workspace, runtime.scratch, relative, err)
+	}
+	for parent := filepath.Dir(workspace); ; parent = filepath.Dir(parent) {
+		info, err := os.Stat(parent)
+		if err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("workspace parent %q is not host-private: info=%v error=%v", parent, info, err)
+		}
+		if parent == runtime.scratch {
+			break
+		}
+	}
+	if declaredErr != nil || declaredInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("declared writable authority was reprojected: mode=%v error=%v", declaredInfo, declaredErr)
+	}
+	for _, fact := range runtime.mountFacts {
+		switch fact.Target {
+		case "/workspace":
+			if fact.PermissionPolicy != jobcontract.RuntimeWorkspacePermissionPolicy || fact.AuthoritySHA256 != "" || fact.SHA256 != "" {
+				t.Fatalf("workspace fact=%#v", fact)
+			}
+		case "/operator-owned":
+			if fact.PermissionPolicy != "" || fact.AuthoritySHA256 != "" || fact.SHA256 != "" {
+				t.Fatalf("declared writable fact invented a projection: %#v", fact)
+			}
+		}
+	}
+	attached.finish(nil)
+	if _, err := process.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Finalize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cleanup := runtime.Cleanup(context.Background(), invocation); cleanup.Status != "complete" {
+		t.Fatalf("cleanup=%#v", cleanup)
+	}
+}
+
+func TestWorkspacePermissionSubstitutionInvalidatesFinalization(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{name: "missing write bits", mode: 0o700},
+		{name: "sticky bit", mode: 0o777 | os.ModeSticky},
+		{name: "setgid bit", mode: 0o777 | os.ModeSetgid},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, _, attached, invocation := runtimeFixture(t)
+			process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attached.finish(nil)
+			if _, err := process.Wait(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			workspace := mountedSource(runtime, "/workspace")
+			if test.mode&os.ModeSetgid != 0 {
+				// Some hosts refuse setgid when a newly created directory
+				// inherits a group outside the caller's memberships.
+				if err := os.Chown(workspace, -1, os.Getgid()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Chmod(workspace, test.mode); err != nil {
+				t.Fatal(err)
+			}
+			observed, err := os.Stat(workspace)
+			if err != nil || observed.Mode()&(os.ModePerm|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != test.mode {
+				t.Fatalf("workspace mode substitution was not established: mode=%v error=%v", observed, err)
+			}
+			if _, err := process.Finalize(context.Background()); err == nil || !strings.Contains(err.Error(), "source identity changed") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
 func TestWritableMountContentIsNeverTraversedDuringFinalization(t *testing.T) {
 	runtime, _, attached, invocation := runtimeFixture(t)
 	process, err := runtime.Start(context.Background(), invocation, io.Discard, io.Discard)

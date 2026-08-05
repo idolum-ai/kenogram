@@ -125,7 +125,7 @@ func fakeRuntimeObservation(invocation Invocation, phase string) []byte {
 		{Role: "lifecycle", Source: source("lifecycle", "/etc/kenogram/target-lifecycle.json", "rw", "", ""), Target: "/etc/kenogram/target-lifecycle.json", Mode: "rw", Device: 1, Inode: 2, FileType: "file", IdentityVerified: true},
 	}
 	for index, target := range invocation.Prepared.Result.Plan.Workspace {
-		mounts = append(mounts, jobcontract.RuntimeMountObservation{Role: "workspace", Source: source("workspace", target, "rw", "", ""), Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 3), FileType: "directory", IdentityVerified: true})
+		mounts = append(mounts, jobcontract.RuntimeMountObservation{Role: "workspace", PermissionPolicy: jobcontract.RuntimeWorkspacePermissionPolicy, Source: source("workspace", target, "rw", "", ""), Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 3), FileType: "directory", IdentityVerified: true})
 	}
 	for index, mount := range invocation.Prepared.Result.Plan.Mounts {
 		fact := jobcontract.RuntimeMountObservation{Role: "declared", AuthoritySource: mount.Source, Target: mount.Target, Mode: mount.Mode, Device: 2, Inode: uint64(index + 100), FileType: mount.SourceType, IdentityVerified: true}

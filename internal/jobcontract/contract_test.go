@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -79,7 +80,7 @@ func TestRuntimeObservationMountBoundAccepts512AndRejects513(t *testing.T) {
 			if err != nil {
 				panic(err)
 			}
-			mounts = append(mounts, RuntimeMountObservation{Role: "workspace", Source: source, Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 1), FileType: "directory", IdentityVerified: true})
+			mounts = append(mounts, RuntimeMountObservation{Role: "workspace", PermissionPolicy: RuntimeWorkspacePermissionPolicy, Source: source, Target: target, Mode: "rw", Device: 1, Inode: uint64(index + 1), FileType: "directory", IdentityVerified: true})
 		}
 		return RuntimeObservation{Schema: RuntimeObservationSchema, Phase: "before", ObservedAt: "2026-08-05T12:00:00Z", Provider: "podman-cli", ContainerID: strings.Repeat("c", 64), ContainerName: "job", Running: true, ImageReference: "example.invalid/job@" + testDigest, ImageDigest: testDigest, PlanSHA256: testDigest, DeclarationSHA256: testDigest, Generation: 1, NetworkMode: "none", IPCMode: "private", PIDMode: "private", UTSMode: "private", UserNSMode: "keep-id", User: "agent", Hostname: "job", WorkingDirectory: "/workspace", BoundingCaps: []string{}, MemoryBytes: 1, NanoCPUs: 1, PIDs: 1, Mounts: mounts}
 	}
@@ -143,12 +144,122 @@ func TestRuntimeObservationBindsPortableReadOnlyProjection(t *testing.T) {
 	for _, mount := range []RuntimeMountObservation{
 		{Role: "declared", AuthoritySource: authority, AuthoritySHA256: testDigest, PermissionPolicy: RuntimeReadOnlyPermissionPolicy, Source: authority, Target: "/output", Mode: "rw", Device: 1, Inode: 1, FileType: "directory", IdentityVerified: true},
 		{Role: "helper", AuthoritySHA256: testDigest, PermissionPolicy: RuntimeReadOnlyPermissionPolicy, Source: "kenogram-snapshot:" + testDigest, Target: "/helper", Mode: "ro", Device: 1, Inode: 1, FileType: "file", SHA256: testDigest, IdentityVerified: true},
-		{Role: "workspace", AuthoritySHA256: testDigest, PermissionPolicy: RuntimeReadOnlyPermissionPolicy, Source: "kenogram-workspace:" + testDigest, Target: "/workspace", Mode: "rw", Device: 1, Inode: 1, FileType: "directory", IdentityVerified: true},
 		{Role: "lifecycle", AuthoritySHA256: testDigest, PermissionPolicy: RuntimeReadOnlyPermissionPolicy, Source: RuntimeLifecycleSource, Target: "/etc/kenogram/target-lifecycle.json", Mode: "rw", Device: 1, Inode: 1, FileType: "file", IdentityVerified: true},
 	} {
 		if err := ValidateRuntimeObservation(runtimeObservationWithMount(mount)); err == nil {
 			t.Fatalf("projection metadata accepted on %s/%s", mount.Role, mount.Mode)
 		}
+	}
+}
+
+func TestRuntimeObservationBindsPortableWritableWorkspace(t *testing.T) {
+	source, err := RuntimeMountSource("workspace", "/workspace", "rw", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := RuntimeMountObservation{
+		Role: "workspace", PermissionPolicy: RuntimeWorkspacePermissionPolicy,
+		Source: source, Target: "/workspace", Mode: "rw", Device: 1, Inode: 1,
+		FileType: "directory", IdentityVerified: true,
+	}
+	if err := ValidateRuntimeObservation(runtimeObservationWithMount(valid)); err != nil {
+		t.Fatalf("valid portable workspace rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*RuntimeMountObservation)
+	}{
+		{name: "missing policy", mutate: func(value *RuntimeMountObservation) { value.PermissionPolicy = "" }},
+		{name: "read-only policy", mutate: func(value *RuntimeMountObservation) { value.PermissionPolicy = RuntimeReadOnlyPermissionPolicy }},
+		{name: "invented authority digest", mutate: func(value *RuntimeMountObservation) { value.AuthoritySHA256 = testDigest }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mount := valid
+			test.mutate(&mount)
+			if err := ValidateRuntimeObservation(runtimeObservationWithMount(mount)); err == nil {
+				t.Fatal("invalid portable workspace evidence accepted")
+			}
+		})
+	}
+}
+
+func TestRuntimeObservationPermissionPolicyJSONFixtures(t *testing.T) {
+	declaredRO := RuntimeMountObservation{
+		Role: "declared", AuthoritySource: "/host/input", AuthoritySHA256: testDigest,
+		PermissionPolicy: RuntimeReadOnlyPermissionPolicy, Source: "kenogram-snapshot:" + testDigest,
+		Target: "/input", Mode: "ro", Device: 1, Inode: 1, FileType: "file",
+		SHA256: testDigest, IdentityVerified: true,
+	}
+	workspaceSource, err := RuntimeMountSource("workspace", "/workspace", "rw", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := RuntimeMountObservation{
+		Role: "workspace", PermissionPolicy: RuntimeWorkspacePermissionPolicy,
+		Source: workspaceSource, Target: "/workspace", Mode: "rw", Device: 1,
+		Inode: 1, FileType: "directory", IdentityVerified: true,
+	}
+	declaredRW := RuntimeMountObservation{
+		Role: "declared", AuthoritySource: "/host/output", Source: "/host/output",
+		Target: "/output", Mode: "rw", Device: 1, Inode: 1, FileType: "directory",
+		IdentityVerified: true,
+	}
+	helper := RuntimeMountObservation{
+		Role: "helper", Source: "kenogram-snapshot:" + testDigest, Target: "/helper",
+		Mode: "ro", Device: 1, Inode: 1, FileType: "file", SHA256: testDigest,
+		IdentityVerified: true,
+	}
+	lifecycle := RuntimeMountObservation{
+		Role: "lifecycle", Source: RuntimeLifecycleSource,
+		Target: "/etc/kenogram/target-lifecycle.json", Mode: "rw", Device: 1,
+		Inode: 1, FileType: "file", IdentityVerified: true,
+	}
+	withoutAuthority := declaredRO
+	withoutAuthority.AuthoritySHA256 = ""
+	withoutReadOnlyPolicy := declaredRO
+	withoutReadOnlyPolicy.PermissionPolicy = ""
+	wrongReadOnlyPolicy := declaredRO
+	wrongReadOnlyPolicy.PermissionPolicy = RuntimeWorkspacePermissionPolicy
+	withoutWorkspacePolicy := workspace
+	withoutWorkspacePolicy.PermissionPolicy = ""
+	wrongWorkspacePolicy := workspace
+	wrongWorkspacePolicy.PermissionPolicy = RuntimeReadOnlyPermissionPolicy
+	workspaceWithAuthority := workspace
+	workspaceWithAuthority.AuthoritySHA256 = testDigest
+	declaredRWWithPolicy := declaredRW
+	declaredRWWithPolicy.PermissionPolicy = RuntimeWorkspacePermissionPolicy
+	helperWithPolicy := helper
+	helperWithPolicy.PermissionPolicy = RuntimeReadOnlyPermissionPolicy
+	lifecycleWithPolicy := lifecycle
+	lifecycleWithPolicy.PermissionPolicy = RuntimeWorkspacePermissionPolicy
+
+	for _, fixture := range []struct {
+		name  string
+		mount RuntimeMountObservation
+		valid bool
+	}{
+		{name: "declared read-only", mount: declaredRO, valid: true},
+		{name: "declared read-only missing authority", mount: withoutAuthority},
+		{name: "declared read-only missing policy", mount: withoutReadOnlyPolicy},
+		{name: "declared read-only wrong policy", mount: wrongReadOnlyPolicy},
+		{name: "workspace", mount: workspace, valid: true},
+		{name: "workspace missing policy", mount: withoutWorkspacePolicy},
+		{name: "workspace wrong policy", mount: wrongWorkspacePolicy},
+		{name: "workspace invents authority", mount: workspaceWithAuthority},
+		{name: "declared writable carries policy", mount: declaredRWWithPolicy},
+		{name: "helper carries policy", mount: helperWithPolicy},
+		{name: "lifecycle carries policy", mount: lifecycleWithPolicy},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			raw, err := json.Marshal(runtimeObservationWithMount(fixture.mount))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ParseRuntimeObservation(raw)
+			if (err == nil) != fixture.valid {
+				t.Fatalf("valid=%t error=%v json=%s", fixture.valid, err, raw)
+			}
+		})
 	}
 }
 
@@ -320,6 +431,52 @@ func TestPublishedSchemasAreClosedJSONDocuments(t *testing.T) {
 			}
 			assertObjectSchemasClosed(t, schema, "root")
 		})
+	}
+}
+
+func TestRuntimeObservationSchemaPinsMutuallyExhaustivePermissionPolicies(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repositoryRoot(t), "schemas", "kenogram.podman-runtime-observation.v1.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	definitions, ok := schema["$defs"].(map[string]any)
+	if !ok {
+		t.Fatal("runtime schema lacks definitions")
+	}
+	mount, ok := definitions["mount"].(map[string]any)
+	if !ok {
+		t.Fatal("runtime schema lacks mount definition")
+	}
+	allOf, ok := mount["allOf"].([]any)
+	if !ok || len(allOf) < 2 {
+		t.Fatal("runtime mount schema lacks permission conditional")
+	}
+	var expected any
+	if err := json.Unmarshal([]byte(`{
+  "if": {"properties": {"role": {"const": "declared"}, "mode": {"const": "ro"}}, "required": ["role", "mode"]},
+  "then": {"properties": {"permission_policy": {"const": "portable-readonly-v1"}}, "required": ["authority_sha256", "permission_policy"]},
+  "else": {
+    "if": {"properties": {"role": {"const": "workspace"}}, "required": ["role"]},
+    "then": {"properties": {"permission_policy": {"const": "portable-writable-v1"}}, "required": ["permission_policy"], "not": {"required": ["authority_sha256"]}},
+    "else": {"not": {"anyOf": [{"required": ["authority_sha256"]}, {"required": ["permission_policy"]}]}}
+  }
+}`), &expected); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(allOf[1], expected) {
+		t.Fatalf("runtime mount permission conditional drifted: %#v", allOf[1])
+	}
+	properties, ok := mount["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("runtime mount schema lacks properties")
+	}
+	policy, ok := properties["permission_policy"].(map[string]any)
+	if !ok || !reflect.DeepEqual(policy["enum"], []any{RuntimeReadOnlyPermissionPolicy, RuntimeWorkspacePermissionPolicy}) {
+		t.Fatalf("runtime permission policy vocabulary drifted: %#v", policy)
 	}
 }
 

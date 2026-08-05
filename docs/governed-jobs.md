@@ -102,6 +102,14 @@ identity only and are never recursively hashed after the target has run. The
 complete runtime inventory, including helper and lifecycle mounts, is bounded
 to 512 entries at admission and during independent validation.
 
+Ephemeral workspace bind roots are Kenogram-owned projections. Their host
+parents remain private `0700`, while each contained root is exact `0777` and is
+retained as `portable-writable-v1` so both mapped root and the keep-id user can
+create, chmod, rename, and remove workspace entries. This policy never chmods
+an operator-owned declared writable mount. A requested artifact root is not
+created by the runtime: choose an image-owned writable path or, normally, a
+subdirectory the target creates under `/workspace`.
+
 The Kenogram executable also acts as the image-independent holder and target
 launcher. It must therefore be a self-contained Linux binary for images that do
 not provide a compatible dynamic loader. The hosted integration builds it with

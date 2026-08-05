@@ -22,6 +22,21 @@ func (l Layout) EnsureWorkspace(target string) (string, error) {
 	}
 	return path, nil
 }
+
+// EnsurePortableWritableWorkspace creates a Kenogram-owned workspace root and
+// gives every contained identity write authority over that root. The enclosing
+// layout remains host-private; this policy is never applied to operator-owned
+// declared mount sources.
+func (l Layout) EnsurePortableWritableWorkspace(target string) (string, error) {
+	path, err := l.EnsureWorkspace(target)
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(path, 0o777); err != nil {
+		return "", err
+	}
+	return path, nil
+}
 func (l Layout) StageSource(generation int64, index int, source, mode string) (string, error) {
 	return l.StageSourceContext(context.Background(), generation, index, source, mode)
 }

@@ -21,6 +21,16 @@ other special descendant before provider creation. Device/inode comparison also
 rejects aliases of accessible known container-runtime endpoints; no claim is
 made about aliases the host does not make inspectable.
 
+Kenogram-owned ephemeral workspace roots use `portable-writable-v1`: the exact
+bind root is `0777`, while every enclosing scratch directory remains `0700` and
+host-private. Runtime evidence revalidates the root's identity and exact policy
+before target admission and finalization. This projection is never applied to
+operator-owned declared writable sources; those retain their authored modes
+and remain target-visible authority by explicit declaration. An artifact root
+is only a collection request. It must already exist or be target-creatable
+inside declared write authority; Kenogram never makes an unrelated image path
+writable to satisfy artifact collection.
+
 Relative sources resolve against the declaration directory, not the caller's
 working directory. Missing sources fail validation. Every file and directory in
 a secret tree must have no group or other permission bits. Secret permission

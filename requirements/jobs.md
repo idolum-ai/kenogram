@@ -91,6 +91,13 @@ rejects directories and special inputs before semantic parsing. It contains:
 - optionally, an absolute container artifact root bounded to 10,000 entries and
   1 GiB of ordinary-file content.
 
+The artifact root is collection authority, not provisioning authority.
+Kenogram does not create it or make an arbitrary image path writable. The
+caller must select a root that already exists in the image or that the target
+can create beneath declared write authority, normally a Kenogram-owned
+workspace such as `/workspace/artifacts`. Missing or unwritable roots fail the
+target or collection honestly; they never broaden a mount.
+
 `public_value` is retained authority and therefore MUST NOT contain a secret.
 `secret_file` names an absolute in-world file delivered by a declaration-owned
 secret copy; the executor must prove that binding before reading it, inject the
@@ -284,11 +291,18 @@ through a stable `kenogram-snapshot:sha256:...` semantic source rather than its
 temporary host pathname. `authority_source` binds the declaration path,
 `authority_sha256` binds the exact original content and mode, `sha256` binds the
 normalized delivered projection, and `permission_policy` names the transform.
-Only declared read-only mounts may carry those projection fields.
+Only declared read-only mounts carry authority and delivered-content digests
+for a projection. Each Kenogram-owned ephemeral workspace root is made exact
+`0777` beneath the host-private `0700` scratch boundary and carries
+`permission_policy = portable-writable-v1`. This grants every declared
+contained user authority over the workspace without changing the mode or bytes
+of any operator-owned declared writable source. Other mounts carry no
+permission policy.
 Declared writable mount `source` equals that exact authority path. Workspace
 and lifecycle sources use deterministic Kenogram-owned semantic references.
-The normalized snapshot is revalidated immediately before target admission and
-again before finalization. A declared writable source may not be the same inode
+The normalized snapshot and exact workspace-root permission policy are
+revalidated immediately before target admission and again before finalization.
+A declared writable source may not be the same inode
 as, or canonically overlap, any declared read-only source. Target-writable
 workspaces intentionally carry no unchanged-content claim and are never
 recursively hashed during finalization. The lifecycle channel is one exact
@@ -327,7 +341,9 @@ runtime, artifact, or identity evidence is refused or downgraded. Unit tests
 prove provider-hostile behavior without platform claims. The opt-in Linux
 integration owns real rootless Podman enforcement evidence for exact image,
 success and nonzero exit, timeout and orphan cleanup, network-none, read-only
-mounts, secret delivery, artifact extraction, and runtime-socket absence.
+mounts, secret delivery, artifact extraction from declared target write
+authority, portable workspace writes as mapped root and the keep-id user, and
+runtime-socket absence.
 Darwin compilation and CLI handoff are not evidence of local macOS namespace
 enforcement; without a configured Linux machine those facts remain unknown and
 the adapter refuses admission.
