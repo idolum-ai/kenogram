@@ -51,6 +51,13 @@ kenogram up --dry-run /path/visible/in/the/machine/world.toml
 kenogram up --yes /path/visible/in/the/machine/world.toml
 ```
 
+Governed jobs use the same whole-command handoff. Both the request's absolute
+declaration/source paths and `--evidence-dir` are interpreted inside the Linux
+machine; they must therefore be machine-local or explicitly shared. The outer
+macOS launcher does not rewrite paths, copy secret inputs, or claim local
+namespace enforcement. The direct adapter runs only after the inner Linux
+Kenogram has passed its ordinary rootless Podman preflight.
+
 The inner binary setting must be a shell-inert absolute path or command name:
 letters, digits, dot, underscore, slash, and hyphen only. This is narrower than
 a general Unix path because Apple's machine init mediates explicit commands

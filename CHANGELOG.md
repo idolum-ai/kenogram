@@ -4,6 +4,53 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+- Implement the governed-job core and direct one-shot Podman CLI provider:
+  exact-image and declaration authority, closed schemas,
+  create-only evidence, bounded execution/finalization/cleanup, artifact
+  inventories, executable provenance, offline re-verification, and final CLI
+  execution. Bind an inert Kenogram-owned holder and target launcher read-only,
+  deliver public and secret target environment only through bounded stdin,
+  enforce network-none and exact mounts/resources, and re-prove ownership before
+  exact container removal. Bound context-ignoring provider and artifact operations,
+  make cleanup unavoidable after admission, keep verifier work independent of
+  manifest claims, cross-bind secret-safe plan and runtime image identity, and
+  make seal durability descriptor-rooted. Add K6 scoped governed-job egress:
+  keep `network=none`, descriptor-pin and revalidate the exact holder namespaces,
+  inject only system-owned proxy variables, enforce exact host/port policy with
+  per-connection DNS, independently bind admission identity in pre-target runtime
+  evidence, and seal bounded metadata-only revocation/join evidence without an
+  unverifiable digest of discarded diagnostics. Invalid or
+  unrequested egress output is omitted from a replayable incomplete seal.
+  Hosted Linux K6 and release-candidate replay and a release claim remain later work. Raise the module API floor to Go 1.25 for the standard-library
+  descriptor-owned `os.Root` boundary used on macOS and for evidence paths;
+  the pinned build toolchain remains Go 1.26.5.
+- Harden the direct job provider with option-terminated strict image
+  references, immutable-ID-only post-create calls, fresh canceled-create
+  reconciliation, owner re-proofs before destructive operations,
+  descriptor-relative artifact-root traversal, mount inode/content identities,
+  a strict cross-phase runtime observation schema, and an authenticated
+  target-local lifecycle record that separates target timing from Podman client
+  overhead.
+- Make executable staging work with Linux's kernel-resolved `/proc/self/exe`,
+  prove cleanup and absence by immutable ID after renames, distinguish
+  content-bound read-only mounts from identity-only writable mounts, and
+  cross-bind explicit mount roles and declaration sources offline.
+- Make governed-job audit projection independent of producer filesystem paths,
+  strictly cross-bind incomplete runtime observations, serialize cleanup after
+  cancellation-ignoring start, isolate private scratch from declared parents,
+  and bind workspace deletion to the opened directory identity.
+- Snapshot declared read-only job inputs into bounded Kenogram-owned scratch
+  before provider use, reject read/write source aliases, bind staged observations
+  to retained authority paths and source types, enforce one 512-entry runtime
+  mount bound, and deliver secrets from the exact descriptor bytes whose
+  canonical plan-copy digest was verified.
+- Unify planning, digest, staging, snapshot, and writable-source traversal under
+  one descriptor-rooted context-aware bound; descriptor-bind job request reads;
+  reject writable socket trees, accessible runtime-endpoint inode aliases, and
+  ambiguous Podman mount grammar; and replace ephemeral retained mount paths
+  with independently derivable semantic source references. Route secret-tree
+  permission validation through that same bounded caller context so oversized
+  or canceled preparation fails before provider preflight.
 - Add a proof-only semantic reference for transactional cutover readiness,
   including bounded provider actions, rollback, pre-commit process death,
   inherited egress, and acknowledgement-only compatibility without adding a

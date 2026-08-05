@@ -1,12 +1,14 @@
 package worldfs
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/idolum-ai/kenogram/internal/sourcetree"
 )
 
 func (l Layout) WorkspacePath(target string) string {
@@ -20,7 +22,28 @@ func (l Layout) EnsureWorkspace(target string) (string, error) {
 	}
 	return path, nil
 }
+
+// EnsurePortableWritableWorkspace creates a Kenogram-owned workspace root and
+// gives every contained identity write authority over that root. The enclosing
+// layout remains host-private; this policy is never applied to operator-owned
+// declared mount sources.
+func (l Layout) EnsurePortableWritableWorkspace(target string) (string, error) {
+	path, err := l.EnsureWorkspace(target)
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(path, 0o777); err != nil {
+		return "", err
+	}
+	return path, nil
+}
 func (l Layout) StageSource(generation int64, index int, source, mode string) (string, error) {
+	return l.StageSourceContext(context.Background(), generation, index, source, mode)
+}
+func (l Layout) StageSourceContext(ctx context.Context, generation int64, index int, source, mode string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	root := filepath.Join(l.Staging, fmt.Sprintf("g%d", generation), fmt.Sprintf("copy-%d", index))
 	if err := os.RemoveAll(root); err != nil {
 		return "", err
@@ -31,7 +54,7 @@ func (l Layout) StageSource(generation int64, index int, source, mode string) (s
 	if _, err := parseMode(mode); err != nil {
 		return "", err
 	}
-	if err := copyNode(source, root); err != nil {
+	if err := sourcetree.Copy(ctx, source, root); err != nil {
 		return "", err
 	}
 	return root, nil
@@ -42,48 +65,6 @@ func (l Layout) ApplyStageMode(path, mode string) error {
 		return err
 	}
 	return os.Chmod(path, permissions)
-}
-func copyNode(source, target string) error {
-	info, err := os.Lstat(source)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("copied sources may not contain symlinks: %s", source)
-	}
-	if info.IsDir() {
-		if err := os.Mkdir(target, info.Mode().Perm()); err != nil && !os.IsExist(err) {
-			return err
-		}
-		entries, err := os.ReadDir(source)
-		if err != nil {
-			return err
-		}
-		for _, entry := range entries {
-			if err := copyNode(filepath.Join(source, entry.Name()), filepath.Join(target, entry.Name())); err != nil {
-				return err
-			}
-		}
-		return os.Chmod(target, info.Mode().Perm())
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("unsupported copied source type: %s", source)
-	}
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(out, in)
-	closeErr := out.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
 }
 func parseMode(raw string) (os.FileMode, error) {
 	var value uint32

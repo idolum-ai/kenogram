@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://idolum.ai/kenogram/schemas/kenogram.podman-runtime-observation.v1.schema.json",
+  "title": "Kenogram Podman runtime observation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "phase", "observed_at", "provider", "container_id", "container_name", "running", "image_reference", "image_digest", "plan_sha256", "declaration_sha256", "generation", "network_mode", "ipc_mode", "ipc_isolated", "pid_mode", "uts_mode", "userns_mode", "user", "hostname", "working_directory", "bounding_caps", "no_new_privileges", "seccomp_mode", "devices", "uid_identity", "gid_identity", "memory_bytes", "nano_cpus", "pids", "mounts"],
+  "properties": {
+    "schema": {"const": "kenogram.podman-runtime-observation.v1"},
+    "phase": {"enum": ["before", "after"]},
+    "observed_at": {"type": "string", "format": "date-time", "maxLength": 64},
+    "provider": {"const": "podman-cli"},
+    "container_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "container_name": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^/\\u0000\\r\\n]+$"},
+    "running": {"type": "boolean"},
+    "image_reference": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "image_digest": {"$ref": "#/$defs/digest"},
+    "plan_sha256": {"$ref": "#/$defs/digest"},
+    "declaration_sha256": {"$ref": "#/$defs/digest"},
+    "generation": {"$ref": "#/$defs/wire_positive"},
+    "network_mode": {"type": "string", "minLength": 1, "maxLength": 64},
+    "ipc_mode": {"type": "string", "minLength": 1, "maxLength": 64},
+    "ipc_isolated": {"type": "boolean"},
+    "pid_mode": {"type": "string", "minLength": 1, "maxLength": 64},
+    "uts_mode": {"type": "string", "minLength": 1, "maxLength": 64},
+    "userns_mode": {"type": "string", "minLength": 1, "maxLength": 64},
+    "user": {"type": "string", "minLength": 1, "maxLength": 255},
+    "hostname": {"type": "string", "minLength": 1, "maxLength": 255},
+    "working_directory": {"$ref": "#/$defs/absolute_path"},
+    "bounding_caps": {"type": "array", "maxItems": 256, "items": {"type": "string", "maxLength": 128}},
+    "no_new_privileges": {"type": "boolean"},
+    "seccomp_mode": {"type": "integer", "minimum": 0, "maximum": 2},
+    "devices": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "uid_identity": {"type": "boolean"},
+    "gid_identity": {"type": "boolean"},
+    "memory_bytes": {"$ref": "#/$defs/wire_positive"},
+    "nano_cpus": {"$ref": "#/$defs/wire_positive"},
+    "pids": {"$ref": "#/$defs/wire_positive"},
+    "mounts": {"type": "array", "minItems": 1, "maxItems": 512, "items": {"$ref": "#/$defs/mount"}},
+    "egress_admission": {"$ref": "#/$defs/egress_admission"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "semantic_source": {"type": "string", "pattern": "^(kenogram-snapshot:sha256:[0-9a-f]{64}|kenogram-workspace:sha256:[0-9a-f]{64}|kenogram-lifecycle:v1)$"},
+    "wire_positive": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "absolute_path": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/[^\\u0000]*$"},
+    "namespace": {
+      "type": "object", "additionalProperties": false,
+      "required": ["device", "inode"],
+      "properties": {"device": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "inode": {"$ref": "#/$defs/wire_positive"}}
+    },
+    "egress_admission": {
+      "type": "object", "additionalProperties": false,
+      "required": ["allowlist_sha256", "listener_address", "owner_id", "pid", "process_start", "user_namespace", "network_namespace"],
+      "properties": {
+        "allowlist_sha256": {"$ref": "#/$defs/digest"},
+        "listener_address": {"type": "string", "pattern": "^127\\.0\\.0\\.1:[1-9][0-9]{0,4}$", "maxLength": 21},
+        "owner_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "pid": {"$ref": "#/$defs/wire_positive"},
+        "process_start": {"type": "string", "minLength": 1, "maxLength": 256},
+        "user_namespace": {"$ref": "#/$defs/namespace"},
+        "network_namespace": {"$ref": "#/$defs/namespace"}
+      }
+    },
+    "mount": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "source", "target", "mode", "device", "inode", "file_type", "identity_verified"],
+      "properties": {
+        "role": {"enum": ["declared", "workspace", "helper", "lifecycle"]},
+        "authority_source": {"$ref": "#/$defs/absolute_path"},
+        "authority_sha256": {"$ref": "#/$defs/digest"},
+        "permission_policy": {"enum": ["portable-readonly-v1", "portable-writable-v1"]},
+        "source": {"anyOf": [{"$ref": "#/$defs/absolute_path"}, {"$ref": "#/$defs/semantic_source"}]}, "target": {"$ref": "#/$defs/absolute_path"},
+        "mode": {"enum": ["ro", "rw"]}, "device": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "inode": {"$ref": "#/$defs/wire_positive"},
+        "file_type": {"enum": ["file", "directory"]}, "sha256": {"$ref": "#/$defs/digest"}, "identity_verified": {"const": true}
+      },
+      "oneOf": [
+        {"required": ["sha256"], "properties": {"mode": {"const": "ro"}}},
+        {"not": {"required": ["sha256"]}, "properties": {"mode": {"const": "rw"}}}
+      ],
+      "allOf": [
+        {"if": {"properties": {"role": {"const": "declared"}}}, "then": {"required": ["authority_source"]}, "else": {"not": {"required": ["authority_source"]}}},
+        {"if": {"properties": {"role": {"const": "declared"}, "mode": {"const": "ro"}}, "required": ["role", "mode"]},
+          "then": {"properties": {"permission_policy": {"const": "portable-readonly-v1"}}, "required": ["authority_sha256", "permission_policy"]},
+          "else": {"if": {"properties": {"role": {"const": "workspace"}}, "required": ["role"]},
+            "then": {"properties": {"permission_policy": {"const": "portable-writable-v1"}}, "required": ["permission_policy"], "not": {"required": ["authority_sha256"]}},
+            "else": {"not": {"anyOf": [{"required": ["authority_sha256"]}, {"required": ["permission_policy"]}]}}
+          }
+        },
+        {"oneOf": [
+          {"properties": {"role": {"const": "declared"}}, "oneOf": [
+            {"properties": {"mode": {"const": "ro"}, "source": {"type": "string", "pattern": "^kenogram-snapshot:sha256:[0-9a-f]{64}$"}}},
+            {"properties": {"mode": {"const": "rw"}, "source": {"$ref": "#/$defs/absolute_path"}}}
+          ]},
+          {"properties": {"role": {"const": "helper"}, "mode": {"const": "ro"}, "file_type": {"const": "file"}, "source": {"type": "string", "pattern": "^kenogram-snapshot:sha256:[0-9a-f]{64}$"}}},
+          {"properties": {"role": {"const": "workspace"}, "mode": {"const": "rw"}, "file_type": {"const": "directory"}, "source": {"type": "string", "pattern": "^kenogram-workspace:sha256:[0-9a-f]{64}$"}}},
+          {"properties": {"role": {"const": "lifecycle"}, "mode": {"const": "rw"}, "file_type": {"const": "file"}, "source": {"const": "kenogram-lifecycle:v1"}}}
+        ]}
+      ]
+    }
+  }
+}

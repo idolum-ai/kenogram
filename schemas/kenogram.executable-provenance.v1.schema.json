@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://idolum.ai/kenogram/schemas/kenogram.executable-provenance.v1.schema.json",
+  "title": "Kenogram executable provenance v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "build_kind", "version", "commit", "source_date", "go_version", "goos", "goarch", "executable_sha256"],
+  "properties": {
+    "schema": {"const": "kenogram.executable-provenance.v1"},
+    "build_kind": {"enum": ["development", "release"]},
+    "version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "commit": {"type": "string", "pattern": "^(unknown|[0-9a-f]{40})$"},
+    "source_date": {"type": "string", "minLength": 1, "maxLength": 64},
+    "go_version": {"type": "string", "minLength": 4, "maxLength": 128, "pattern": "^go1\\."},
+    "goos": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
+    "goarch": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"},
+    "executable_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"build_kind": {"const": "release"}}, "required": ["build_kind"]},
+      "then": {
+        "properties": {
+          "version": {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?$"},
+          "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+          "source_date": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  ]
+}

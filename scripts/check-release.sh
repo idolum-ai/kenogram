@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
+host_os="$(uname -s)"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
@@ -15,8 +16,20 @@ diff -u \
   <(sed -n '/^validate_version()/,/^}/p' ./scripts/prepare-first-world.sh)
 
 version=v0.0.0-check
-commit=releasecheck
+commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 asset="kenogram-${version}-linux-amd64.tar.gz"
+assert_version() {
+  local executable="$1"
+  if [[ "$(uname -s)" == Linux ]]; then
+    "${executable}" version | grep -F "kenogram ${version} commit=${commit}" >/dev/null
+  else
+    # A native Darwin gate cannot execute the Linux release asset. Preserve
+    # the package proof without pretending emulation by checking the exact
+    # linker-bound values in the cross-built file.
+    grep -aF "${version}" "${executable}" >/dev/null
+    grep -aF "${commit}" "${executable}" >/dev/null
+  fi
+}
 RELEASE_TARGETS=linux/amd64 RELEASE_COMMIT="${commit}" RELEASE_DATE=1970-01-01T00:00:00Z SOURCE_DATE_EPOCH=0 \
   ./scripts/package-release.sh "${version}" "${tmp_dir}/first" >/dev/null
 RELEASE_TARGETS=linux/amd64 RELEASE_COMMIT="${commit}" RELEASE_DATE=1970-01-01T00:00:00Z SOURCE_DATE_EPOCH=0 \
@@ -37,7 +50,7 @@ cmp ./images/ssh-world/Containerfile "${tmp_dir}/first/ssh-world.Containerfile"
   echo "archive contents are incorrect" >&2; exit 1;
 }
 tar -xzf "${tmp_dir}/first/${asset}" -C "${tmp_dir}" kenogram
-"${tmp_dir}/kenogram" version | grep -F "kenogram ${version} commit=${commit}" >/dev/null
+assert_version "${tmp_dir}/kenogram"
 
 mkdir -p "${tmp_dir}/mock-bin" "${tmp_dir}/install"
 cat > "${tmp_dir}/mock-bin/curl" <<'MOCK'
@@ -51,18 +64,29 @@ done
 cp "${KENOGRAM_TEST_DIST}/${url##*/}" "${destination}"
 MOCK
 chmod 0755 "${tmp_dir}/mock-bin/curl"
+cat > "${tmp_dir}/mock-bin/uname" <<'MOCK'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf 'Linux\n' ;;
+  -m) printf 'x86_64\n' ;;
+  *) printf 'Linux\n' ;;
+esac
+MOCK
+chmod 0755 "${tmp_dir}/mock-bin/uname"
 cp "${tmp_dir}/first/install-release.sh" "${tmp_dir}/install-release.sh"
 chmod 0755 "${tmp_dir}/install-release.sh"
-install_output="$(PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" KENOGRAM_INSTALL_DIR="${tmp_dir}/install" \
-  "${tmp_dir}/install-release.sh" "${version}")"
-grep -F "${tmp_dir}/install/kenogram doctor" <<< "${install_output}" >/dev/null
-grep -F "export PATH=\"${tmp_dir}/install:\$PATH\"" <<< "${install_output}" >/dev/null
-"${tmp_dir}/install/kenogram" version | grep -F "kenogram ${version} commit=${commit}" >/dev/null
-printf '{"tag_name":"%s"}\n' "${version}" > "${tmp_dir}/first/latest"
-mkdir "${tmp_dir}/latest-install"
-PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" KENOGRAM_INSTALL_DIR="${tmp_dir}/latest-install" \
-  "${tmp_dir}/install-release.sh" >/dev/null
-"${tmp_dir}/latest-install/kenogram" version | grep -F "kenogram ${version} commit=${commit}" >/dev/null
+if [[ "${host_os}" == Linux ]]; then
+  install_output="$(PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" KENOGRAM_INSTALL_DIR="${tmp_dir}/install" \
+    "${tmp_dir}/install-release.sh" "${version}")"
+  grep -F "${tmp_dir}/install/kenogram doctor" <<< "${install_output}" >/dev/null
+  grep -F "export PATH=\"${tmp_dir}/install:\$PATH\"" <<< "${install_output}" >/dev/null
+  assert_version "${tmp_dir}/install/kenogram"
+  printf '{"tag_name":"%s"}\n' "${version}" > "${tmp_dir}/first/latest"
+  mkdir "${tmp_dir}/latest-install"
+  PATH="${tmp_dir}/mock-bin:${PATH}" KENOGRAM_TEST_DIST="${tmp_dir}/first" KENOGRAM_INSTALL_DIR="${tmp_dir}/latest-install" \
+    "${tmp_dir}/install-release.sh" >/dev/null
+  assert_version "${tmp_dir}/latest-install/kenogram"
+fi
 
 cat > "${tmp_dir}/mock-bin/podman" <<'MOCK'
 #!/usr/bin/env bash

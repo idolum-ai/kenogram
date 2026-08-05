@@ -5,6 +5,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -51,6 +55,7 @@ type grant struct {
 }
 type tracked struct {
 	conn      net.Conn
+	outbound  net.Conn
 	admission string
 }
 type logMessage struct {
@@ -71,6 +76,26 @@ type Proxy struct {
 	admission   uint64
 	diagnostics *diagnosticBuffer
 	logMessages chan logMessage
+	accepted    atomic.Uint64
+	refused     atomic.Uint64
+	dialFailed  atomic.Uint64
+	stopped     atomic.Bool
+	handlers    atomic.Int64
+	ctx         context.Context
+	cancel      context.CancelFunc
+}
+
+// ActivitySummary is bounded metadata-only lifecycle input for the runtime.
+// DiagnosticsSHA256 identifies the ephemeral in-process snapshot only. Because
+// that snapshot is deliberately not retained, the digest must not be promoted
+// into independently replayable durable evidence.
+type ActivitySummary struct {
+	Accepted          uint64
+	Refused           uint64
+	DialFailed        uint64
+	Omitted           uint64
+	ActiveConnections uint64
+	DiagnosticsSHA256 string
 }
 
 func New(destinations []Destination, opts Options) *Proxy {
@@ -86,7 +111,8 @@ func New(destinations []Destination, opts Options) *Proxy {
 	if opts.Dialer == nil {
 		opts.Dialer = &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	}
-	p := &Proxy{durable: map[string]string{}, grants: map[string]grant{}, active: map[uint64]tracked{}, opts: opts, sem: make(chan struct{}, opts.MaxConnections), diagnostics: newDiagnosticBuffer(opts.Generation, opts.Now)}
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &Proxy{durable: map[string]string{}, grants: map[string]grant{}, active: map[uint64]tracked{}, opts: opts, sem: make(chan struct{}, opts.MaxConnections), diagnostics: newDiagnosticBuffer(opts.Generation, opts.Now), ctx: ctx, cancel: cancel}
 	if opts.Logger != nil {
 		p.logMessages = make(chan logMessage, MaxDiagnosticLimit)
 		go func() {
@@ -107,13 +133,18 @@ func (p *Proxy) Serve(listener net.Listener) error {
 		if err != nil {
 			return err
 		}
+		if p.stopped.Load() {
+			conn.Close()
+			return net.ErrClosed
+		}
 		if !p.admitRate() {
 			conn.Close()
 			continue
 		}
 		select {
 		case p.sem <- struct{}{}:
-			go func() { defer func() { <-p.sem }(); p.handle(conn) }()
+			p.handlers.Add(1)
+			go func() { defer func() { <-p.sem; p.handlers.Add(-1) }(); p.handle(conn) }()
 		default:
 			conn.Close()
 		}
@@ -135,6 +166,11 @@ func (p *Proxy) admitRate() bool {
 }
 func (p *Proxy) handle(client net.Conn) {
 	defer client.Close()
+	id := p.track(client)
+	defer p.untrack(id)
+	if p.stopped.Load() {
+		return
+	}
 	_ = client.SetReadDeadline(time.Now().Add(30 * time.Second))
 	bounded := &headerReader{reader: client, remaining: 64 << 10}
 	reader := bufio.NewReader(bounded)
@@ -160,26 +196,29 @@ func (p *Proxy) handle(client net.Conn) {
 	}
 	admission, ok := p.allowed(Destination{host, port})
 	if !ok {
+		p.refused.Add(1)
 		p.diagnostics.record("refused", host, port)
 		p.logf("outcome=refused host=%q port=%d", host, port)
 		writeError(client, http.StatusForbidden)
 		return
 	}
-	outbound, address, err := p.dialResolved(request.Context(), host, port)
+	outbound, address, err := p.dialResolved(p.ctx, host, port)
 	if err != nil {
+		p.dialFailed.Add(1)
 		p.diagnostics.record("dial_failed", host, port)
 		p.logf("outcome=dial_failed host=%q port=%d", host, port)
 		writeError(client, http.StatusBadGateway)
 		return
 	}
 	defer outbound.Close()
-	id, current := p.trackIfCurrent(client, admission)
+	current := p.bindAdmission(id, outbound, admission)
 	if !current {
 		p.logf("outcome=revoked_during_dial host=%q port=%d", host, port)
 		writeError(client, http.StatusForbidden)
 		return
 	}
-	defer p.untrack(id)
+	p.accepted.Add(1)
+	p.diagnostics.record("accepted", host, port)
 	p.logf("outcome=connected host=%q port=%d address=%q", host, port, address)
 	if request.Method == http.MethodConnect {
 		if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
@@ -191,6 +230,7 @@ func (p *Proxy) handle(client net.Conn) {
 	request.RequestURI = ""
 	request.URL.Scheme = ""
 	request.URL.Host = ""
+	request.Host = net.JoinHostPort(host, strconv.Itoa(port))
 	request.Header.Del("Proxy-Authorization")
 	request.Header.Del("Proxy-Connection")
 	request.Close = true
@@ -319,7 +359,7 @@ func (p *Proxy) expireLocked(now time.Time) {
 		delete(p.grants, key)
 		for _, active := range p.active {
 			if active.admission == grant.id {
-				_ = active.conn.Close()
+				closeTracked(active)
 			}
 		}
 	}
@@ -339,16 +379,37 @@ func (p *Proxy) admissionCurrentLocked(admission string) bool {
 	return false
 }
 
-func (p *Proxy) trackIfCurrent(conn net.Conn, admission string) (uint64, bool) {
+func (p *Proxy) track(conn net.Conn) uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.next++
+	p.active[p.next] = tracked{conn: conn}
+	return p.next
+}
+
+func (p *Proxy) bindAdmission(id uint64, outbound net.Conn, admission string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.expireLocked(time.Now())
-	if !p.admissionCurrentLocked(admission) {
+	active, exists := p.active[id]
+	if !exists || !p.admissionCurrentLocked(admission) {
+		return false
+	}
+	active.outbound, active.admission = outbound, admission
+	p.active[id] = active
+	return true
+}
+
+// trackIfCurrent is retained for the focused policy revocation tests. Live
+// traffic registers before parsing and binds its outbound connection through
+// bindAdmission instead.
+func (p *Proxy) trackIfCurrent(conn net.Conn, admission string) (uint64, bool) {
+	id := p.track(conn)
+	if !p.bindAdmission(id, nil, admission) {
+		p.untrack(id)
 		return 0, false
 	}
-	p.next++
-	p.active[p.next] = tracked{conn, admission}
-	return p.next, true
+	return id, true
 }
 func (p *Proxy) dialResolved(ctx context.Context, host string, port int) (net.Conn, string, error) {
 	ips, err := p.opts.Resolver.LookupIPAddr(ctx, host)
@@ -370,6 +431,60 @@ func (p *Proxy) dialResolved(ctx context.Context, host string, port int) (net.Co
 	return nil, "", errors.Join(errs...)
 }
 func (p *Proxy) untrack(id uint64) { p.mu.Lock(); delete(p.active, id); p.mu.Unlock() }
+
+// RevokeAll removes every durable and temporary admission and closes every
+// currently tracked target-side tunnel.
+func (p *Proxy) RevokeAll() {
+	p.stopped.Store(true)
+	p.cancel()
+	p.mu.Lock()
+	p.durable = map[string]string{}
+	p.grants = map[string]grant{}
+	for _, active := range p.active {
+		_ = active.conn.Close()
+		if active.outbound != nil {
+			_ = active.outbound.Close()
+		}
+	}
+	p.mu.Unlock()
+}
+
+// WaitIdle proves that all accepted tunnel handlers released their tracked
+// target connections before the caller's lifecycle deadline.
+func (p *Proxy) WaitIdle(ctx context.Context) error {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		p.mu.Lock()
+		active := len(p.active)
+		p.mu.Unlock()
+		if active == 0 && p.handlers.Load() == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-ticker.C:
+		}
+	}
+}
+
+// Summary returns bounded counters plus a producer-local digest of bounded
+// diagnostic metadata. The events and digest both remain ephemeral at the
+// durable evidence boundary.
+func (p *Proxy) Summary() ActivitySummary {
+	snapshot := p.diagnostics.snapshot(MaxDiagnosticLimit, MaxDiagnosticBytes)
+	raw, _ := json.Marshal(snapshot)
+	digest := sha256.Sum256(raw)
+	p.mu.Lock()
+	active := len(p.active)
+	p.mu.Unlock()
+	return ActivitySummary{
+		Accepted: p.accepted.Load(), Refused: p.refused.Load(), DialFailed: p.dialFailed.Load(),
+		Omitted: snapshot.Omitted, ActiveConnections: uint64(active),
+		DiagnosticsSHA256: "sha256:" + hex.EncodeToString(digest[:]),
+	}
+}
 func (p *Proxy) Grant(d Destination, duration time.Duration) error {
 	if naming.Host(d.Host) != nil || d.Port < 1 || d.Port > 65535 || duration <= 0 {
 		return fmt.Errorf("invalid grant")
@@ -412,7 +527,7 @@ func (p *Proxy) Remove(d Destination) {
 	}
 	for _, active := range p.active {
 		if ids[active.admission] {
-			active.conn.Close()
+			closeTracked(active)
 		}
 	}
 	p.mu.Unlock()
@@ -444,12 +559,19 @@ func (p *Proxy) Reconcile(destinations []Destination) error {
 		validAdmissions[admission] = true
 	}
 	for _, active := range p.active {
-		if !validAdmissions[active.admission] {
-			_ = active.conn.Close()
+		if active.admission != "" && !validAdmissions[active.admission] {
+			closeTracked(active)
 		}
 	}
 	p.mu.Unlock()
 	return nil
+}
+
+func closeTracked(active tracked) {
+	_ = active.conn.Close()
+	if active.outbound != nil {
+		_ = active.outbound.Close()
+	}
 }
 func relay(a, b net.Conn) {
 	done := make(chan struct{}, 2)
@@ -467,6 +589,7 @@ func relay(a, b net.Conn) {
 		}
 		done <- struct{}{}
 	}()
+	<-done
 	<-done
 }
 func writeError(w io.Writer, status int) {

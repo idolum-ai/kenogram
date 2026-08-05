@@ -1,0 +1,2568 @@
+// Package jobpodman implements the direct one-shot Podman adapter for the
+// provider-independent governed-job core.
+package jobpodman
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/idolum-ai/kenogram/internal/backend"
+	"github.com/idolum-ai/kenogram/internal/job"
+	"github.com/idolum-ai/kenogram/internal/jobcontract"
+	"github.com/idolum-ai/kenogram/internal/jobenv"
+	"github.com/idolum-ai/kenogram/internal/joblifecycle"
+	"github.com/idolum-ai/kenogram/internal/netns"
+	"github.com/idolum-ai/kenogram/internal/plan"
+	"github.com/idolum-ai/kenogram/internal/proxy"
+	"github.com/idolum-ai/kenogram/internal/sourcetree"
+	"github.com/idolum-ai/kenogram/internal/worldfs"
+)
+
+const generation = int64(1)
+
+const jobHelperPath = "/etc/kenogram/job-exec"
+const jobLifecyclePath = "/etc/kenogram/target-lifecycle.json"
+const workspaceCleanupAuthorityName = "workspace-cleanup-authority.json"
+const workspaceCleanupAuthoritySchema = "kenogram.workspace-cleanup-authority.v1"
+const maximumWorkspaceCleanupAuthorityBytes = 1 << 20
+
+const (
+	workspaceCleanupExitAbsence   = 120
+	workspaceCleanupExitScratch   = 121
+	workspaceCleanupExitAuthority = 122
+	workspaceCleanupExitContents  = 123
+	workspaceCleanupExitUnknown   = 124
+)
+
+var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var rawDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var containerIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var ownerTokenPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+type attachedStarter interface {
+	Start(string, []string, io.Reader, io.Writer, io.Writer) (attachedProcess, error)
+}
+
+type attachedProcess interface {
+	Wait() error
+	Kill() error
+}
+
+type lifecycleBoundStarter interface {
+	BindLifecycle(string, []byte)
+}
+
+type execStarter struct{}
+
+func (execStarter) Start(binary string, args []string, stdin io.Reader, stdout, stderr io.Writer) (attachedProcess, error) {
+	command := exec.Command(binary, args...)
+	command.Stdin = stdin
+	command.Stdout = stdout
+	command.Stderr = stderr
+	configureProcess(command)
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+	return &execProcess{command: command, killGroup: syscall.Kill}, nil
+}
+
+type execProcess struct {
+	command   *exec.Cmd
+	killGroup func(int, syscall.Signal) error
+}
+
+func (p *execProcess) Wait() error { return p.command.Wait() }
+func (p *execProcess) Kill() error {
+	if p.command.Process == nil {
+		return nil
+	}
+	if err := p.killGroup(-p.command.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return errors.Join(err, p.command.Process.Kill())
+	}
+	return nil
+}
+
+type Runtime struct {
+	Podman     *backend.Podman
+	starter    attachedStarter
+	tempDir    func(string, string) (string, error)
+	now        func() time.Time
+	goos       string
+	token      func() (string, error)
+	executable func() (string, error)
+	listener   func(context.Context, int, string, string, func() error) (net.Listener, netns.NamespaceIdentity, error)
+
+	mu                sync.Mutex
+	name              string
+	containerID       string
+	ownerToken        string
+	scratchRoot       string
+	scratch           string
+	scratchID         FilesystemIdentity
+	helperSource      string
+	mayOwn            bool
+	process           *process
+	mounts            []backend.Mount
+	artifactRoots     []*os.Root
+	mountFacts        []jobcontract.RuntimeMountObservation
+	readOnlySnapshots map[string]readOnlySnapshot
+	lifecycleKey      []byte
+	lifecycleFile     string
+	lifecycleID       joblifecycle.FileIdentity
+	forced            bool
+	started           bool
+	egress            *egressRuntime
+}
+
+type FilesystemIdentity struct {
+	Device uint64
+	Inode  uint64
+}
+
+type ArtifactMountBinding struct {
+	Role    string
+	Target  string
+	Scratch string
+	Device  uint64
+	Inode   uint64
+}
+
+type workspaceCleanupBinding struct {
+	Target string `json:"target"`
+	Source string `json:"source"`
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+}
+
+type workspaceCleanupAuthorityRecord struct {
+	Schema            string                    `json:"schema"`
+	ContainerID       string                    `json:"container_id"`
+	OwnerToken        string                    `json:"owner_token"`
+	PlanDigest        string                    `json:"plan_digest"`
+	DeclarationDigest string                    `json:"declaration_digest"`
+	Scratch           string                    `json:"scratch"`
+	ScratchDevice     uint64                    `json:"scratch_device"`
+	ScratchInode      uint64                    `json:"scratch_inode"`
+	Bindings          []workspaceCleanupBinding `json:"bindings"`
+	BindingsDigest    string                    `json:"bindings_digest"`
+}
+
+type workspaceCleanupStageError struct {
+	stage string
+	err   error
+}
+
+func (e *workspaceCleanupStageError) Error() string { return e.stage + ": " + e.err.Error() }
+func (e *workspaceCleanupStageError) Unwrap() error { return e.err }
+
+func workspaceCleanupError(stage string, err error) error {
+	return &workspaceCleanupStageError{stage: stage, err: err}
+}
+
+// WorkspaceCleanupExitCode maps a typed helper-stage failure to a stable,
+// non-sensitive process exit code. The parent classifies only the code; helper
+// stderr remains generic and never reveals scratch paths or provider details.
+func WorkspaceCleanupExitCode(err error) int {
+	var staged *workspaceCleanupStageError
+	if !errors.As(err, &staged) {
+		return workspaceCleanupExitUnknown
+	}
+	switch staged.stage {
+	case "container_absence":
+		return workspaceCleanupExitAbsence
+	case "scratch_identity":
+		return workspaceCleanupExitScratch
+	case "authority_record":
+		return workspaceCleanupExitAuthority
+	case "workspace_contents":
+		return workspaceCleanupExitContents
+	default:
+		return workspaceCleanupExitUnknown
+	}
+}
+
+type egressRuntime struct {
+	listener     net.Listener
+	proxy        *proxy.Proxy
+	serveDone    chan struct{}
+	finalize     chan struct{}
+	address      string
+	ownerID      string
+	containerID  string
+	pid          int
+	processStart string
+	namespaces   netns.NamespaceIdentity
+	allowDigest  string
+	readyAt      time.Time
+
+	mu             sync.Mutex
+	serveErr       error
+	revoked        bool
+	revokedAt      time.Time
+	listenerClosed bool
+	complete       bool
+	raw            []byte
+	err            error
+}
+
+func New(podman *backend.Podman) *Runtime {
+	if podman == nil {
+		podman = backend.New(nil)
+	}
+	return &Runtime{Podman: podman, starter: execStarter{}, tempDir: os.MkdirTemp, now: time.Now, goos: runtime.GOOS, token: randomToken, executable: runningExecutable, listener: netns.AcquireBoundListener}
+}
+
+func (r *Runtime) Start(ctx context.Context, invocation job.Invocation, stdout, stderr io.Writer) (job.Process, error) {
+	r.mu.Lock()
+	if r.started {
+		r.mu.Unlock()
+		return nil, errors.New("direct governed job runtime is one-shot")
+	}
+	r.started = true
+	r.mu.Unlock()
+	if r.goos != "linux" {
+		return nil, fmt.Errorf("direct governed jobs require Linux, not %s", r.goos)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !pathIsAbsoluteCommand(invocation.Request.Command.Argv[0]) {
+		return nil, errors.New("direct governed jobs require an absolute target command")
+	}
+	if invocation.Request.Command.WorkingDirectory != invocation.Prepared.Result.Plan.World.Workdir {
+		return nil, errors.New("direct governed jobs require the declared world working directory")
+	}
+	if err := validateRuntimeMountCount(len(invocation.Prepared.Result.Plan.Workspace), len(invocation.Prepared.Result.Plan.Mounts)); err != nil {
+		return nil, err
+	}
+	if err := validateRuntimeMountPaths(invocation.Prepared.Result.Plan); err != nil {
+		return nil, err
+	}
+	if err := validateReadOnlyWritableAliases(invocation.Prepared.Result.Plan.Mounts); err != nil {
+		return nil, err
+	}
+	if err := validateWritablePlanMounts(ctx, invocation.Prepared.Result.Plan.Mounts); err != nil {
+		return nil, err
+	}
+	ownerToken, err := r.token()
+	if err != nil {
+		return nil, fmt.Errorf("create job owner token: %w", err)
+	}
+	name := jobContainerName(invocation.Request.JobID, ownerToken)
+	scratchRoot, err := r.tempDir("", "kenogram-jobs-")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(scratchRoot, 0o700); err != nil {
+		os.RemoveAll(scratchRoot)
+		return nil, err
+	}
+	scratch := filepath.Join(scratchRoot, "job")
+	if err := os.Mkdir(scratch, 0o700); err != nil {
+		os.RemoveAll(scratchRoot)
+		return nil, err
+	}
+	scratchID, err := filesystemIdentityAt(scratch)
+	if err != nil {
+		os.RemoveAll(scratchRoot)
+		return nil, err
+	}
+	r.mu.Lock()
+	r.name, r.ownerToken, r.scratchRoot, r.scratch, r.scratchID, r.mayOwn = name, ownerToken, scratchRoot, scratch, scratchID, false
+	r.mu.Unlock()
+	if err := validateRuntimeOwnedPathIsolation(invocation.Prepared.Result.Plan, scratchRoot, scratch); err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	layout := worldfs.For(scratch, "ephemeral")
+	if err := layout.Ensure(); err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	lifecycleHost := filepath.Join(scratch, "job-lifecycle")
+	if err := os.Mkdir(lifecycleHost, 0o700); err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	lifecycleFile := filepath.Join(lifecycleHost, joblifecycle.FileName)
+	lifecycleID, err := joblifecycle.Prepare(lifecycleFile)
+	if err != nil {
+		return r.refuseBeforeAdmission(fmt.Errorf("prepare target lifecycle slot: %w", err))
+	}
+	lifecycleKey := make([]byte, jobenv.LifecycleKeyBytes)
+	if _, err := rand.Read(lifecycleKey); err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	environmentItems, err := targetEnvironmentItems(invocation)
+	if err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	readOnlySnapshots, err := snapshotReadOnlyMounts(ctx, scratch, invocation.Prepared.Result.Plan.Mounts)
+	if err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	r.mu.Lock()
+	r.readOnlySnapshots = readOnlySnapshots
+	r.mu.Unlock()
+	helperSource, helperFact, err := stageHelper(ctx, r.executable, scratch)
+	if err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	if invocation.Provenance.ExecutableSHA256 == "" || helperFact.SHA256 != invocation.Provenance.ExecutableSHA256 {
+		return r.refuseBeforeAdmission(errors.New("staged helper does not match retained executable provenance"))
+	}
+	r.mu.Lock()
+	r.helperSource = helperSource
+	r.mu.Unlock()
+	mounts, err := jobMounts(layout, invocation.Prepared.Result, readOnlySnapshots)
+	if err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	// Mount only the precreated file. The contained process gets no writable
+	// directory in which it could replace the slot or create unbounded state.
+	mounts = append(mounts, backend.Mount{Source: helperSource, Target: jobHelperPath, Mode: "ro"}, backend.Mount{Source: lifecycleFile, Target: jobLifecyclePath, Mode: "rw", NoExec: true})
+	if err := validateBackendMountPaths(mounts); err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	if err := validateWritableBackendMounts(ctx, mounts); err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	mountFacts, err := captureMountFacts(ctx, mounts, invocation.Prepared.Result, readOnlySnapshots)
+	if err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	if err := verifyReadOnlySnapshotFacts(mountFacts, readOnlySnapshots); err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	// stageHelper already captured this exact file. Binding the two observations
+	// makes the mounted helper's inode and digest part of executable provenance.
+	for index := range mountFacts {
+		if mountFacts[index].Target == jobHelperPath && (mountFacts[index].Device != helperFact.Device || mountFacts[index].Inode != helperFact.Inode || mountFacts[index].SHA256 != helperFact.SHA256) {
+			return r.refuseBeforeAdmission(errors.New("staged helper identity changed before admission"))
+		}
+	}
+	if err := r.Podman.Preflight(ctx); err != nil {
+		return r.refuseBeforeAdmission(fmt.Errorf("runtime preflight: %w", err))
+	}
+	exists, err := r.Podman.Exists(ctx, name)
+	if err != nil {
+		return r.refuseBeforeAdmission(err)
+	}
+	if exists {
+		return r.refuseBeforeAdmission(fmt.Errorf("ephemeral container name %q already exists", name))
+	}
+	r.mu.Lock()
+	r.mountFacts, r.mounts, r.lifecycleKey, r.lifecycleFile, r.lifecycleID = mountFacts, append([]backend.Mount{}, mounts...), append([]byte{}, lifecycleKey...), lifecycleFile, lifecycleID
+	r.mu.Unlock()
+	ownerLabels := map[string]string{"io.kenogram.job-owner": ownerToken, "io.kenogram.job-id": invocation.Request.JobID}
+	providerPlan := publicProviderPlan(invocation.Prepared.Result)
+	createdID, err := r.Podman.CreateGovernedJob(ctx, name, providerPlan, generation, mounts, ownerLabels, jobHelperPath)
+	if err != nil {
+		reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		if evidence, inspectErr := r.Podman.Inspect(reconcileCtx, name); inspectErr == nil && containerIDPattern.MatchString(evidence.ID) && evidence.Name == name && evidence.Labels["io.kenogram.job-owner"] == ownerToken {
+			r.recordOwnership(evidence.ID)
+			return r.admittedFailure(invocation, err)
+		}
+		return nil, err
+	}
+	if !containerIDPattern.MatchString(createdID) {
+		return r.admittedFailure(invocation, errors.New("created container ID is invalid"))
+	}
+	r.recordOwnership(createdID)
+	created, err := r.Podman.Inspect(ctx, createdID)
+	if err != nil || !containerIDPattern.MatchString(created.ID) || created.Name != name || created.Labels["io.kenogram.job-owner"] != ownerToken {
+		return r.admittedFailure(invocation, errors.New("created container identity is unproved"))
+	}
+	if err := materializeCopies(ctx, r.Podman, layout, created.ID, invocation.Prepared.Result); err != nil {
+		return r.admittedFailure(invocation, err)
+	}
+	if err := r.Podman.Start(ctx, created.ID); err != nil {
+		return r.admittedFailure(invocation, err)
+	}
+	evidence, err := r.Podman.Inspect(ctx, created.ID)
+	if err != nil {
+		return r.admittedFailure(invocation, err)
+	}
+	if evidence.ID != created.ID {
+		return r.admittedFailure(invocation, errors.New("container identity changed before target admission"))
+	}
+	if err := backend.VerifyNamed(evidence, providerPlan, generation, name, mounts); err != nil {
+		return r.admittedFailure(invocation, fmt.Errorf("verify job runtime before target: %w", err))
+	}
+	imageDigest, err := validateObservedImage(invocation.Prepared.Result.Plan.World.Base, evidence)
+	if err != nil {
+		return r.admittedFailure(invocation, err)
+	}
+	if err := verifyMountFacts(ctx, mountFacts, mounts); err != nil {
+		return r.admittedFailure(invocation, err)
+	}
+	if err := validateWritableBackendMounts(ctx, mounts); err != nil {
+		return r.admittedFailure(invocation, fmt.Errorf("reinspect runtime-writable mounts before target admission: %w", err))
+	}
+	proxyAddress := ""
+	var egressAdmission *jobcontract.RuntimeEgressAdmission
+	if len(invocation.Prepared.Result.Plan.NetworkAllow) != 0 {
+		var admission jobcontract.RuntimeEgressAdmission
+		proxyAddress, admission, err = r.startEgress(ctx, invocation, evidence, providerPlan, name, mounts)
+		if err != nil {
+			return r.admittedFailure(invocation, err)
+		}
+		egressAdmission = &admission
+	}
+	before, err := runtimeEvidence("before", r.now().UTC(), evidence, invocation, imageDigest, mountFacts, egressAdmission)
+	if err != nil {
+		return r.admittedFailure(invocation, err)
+	}
+	environmentRaw, err := encodeTargetEnvironment(environmentItems, lifecycleKey, proxyAddress)
+	if err != nil {
+		return r.admittedFailure(invocation, err)
+	}
+	args := []string{"exec", "--interactive", "--workdir", invocation.Request.Command.WorkingDirectory, created.ID, jobHelperPath, "_job-exec"}
+	args = append(args, invocation.Request.Command.Argv...)
+	if binder, ok := r.starter.(lifecycleBoundStarter); ok {
+		binder.BindLifecycle(r.lifecycleFile, r.lifecycleKey)
+	}
+	attached, err := r.starter.Start(r.Podman.Binary, args, bytes.NewReader(environmentRaw), stdout, stderr)
+	if err != nil {
+		return r.admittedFailure(invocation, err)
+	}
+	process := &process{runtime: r, attached: attached, invocation: invocation, identity: job.RuntimeIdentity{
+		Provider: "podman-cli", Generation: generation, ImageReference: invocation.Prepared.Result.Plan.World.Base,
+		ImageDigest: imageDigest, Before: before,
+	}, done: make(chan error, 1), clientDone: make(chan struct{}), waitDone: make(chan struct{}), finalizeDone: make(chan struct{})}
+	r.mu.Lock()
+	r.mounts, r.process = mounts, process
+	r.mu.Unlock()
+	go func() {
+		process.done <- attached.Wait()
+		close(process.clientDone)
+	}()
+	return process, nil
+}
+
+func (r *Runtime) refuseBeforeAdmission(cause error) (job.Process, error) {
+	r.mu.Lock()
+	scratchRoot, snapshots := r.scratchRoot, r.readOnlySnapshots
+	r.name, r.ownerToken, r.scratchRoot, r.scratch, r.helperSource, r.scratchID = "", "", "", "", "", FilesystemIdentity{}
+	r.mu.Unlock()
+	if scratchRoot != "" {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		permissionErr := prepareReadOnlySnapshotsRemoval(cleanupCtx, snapshots)
+		cancel()
+		removeErr := os.RemoveAll(scratchRoot)
+		if removeErr != nil || permissionErr != nil {
+			if removeErr != nil {
+				removeErr = fmt.Errorf("remove refused-job scratch: %w", removeErr)
+			}
+			return nil, errors.Join(cause, permissionErr, removeErr)
+		}
+	}
+	return nil, cause
+}
+
+func (r *Runtime) recordOwnership(containerID string) {
+	r.mu.Lock()
+	r.containerID, r.mayOwn = containerID, true
+	r.mu.Unlock()
+}
+
+func (r *Runtime) proveOwned(ctx context.Context) (backend.Evidence, error) {
+	r.mu.Lock()
+	id, owner := r.containerID, r.ownerToken
+	r.mu.Unlock()
+	if !containerIDPattern.MatchString(id) || !ownerTokenPattern.MatchString(owner) {
+		return backend.Evidence{}, errors.New("container ownership authority is incomplete")
+	}
+	evidence, err := r.Podman.Inspect(ctx, id)
+	if err != nil || evidence.ID != id || evidence.Labels["io.kenogram.job-owner"] != owner {
+		return backend.Evidence{}, errors.New("container ownership is unproved")
+	}
+	return evidence, nil
+}
+
+func (r *Runtime) startEgress(ctx context.Context, invocation job.Invocation, observed backend.Evidence, providerPlan plan.Result, name string, mounts []backend.Mount) (string, jobcontract.RuntimeEgressAdmission, error) {
+	if observed.PID <= 0 || observed.ProcessStart == "" {
+		return "", jobcontract.RuntimeEgressAdmission{}, errors.New("runtime process identity is absent before proxy setup")
+	}
+	ownerID, err := r.token()
+	if err != nil || !ownerTokenPattern.MatchString(ownerID) {
+		return "", jobcontract.RuntimeEgressAdmission{}, errors.New("create egress owner identity")
+	}
+	revalidate := func() error {
+		current, err := r.Podman.Inspect(ctx, observed.ID)
+		if err != nil || current.ID != observed.ID || current.Name != name || current.PID != observed.PID || current.ProcessStart != observed.ProcessStart || current.Labels["io.kenogram.job-owner"] != r.ownerToken {
+			return errors.New("runtime identity changed while pinning egress namespaces")
+		}
+		return backend.VerifyNamed(current, providerPlan, generation, name, mounts)
+	}
+	listener, namespaces, err := r.listener(ctx, observed.PID, observed.ProcessStart, "127.0.0.1:0", revalidate)
+	if err != nil {
+		return "", jobcontract.RuntimeEgressAdmission{}, fmt.Errorf("acquire governed egress listener: %w", err)
+	}
+	address := listener.Addr().String()
+	host, portText, splitErr := net.SplitHostPort(address)
+	port, portErr := strconv.Atoi(portText)
+	if splitErr != nil || portErr != nil || host != "127.0.0.1" || port < 1 || port > 65535 || net.JoinHostPort(host, strconv.Itoa(port)) != address {
+		listener.Close()
+		return "", jobcontract.RuntimeEgressAdmission{}, errors.New("governed egress listener is not canonical loopback")
+	}
+	destinations := make([]proxy.Destination, 0, len(invocation.Prepared.Result.Plan.NetworkAllow))
+	for _, allow := range invocation.Prepared.Result.Plan.NetworkAllow {
+		destinations = append(destinations, proxy.Destination{Host: allow.Host, Port: int(allow.Port)})
+	}
+	p := proxy.New(destinations, proxy.Options{Generation: generation, Now: r.now})
+	egress := &egressRuntime{
+		listener: listener, proxy: p, serveDone: make(chan struct{}), finalize: make(chan struct{}, 1), address: address,
+		ownerID: ownerID, containerID: observed.ID, pid: observed.PID, processStart: observed.ProcessStart,
+		namespaces: namespaces, allowDigest: job.EgressAllowlistDigest(invocation.Prepared.Result.Plan.NetworkAllow), readyAt: r.now().UTC(),
+	}
+	egress.finalize <- struct{}{}
+	r.mu.Lock()
+	r.egress = egress
+	r.mu.Unlock()
+	go func() {
+		serveErr := p.Serve(listener)
+		egress.mu.Lock()
+		egress.serveErr = serveErr
+		close(egress.serveDone)
+		egress.mu.Unlock()
+	}()
+	select {
+	case <-egress.serveDone:
+		egress.mu.Lock()
+		serveErr := egress.serveErr
+		egress.mu.Unlock()
+		listener.Close()
+		return "", jobcontract.RuntimeEgressAdmission{}, fmt.Errorf("governed egress proxy exited before target admission: %w", serveErr)
+	default:
+	}
+	return address, jobcontract.RuntimeEgressAdmission{
+		AllowlistSHA256: egress.allowDigest, ListenerAddress: address, OwnerID: ownerID,
+		PID: int64(observed.PID), ProcessStart: observed.ProcessStart,
+		UserNamespace:    jobcontract.NamespaceIdentity{Device: namespaces.UserDevice, Inode: namespaces.UserInode},
+		NetworkNamespace: jobcontract.NamespaceIdentity{Device: namespaces.NetworkDevice, Inode: namespaces.NetworkInode},
+	}, nil
+}
+
+// revokeEgress removes network policy at the target boundary. It is separate
+// from joining the proxy workers so target lifecycle evidence never depends on
+// teardown latency or proxy health.
+func (r *Runtime) revokeEgress() {
+	r.mu.Lock()
+	egress := r.egress
+	r.mu.Unlock()
+	if egress == nil {
+		return
+	}
+	egress.mu.Lock()
+	defer egress.mu.Unlock()
+	if egress.revoked {
+		return
+	}
+	// Capture the instant at which the policy is actually withdrawn. Handler
+	// drain and Serve joining happen later and must not inflate this timestamp.
+	egress.revokedAt = r.now().UTC()
+	egress.proxy.RevokeAll()
+	egress.revoked = true
+}
+
+// stopEgress joins the revoked proxy lifecycle and publishes its bounded
+// evidence. The boolean reports whether every Serve/handler worker joined and
+// the listener was closed. A caller deadline returns a transient observation;
+// only a joined result is cached, so Cleanup can retry safely.
+func (r *Runtime) stopEgress(ctx context.Context) ([]byte, bool, error) {
+	r.mu.Lock()
+	egress := r.egress
+	r.mu.Unlock()
+	if egress == nil {
+		return nil, true, nil
+	}
+	r.revokeEgress()
+	select {
+	case <-egress.finalize:
+		defer func() { egress.finalize <- struct{}{} }()
+	case <-ctx.Done():
+		return nil, false, context.Cause(ctx)
+	}
+
+	egress.mu.Lock()
+	if egress.complete {
+		raw, err := append([]byte{}, egress.raw...), egress.err
+		egress.mu.Unlock()
+		return raw, true, err
+	}
+	listenerClosed := egress.listenerClosed
+	revokedAt := egress.revokedAt
+	egress.mu.Unlock()
+
+	reasons := []string{}
+	if !listenerClosed {
+		if err := egress.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			reasons = append(reasons, "PROXY_LISTENER_CLOSE_FAILED")
+		} else {
+			listenerClosed = true
+			egress.mu.Lock()
+			egress.listenerClosed = true
+			egress.mu.Unlock()
+		}
+	}
+	serveJoined := false
+	var serveErr error
+	select {
+	case <-egress.serveDone:
+		serveJoined = true
+		egress.mu.Lock()
+		serveErr = egress.serveErr
+		egress.mu.Unlock()
+		if serveErr != nil && !errors.Is(serveErr, net.ErrClosed) {
+			reasons = append(reasons, "PROXY_SERVE_FAILED")
+		}
+	case <-ctx.Done():
+		reasons = append(reasons, "PROXY_JOIN_FAILED")
+	}
+	idleErr := egress.proxy.WaitIdle(ctx)
+	if idleErr != nil {
+		reasons = append(reasons, "PROXY_ACTIVE_CONNECTIONS")
+	}
+	summary := egress.proxy.Summary()
+	activeZero := summary.ActiveConnections == 0
+	if !activeZero {
+		reasons = append(reasons, "PROXY_ACTIVE_CONNECTIONS")
+	}
+	joined := listenerClosed && serveJoined && idleErr == nil && activeZero
+	reasons = sortedUniqueStrings(reasons)
+	status := "complete"
+	if len(reasons) != 0 {
+		status = "incomplete"
+	}
+	observation := jobcontract.EgressEvidence{
+		Schema: jobcontract.EgressEvidenceSchema, Status: status, AllowlistSHA256: egress.allowDigest,
+		ListenerAddress: egress.address, OwnerID: egress.ownerID, ContainerID: egress.containerID, Generation: generation,
+		PID: int64(egress.pid), ProcessStart: egress.processStart,
+		UserNamespace:    jobcontract.NamespaceIdentity{Device: egress.namespaces.UserDevice, Inode: egress.namespaces.UserInode},
+		NetworkNamespace: jobcontract.NamespaceIdentity{Device: egress.namespaces.NetworkDevice, Inode: egress.namespaces.NetworkInode},
+		ReadyAt:          egress.readyAt.Format(time.RFC3339Nano),
+		EnvironmentKeys:  append([]string{}, job.EgressEnvironmentKeys...),
+		Accepted:         boundedCounter(summary.Accepted), Refused: boundedCounter(summary.Refused), DialFailed: boundedCounter(summary.DialFailed), Omitted: boundedCounter(summary.Omitted),
+		RevokedAt:      revokedAt.Format(time.RFC3339Nano),
+		ListenerClosed: listenerClosed, ActiveConnectionsZero: activeZero, Joined: joined, Reasons: reasons,
+	}
+	raw, marshalErr := json.Marshal(observation)
+	if marshalErr == nil {
+		marshalErr = jobcontract.ValidateEgressEvidence(observation)
+	}
+	resultErr := marshalErr
+	if status != "complete" {
+		resultErr = errors.Join(resultErr, errors.New("governed egress lifecycle is incomplete"))
+	}
+	if joined {
+		egress.mu.Lock()
+		egress.complete, egress.raw, egress.err = true, append([]byte{}, raw...), resultErr
+		egress.mu.Unlock()
+	}
+	return raw, joined, resultErr
+}
+
+func boundedCounter(value uint64) int64 {
+	if value > uint64(jobcontract.MaximumWireInteger) {
+		return jobcontract.MaximumWireInteger
+	}
+	return int64(value)
+}
+
+func sortedUniqueStrings(values []string) []string {
+	sort.Strings(values)
+	result := values[:0]
+	for _, value := range values {
+		if len(result) == 0 || result[len(result)-1] != value {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func (r *Runtime) admittedFailure(invocation job.Invocation, cause error) (job.Process, error) {
+	done := make(chan struct{})
+	close(done)
+	process := &process{runtime: r, invocation: invocation, waited: true, waitErr: cause, clientDone: done, waitDone: make(chan struct{}), finalizeDone: make(chan struct{})}
+	r.mu.Lock()
+	r.process = process
+	r.mu.Unlock()
+	return process, cause
+}
+
+func (r *Runtime) Cleanup(ctx context.Context, invocation job.Invocation) jobcontract.CleanupResult {
+	started := time.Now()
+	r.mu.Lock()
+	name, containerID, ownerToken, scratchRoot, scratch, scratchID, helperSource, mayOwn, process := r.name, r.containerID, r.ownerToken, r.scratchRoot, r.scratch, r.scratchID, r.helperSource, r.mayOwn, r.process
+	readOnlySnapshots := r.readOnlySnapshots
+	mountFacts := append([]jobcontract.RuntimeMountObservation{}, r.mountFacts...)
+	mounts := append([]backend.Mount{}, r.mounts...)
+	forced := r.forced
+	r.mu.Unlock()
+	reasons := []string{}
+	if process != nil {
+		if err := process.JoinWait(ctx); err != nil {
+			return jobcontract.CleanupResult{
+				Status:            "incomplete",
+				ContainerAbsent:   false,
+				ProxyAbsent:       false,
+				ProcessGroupEmpty: false,
+				DurationNS:        int64(time.Since(started)),
+				Reasons:           []string{"PROXY_CLEANUP_INCOMPLETE", "SCRATCH_RETAINED_FOR_ACTIVE_WAIT", "WAIT_WORKER_PRESENT"},
+			}
+		}
+		if err := process.JoinFinalization(ctx); err != nil {
+			return jobcontract.CleanupResult{
+				Status:            "incomplete",
+				ContainerAbsent:   false,
+				ProxyAbsent:       false,
+				ProcessGroupEmpty: false,
+				DurationNS:        int64(time.Since(started)),
+				Reasons:           []string{"FINALIZATION_WORKER_PRESENT", "PROXY_CLEANUP_INCOMPLETE", "SCRATCH_RETAINED_FOR_ACTIVE_FINALIZATION"},
+			}
+		}
+	}
+	_, egressJoined, egressErr := r.stopEgress(ctx)
+	if !egressJoined {
+		return jobcontract.CleanupResult{
+			Status:            "incomplete",
+			ContainerAbsent:   false,
+			ProxyAbsent:       false,
+			ProcessGroupEmpty: false,
+			DurationNS:        int64(time.Since(started)),
+			Reasons:           []string{"PROXY_CLEANUP_INCOMPLETE", "PROXY_WORKER_PRESENT", "SCRATCH_RETAINED_FOR_ACTIVE_PROXY"},
+		}
+	}
+	proxyAbsent := true
+	if egressErr != nil {
+		reasons = append(reasons, "PROXY_CLEANUP_INCOMPLETE")
+	}
+	r.mu.Lock()
+	artifactRoots := append([]*os.Root{}, r.artifactRoots...)
+	r.artifactRoots = nil
+	r.mu.Unlock()
+	workspaceBindings, workspaceBindingsDigest, workspaceAuthorityErr := workspaceCleanupAuthority(scratch, mountFacts, mounts)
+	workspaceAuthorityErr = errors.Join(workspaceAuthorityErr, verifyMountFacts(ctx, mountFacts, mounts))
+	workspaceAuthorityFileDigest := ""
+	workspaceNamespaceClean := len(workspaceBindings) == 0
+	if workspaceAuthorityErr == nil && len(workspaceBindings) != 0 {
+		workspaceAuthorityFileDigest, workspaceAuthorityErr = persistWorkspaceCleanupAuthority(
+			scratch, containerID, ownerToken, invocation.Prepared.Result.PlanDigest,
+			invocation.Prepared.Result.DeclarationDigest, scratchID,
+			workspaceBindings, workspaceBindingsDigest,
+		)
+	}
+	if process != nil && process.attached != nil && !process.finished() {
+		forced = true
+		if err := process.attached.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			reasons = append(reasons, "CLIENT_PROCESS_PRESENT")
+		}
+	}
+	if process != nil && process.clientDone != nil {
+		timer := time.NewTimer(2 * time.Second)
+		select {
+		case <-process.clientDone:
+			timer.Stop()
+		case <-timer.C:
+			reasons = append(reasons, "CLIENT_PROCESS_PRESENT")
+		case <-ctx.Done():
+			timer.Stop()
+			reasons = append(reasons, "CLIENT_PROCESS_PRESENT")
+		}
+	}
+	for _, root := range artifactRoots {
+		if err := root.Close(); err != nil {
+			reasons = append(reasons, "ARTIFACT_DESCRIPTOR_CLOSE_FAILED")
+		}
+	}
+	if !mayOwn && name != "" && ownerTokenPattern.MatchString(ownerToken) {
+		// A create response can be lost after the provider commits the object.
+		// Reconcile with fresh authority during cleanup rather than abandoning a
+		// potentially owned container forever.
+		if evidence, inspectErr := r.Podman.Inspect(ctx, name); inspectErr == nil && containerIDPattern.MatchString(evidence.ID) && evidence.Name == name && evidence.Labels["io.kenogram.job-owner"] == ownerToken {
+			containerID, mayOwn = evidence.ID, true
+			r.recordOwnership(containerID)
+		}
+	}
+	if mayOwn && containerID != "" {
+		exists, existsErr := r.Podman.ExistsID(ctx, containerID)
+		switch {
+		case existsErr != nil:
+			reasons = append(reasons, "CONTAINER_OWNERSHIP_UNPROVED")
+		case !exists:
+		case exists:
+			evidence, inspectErr := r.Podman.Inspect(ctx, containerID)
+			if inspectErr != nil {
+				reasons = append(reasons, "CONTAINER_INSPECT_FAILED")
+			} else if containerID == "" || evidence.ID != containerID || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
+				reasons = append(reasons, "CONTAINER_OWNERSHIP_UNPROVED")
+			} else {
+				if evidence.Running {
+					if err := r.Podman.StopWithin(ctx, containerID, 1); err != nil {
+						reasons = append(reasons, "CONTAINER_STOP_FAILED")
+					}
+					evidence, inspectErr = r.Podman.Inspect(ctx, containerID)
+				}
+				if inspectErr != nil {
+					reasons = append(reasons, "STOPPED_CONTAINER_INSPECT_FAILED")
+				} else if evidence.Running || evidence.ID != containerID || evidence.Name == "" || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
+					reasons = append(reasons, "STOPPED_CONTAINER_OWNERSHIP_UNPROVED")
+				} else {
+					observedBindings, observedErr := observedWorkspaceCleanupBindings(scratch, evidence.Mounts)
+					if workspaceAuthorityErr == nil && (observedErr != nil || len(observedBindings) != len(workspaceBindings) || workspaceCleanupDigest(observedBindings) != workspaceBindingsDigest) {
+						workspaceAuthorityErr = errors.New("stopped container workspace authority changed")
+					}
+					proof, proofErr := r.Podman.Inspect(ctx, containerID)
+					if proofErr != nil || proof.Running || proof.ID != containerID || proof.Name != evidence.Name || proof.Labels["io.kenogram.job-owner"] != ownerToken {
+						reasons = append(reasons, "CONTAINER_OWNERSHIP_UNPROVED")
+					} else if err := r.Podman.Destroy(ctx, containerID); err != nil {
+						reasons = append(reasons, "CONTAINER_REMOVE_FAILED")
+					}
+				}
+			}
+		}
+	}
+	containerAbsent := name == ""
+	if containerID != "" {
+		exists, err := r.Podman.ExistsID(ctx, containerID)
+		if err != nil {
+			reasons = append(reasons, "CONTAINER_ABSENCE_UNPROVED")
+			containerAbsent = false
+		} else {
+			containerAbsent = !exists
+			if exists {
+				reasons = append(reasons, "CONTAINER_PRESENT")
+			}
+		}
+	} else if name != "" {
+		reasons = append(reasons, "CONTAINER_ABSENCE_UNPROVED")
+		containerAbsent = false
+	}
+	if containerAbsent && len(workspaceBindings) != 0 {
+		if workspaceAuthorityErr != nil {
+			reasons = append(reasons, "WORKSPACE_NAMESPACE_AUTHORITY_RECORD_FAILED")
+		} else {
+			workspaceCleanupErr := PrepareWorkspaceRemovalAfterContainer(
+				ctx, r.Podman, helperSource, containerID, ownerToken,
+				invocation.Prepared.Result.PlanDigest, invocation.Prepared.Result.DeclarationDigest,
+				scratch, scratchID, workspaceAuthorityFileDigest,
+			)
+			if workspaceCleanupErr != nil {
+				reasons = append(reasons, workspaceCleanupFailureReason(workspaceCleanupErr))
+			} else {
+				workspaceNamespaceClean = true
+			}
+		}
+	}
+	if scratch != "" && containerAbsent && workspaceNamespaceClean {
+		if err := prepareReadOnlySnapshotsRemoval(ctx, readOnlySnapshots); err != nil {
+			reasons = append(reasons, "READ_ONLY_SNAPSHOT_PERMISSION_RESTORE_FAILED")
+		}
+		if err := os.RemoveAll(scratch); err != nil {
+			reasons = append(reasons, "SCRATCH_REMOVE_FAILED")
+		}
+		if _, err := os.Lstat(scratch); !os.IsNotExist(err) {
+			reasons = append(reasons, "SCRATCH_ABSENCE_UNPROVED")
+		}
+		if scratchRoot != "" {
+			if err := os.Remove(scratchRoot); err != nil && !os.IsNotExist(err) {
+				reasons = append(reasons, "SCRATCH_ROOT_REMOVE_FAILED")
+			}
+			if _, err := os.Lstat(scratchRoot); !os.IsNotExist(err) {
+				reasons = append(reasons, "SCRATCH_ROOT_ABSENCE_UNPROVED")
+			}
+		}
+	} else if scratch != "" && !containerAbsent {
+		reasons = append(reasons, "SCRATCH_RETAINED_FOR_UNPROVED_CONTAINER")
+	} else if scratch != "" {
+		reasons = append(reasons, "SCRATCH_RETAINED_FOR_NAMESPACE_CLEANUP")
+	}
+	status := "complete"
+	if len(reasons) != 0 || !containerAbsent {
+		status = "incomplete"
+	}
+	sort.Strings(reasons)
+	return jobcontract.CleanupResult{Status: status, ContainerAbsent: containerAbsent, ProxyAbsent: proxyAbsent, ProcessGroupEmpty: containerAbsent, Forced: forced, DurationNS: int64(time.Since(started)), Reasons: reasons}
+}
+
+func prepareReadOnlySnapshotsRemoval(ctx context.Context, snapshots map[string]readOnlySnapshot) error {
+	var result error
+	for _, snapshot := range snapshots {
+		if err := sourcetree.PrepareRemoval(ctx, snapshot.path); err != nil && !os.IsNotExist(err) {
+			result = errors.Join(result, err)
+		}
+	}
+	return result
+}
+
+func workspaceCleanupAuthority(scratch string, facts []jobcontract.RuntimeMountObservation, mounts []backend.Mount) ([]workspaceCleanupBinding, string, error) {
+	bindings := []workspaceCleanupBinding{}
+	layout := worldfs.For(scratch, "ephemeral")
+	for _, fact := range facts {
+		if fact.Role != "workspace" {
+			continue
+		}
+		if fact.Mode != "rw" || fact.FileType != "directory" || fact.PermissionPolicy != jobcontract.RuntimeWorkspacePermissionPolicy || fact.Device == 0 || fact.Inode == 0 {
+			return nil, "", fmt.Errorf("workspace %q lacks portable cleanup authority", fact.Target)
+		}
+		source := ""
+		for _, mount := range mounts {
+			if mount.Target == fact.Target && mount.Mode == "rw" {
+				if source != "" {
+					return nil, "", fmt.Errorf("workspace %q has duplicate runtime sources", fact.Target)
+				}
+				source = mount.Source
+			}
+		}
+		if source == "" || source != layout.WorkspacePath(fact.Target) {
+			return nil, "", fmt.Errorf("workspace %q source is not Kenogram-owned", fact.Target)
+		}
+		bindings = append(bindings, workspaceCleanupBinding{Target: fact.Target, Source: source, Device: fact.Device, Inode: fact.Inode})
+	}
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].Target < bindings[j].Target })
+	return bindings, workspaceCleanupDigest(bindings), nil
+}
+
+func workspaceCleanupDigest(bindings []workspaceCleanupBinding) string {
+	hash := sha256.New()
+	for _, binding := range bindings {
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%d\x00%d\n", binding.Target, binding.Source, binding.Device, binding.Inode)
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+func persistWorkspaceCleanupAuthority(scratch, containerID, ownerToken, planDigest, declarationDigest string, scratchID FilesystemIdentity, bindings []workspaceCleanupBinding, bindingsDigest string) (string, error) {
+	if !containerIDPattern.MatchString(containerID) || !ownerTokenPattern.MatchString(ownerToken) ||
+		!rawDigestPattern.MatchString(planDigest) || !rawDigestPattern.MatchString(declarationDigest) ||
+		!filepath.IsAbs(scratch) || filepath.Clean(scratch) != scratch || scratchID.Device == 0 || scratchID.Inode == 0 ||
+		len(bindings) == 0 || len(bindings) > jobcontract.MaxRuntimeMounts || workspaceCleanupDigest(bindings) != bindingsDigest {
+		return "", errors.New("workspace cleanup authority record is invalid")
+	}
+	record := workspaceCleanupAuthorityRecord{
+		Schema: workspaceCleanupAuthoritySchema, ContainerID: containerID, OwnerToken: ownerToken,
+		PlanDigest: planDigest, DeclarationDigest: declarationDigest, Scratch: scratch,
+		ScratchDevice: scratchID.Device, ScratchInode: scratchID.Inode,
+		Bindings: append([]workspaceCleanupBinding{}, bindings...), BindingsDigest: bindingsDigest,
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		return "", err
+	}
+	raw = append(raw, '\n')
+	if len(raw) > maximumWorkspaceCleanupAuthorityBytes {
+		return "", errors.New("workspace cleanup authority record exceeds its bound")
+	}
+	path := filepath.Join(scratch, workspaceCleanupAuthorityName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		_, writeErr := file.Write(raw)
+		syncErr := file.Sync()
+		closeErr := file.Close()
+		if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+			return "", err
+		}
+	} else if errors.Is(err, os.ErrExist) {
+		info, statErr := os.Lstat(path)
+		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			return "", errors.Join(statErr, errors.New("workspace cleanup authority record is not a private regular file"))
+		}
+		existing, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(existing, raw) {
+			return "", errors.Join(readErr, errors.New("workspace cleanup authority record changed"))
+		}
+	} else {
+		return "", err
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return "", errors.Join(err, errors.New("workspace cleanup authority record is not a private regular file"))
+	}
+	hash := sha256.Sum256(raw)
+	return "sha256:" + hex.EncodeToString(hash[:]), nil
+}
+
+// PrepareWorkspaceRemovalAfterContainer retries workspace cleanup only after
+// the immutable provider object is proved absent. The staged helper consumes a
+// create-only, scratch-private authority record rather than arbitrary paths.
+func PrepareWorkspaceRemovalAfterContainer(ctx context.Context, podman *backend.Podman, helperSource, containerID, ownerToken, planDigest, declarationDigest, scratch string, scratchID FilesystemIdentity, authorityFileDigest string) error {
+	if podman == nil || helperSource != filepath.Join(scratch, "job-exec") || !filepath.IsAbs(helperSource) || filepath.Clean(helperSource) != helperSource ||
+		!containerIDPattern.MatchString(containerID) || !ownerTokenPattern.MatchString(ownerToken) ||
+		!rawDigestPattern.MatchString(planDigest) || !rawDigestPattern.MatchString(declarationDigest) ||
+		!filepath.IsAbs(scratch) || filepath.Clean(scratch) != scratch || scratchID.Device == 0 || scratchID.Inode == 0 ||
+		!digestPattern.MatchString(authorityFileDigest) {
+		return errors.New("post-container workspace cleanup authority is invalid")
+	}
+	exists, err := podman.ExistsID(ctx, containerID)
+	if err != nil || exists {
+		return workspaceCleanupError("container_absence", errors.Join(err, errors.New("container absence is unproved before namespace entry")))
+	}
+	command := []string{
+		helperSource, "_job-clean-workspaces-after-container", containerID, ownerToken,
+		planDigest, declarationDigest, scratch,
+		fmt.Sprint(scratchID.Device), fmt.Sprint(scratchID.Inode), authorityFileDigest,
+	}
+	return podman.RunUnshare(ctx, command)
+}
+
+func workspaceCleanupFailureReason(err error) string {
+	code := WorkspaceCleanupExitCode(err)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitCode()
+	}
+	switch code {
+	case workspaceCleanupExitAbsence:
+		return "WORKSPACE_NAMESPACE_CONTAINER_ABSENCE_UNPROVED"
+	case workspaceCleanupExitScratch:
+		return "WORKSPACE_NAMESPACE_SCRATCH_IDENTITY_FAILED"
+	case workspaceCleanupExitAuthority:
+		return "WORKSPACE_NAMESPACE_AUTHORITY_RECORD_FAILED"
+	case workspaceCleanupExitContents:
+		return "WORKSPACE_NAMESPACE_CONTENT_REMOVAL_FAILED"
+	default:
+		return "WORKSPACE_NAMESPACE_CLEANUP_FAILED"
+	}
+}
+
+// CleanupWorkspaceContentsAfterContainer is the retryable namespace helper.
+// Its caller has just proved immutable container absence outside the user
+// namespace. The helper authenticates that ID in the persisted binding
+// inventory and removes contents only through device/inode-bound workspace
+// roots; it never recursively invokes Podman from inside podman unshare.
+func CleanupWorkspaceContentsAfterContainer(ctx context.Context, containerID, ownerToken, planDigest, declarationDigest, scratch string, scratchID FilesystemIdentity, authorityFileDigest string) error {
+	if !containerIDPattern.MatchString(containerID) || !ownerTokenPattern.MatchString(ownerToken) ||
+		!rawDigestPattern.MatchString(planDigest) || !rawDigestPattern.MatchString(declarationDigest) ||
+		!filepath.IsAbs(scratch) || filepath.Clean(scratch) != scratch || scratchID.Device == 0 || scratchID.Inode == 0 ||
+		!digestPattern.MatchString(authorityFileDigest) {
+		return workspaceCleanupError("authority_record", errors.New("post-container workspace cleanup authority is invalid"))
+	}
+	observedScratch, err := filesystemIdentityAt(scratch)
+	if err != nil || observedScratch != scratchID {
+		return workspaceCleanupError("scratch_identity", errors.Join(err, errors.New("workspace cleanup scratch identity changed")))
+	}
+	record, err := readWorkspaceCleanupAuthority(scratch, authorityFileDigest)
+	if err != nil || record.ContainerID != containerID || record.OwnerToken != ownerToken || record.PlanDigest != planDigest ||
+		record.DeclarationDigest != declarationDigest || record.Scratch != scratch || record.ScratchDevice != scratchID.Device || record.ScratchInode != scratchID.Inode {
+		return workspaceCleanupError("authority_record", errors.Join(err, errors.New("workspace cleanup authority record disagrees")))
+	}
+	for _, binding := range record.Bindings {
+		if err := clearWorkspaceContents(ctx, binding); err != nil {
+			return workspaceCleanupError("workspace_contents", errors.New("clear an authorized workspace root"))
+		}
+	}
+	return nil
+}
+
+func readWorkspaceCleanupAuthority(scratch, expectedDigest string) (workspaceCleanupAuthorityRecord, error) {
+	root, err := os.OpenRoot(scratch)
+	if err != nil {
+		return workspaceCleanupAuthorityRecord{}, err
+	}
+	defer root.Close()
+	file, err := root.Open(workspaceCleanupAuthorityName)
+	if err != nil {
+		return workspaceCleanupAuthorityRecord{}, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() < 1 || info.Size() > maximumWorkspaceCleanupAuthorityBytes {
+		return workspaceCleanupAuthorityRecord{}, errors.Join(err, errors.New("workspace cleanup authority record is not a bounded private regular file"))
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maximumWorkspaceCleanupAuthorityBytes+1))
+	if err != nil || len(raw) > maximumWorkspaceCleanupAuthorityBytes {
+		return workspaceCleanupAuthorityRecord{}, errors.Join(err, errors.New("workspace cleanup authority record is unreadable or oversized"))
+	}
+	hash := sha256.Sum256(raw)
+	if "sha256:"+hex.EncodeToString(hash[:]) != expectedDigest {
+		return workspaceCleanupAuthorityRecord{}, errors.New("workspace cleanup authority record digest changed")
+	}
+	if err := jobcontract.ValidateJSONDocument(raw, maximumWorkspaceCleanupAuthorityBytes); err != nil {
+		return workspaceCleanupAuthorityRecord{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var record workspaceCleanupAuthorityRecord
+	if err := decoder.Decode(&record); err != nil {
+		return workspaceCleanupAuthorityRecord{}, err
+	}
+	if record.Schema != workspaceCleanupAuthoritySchema || len(record.Bindings) == 0 || len(record.Bindings) > jobcontract.MaxRuntimeMounts ||
+		!digestPattern.MatchString(record.BindingsDigest) || workspaceCleanupDigest(record.Bindings) != record.BindingsDigest {
+		return workspaceCleanupAuthorityRecord{}, errors.New("workspace cleanup authority record structure is invalid")
+	}
+	layout := worldfs.For(scratch, "ephemeral")
+	for index, binding := range record.Bindings {
+		if binding.Target == "" || !filepath.IsAbs(binding.Target) || filepath.Clean(binding.Target) != binding.Target ||
+			binding.Source != layout.WorkspacePath(binding.Target) || binding.Device == 0 || binding.Inode == 0 ||
+			(index > 0 && record.Bindings[index-1].Target >= binding.Target) {
+			return workspaceCleanupAuthorityRecord{}, errors.New("workspace cleanup authority binding is invalid")
+		}
+	}
+	return record, nil
+}
+
+func observedWorkspaceCleanupBindings(scratch string, mounts []backend.EvidenceMount) ([]workspaceCleanupBinding, error) {
+	layout := worldfs.For(scratch, "ephemeral")
+	parent := layout.Workspace + string(os.PathSeparator)
+	bindings := []workspaceCleanupBinding{}
+	seen := map[string]struct{}{}
+	for _, mount := range mounts {
+		clean := filepath.Clean(mount.Source)
+		if clean != mount.Source || !strings.HasPrefix(clean, parent) {
+			continue
+		}
+		if _, duplicate := seen[mount.Destination]; duplicate || !mount.RW || clean != layout.WorkspacePath(mount.Destination) || !mountHasCleanupHardeningOptions(mount) {
+			return nil, errors.New("workspace cleanup mount is ambiguous or not Kenogram-owned")
+		}
+		identity, err := filesystemIdentityAt(clean)
+		if err != nil {
+			return nil, err
+		}
+		seen[mount.Destination] = struct{}{}
+		bindings = append(bindings, workspaceCleanupBinding{Target: mount.Destination, Source: clean, Device: identity.Device, Inode: identity.Inode})
+	}
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].Target < bindings[j].Target })
+	return bindings, nil
+}
+
+func mountHasCleanupHardeningOptions(mount backend.EvidenceMount) bool {
+	options := append([]string{}, mount.Options...)
+	options = append(options, strings.Split(mount.Mode, ",")...)
+	// Podman's inspect contract exposes read/write authority through RW. Some
+	// supported releases therefore omit the redundant "rw" token from Mode
+	// and Options. Keep RW as the fail-closed authority check above and use
+	// these textual fields only for the independently required hardening bits.
+	wanted := map[string]bool{"nodev": false, "nosuid": false}
+	for _, option := range options {
+		if _, ok := wanted[strings.ToLower(strings.TrimSpace(option))]; ok {
+			wanted[strings.ToLower(strings.TrimSpace(option))] = true
+		}
+	}
+	return wanted["nodev"] && wanted["nosuid"]
+}
+
+func clearWorkspaceContents(ctx context.Context, binding workspaceCleanupBinding) error {
+	return clearWorkspaceContentsWithOpen(ctx, binding, os.OpenRoot)
+}
+
+func clearWorkspaceContentsWithOpen(ctx context.Context, binding workspaceCleanupBinding, openRoot func(string) (*os.Root, error)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	root, err := openRoot(binding.Source)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	opened, err := root.Stat(".")
+	identity, identityErr := filesystemIdentity(opened)
+	if err != nil || identityErr != nil || identity != (FilesystemIdentity{Device: binding.Device, Inode: binding.Inode}) {
+		return errors.Join(err, identityErr, errors.New("opened workspace root identity changed"))
+	}
+	entries, err := fs.ReadDir(root.FS(), ".")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := root.RemoveAll(entry.Name()); err != nil {
+			return err
+		}
+	}
+	remaining, err := fs.ReadDir(root.FS(), ".")
+	if err != nil || len(remaining) != 0 {
+		return errors.Join(err, errors.New("workspace root is not empty after cleanup"))
+	}
+	return nil
+}
+
+type process struct {
+	runtime    *Runtime
+	attached   attachedProcess
+	invocation job.Invocation
+	identity   job.RuntimeIdentity
+	done       chan error
+	clientDone chan struct{}
+
+	mu                sync.Mutex
+	waited            bool
+	waitErr           error
+	lifecycleObserved bool
+	finalizeStarted   bool
+	finalizeRunning   bool
+	finalizeComplete  bool
+	finalizeDone      chan struct{}
+	waitStarted       bool
+	waitRunning       bool
+	waitComplete      bool
+	waitDone          chan struct{}
+}
+
+func (p *process) BeginWait() {
+	p.mu.Lock()
+	if p.waitDone == nil {
+		p.waitDone = make(chan struct{})
+	}
+	p.waitStarted = true
+	p.mu.Unlock()
+}
+
+func (p *process) JoinWait(ctx context.Context) error {
+	p.mu.Lock()
+	started, done := p.waitStarted, p.waitDone
+	p.mu.Unlock()
+	if !started {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *process) enterWait() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.waitStarted = true
+	if p.waitDone == nil {
+		p.waitDone = make(chan struct{})
+	}
+	if p.waitRunning || p.waitComplete {
+		return errors.New("runtime wait is already active or complete")
+	}
+	p.waitRunning = true
+	return nil
+}
+
+func (p *process) finishWait() {
+	p.mu.Lock()
+	p.waitRunning, p.waitComplete = false, true
+	close(p.waitDone)
+	p.mu.Unlock()
+}
+
+func (p *process) BeginFinalization() {
+	p.mu.Lock()
+	if p.finalizeDone == nil {
+		p.finalizeDone = make(chan struct{})
+	}
+	p.finalizeStarted = true
+	p.mu.Unlock()
+}
+
+func (p *process) JoinFinalization(ctx context.Context) error {
+	p.mu.Lock()
+	started, done := p.finalizeStarted, p.finalizeDone
+	p.mu.Unlock()
+	if !started {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *process) enterFinalization() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.finalizeStarted = true
+	if p.finalizeDone == nil {
+		p.finalizeDone = make(chan struct{})
+	}
+	if p.finalizeRunning || p.finalizeComplete {
+		return errors.New("runtime finalization is already active or complete")
+	}
+	p.finalizeRunning = true
+	return nil
+}
+
+func (p *process) finishFinalization() {
+	p.mu.Lock()
+	p.finalizeRunning, p.finalizeComplete = false, true
+	close(p.finalizeDone)
+	p.mu.Unlock()
+}
+
+func (p *process) Identity(ctx context.Context) (job.RuntimeIdentity, error) {
+	if err := ctx.Err(); err != nil {
+		return job.RuntimeIdentity{}, err
+	}
+	return p.identity, nil
+}
+
+func (p *process) Wait(ctx context.Context) (jobcontract.TargetResult, error) {
+	if err := p.enterWait(); err != nil {
+		return jobcontract.TargetResult{Kind: "unknown"}, err
+	}
+	defer p.finishWait()
+	select {
+	case err := <-p.done:
+		return p.recordTerminal(err)
+	case <-ctx.Done():
+	}
+	controlCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	p.runtime.revokeEgress()
+	_, ownershipErr := p.runtime.proveOwned(controlCtx)
+	stopErr := ownershipErr
+	if stopErr == nil {
+		stopErr = p.runtime.Podman.StopWithin(controlCtx, p.runtime.containerID, 1)
+	}
+	if stopErr != nil {
+		if _, proofErr := p.runtime.proveOwned(controlCtx); proofErr == nil {
+			_ = p.runtime.Podman.Kill(controlCtx, p.runtime.containerID)
+		}
+	}
+	cancel()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-p.done:
+		_, _ = p.recordTerminal(err)
+	case <-timer.C:
+		_ = p.attached.Kill()
+	}
+	p.mu.Lock()
+	p.waited, p.waitErr = true, ctx.Err()
+	p.mu.Unlock()
+	return jobcontract.TargetResult{Kind: "unknown"}, ctx.Err()
+}
+
+func (p *process) recordTerminal(err error) (jobcontract.TargetResult, error) {
+	p.runtime.revokeEgress()
+	if err != nil {
+		p.mu.Lock()
+		p.waited, p.waitErr = true, err
+		p.mu.Unlock()
+		return jobcontract.TargetResult{Kind: "unknown"}, err
+	}
+	record, readErr := joblifecycle.ReadSlot(p.runtime.lifecycleFile, p.runtime.lifecycleKey, p.runtime.lifecycleID)
+	if readErr != nil {
+		p.mu.Lock()
+		p.waited, p.waitErr = true, readErr
+		p.mu.Unlock()
+		return jobcontract.TargetResult{Kind: "unknown"}, fmt.Errorf("target-local lifecycle is unproved: %w", readErr)
+	}
+	result := jobcontract.TargetResult{Kind: "exited", ExitStatus: record.ExitStatus, Signal: record.Signal, StartedAt: record.StartedAt, FinishedAt: record.FinishedAt, DurationNS: &record.DurationNS}
+	if record.Signal != nil {
+		result.Kind = "signaled"
+	}
+	p.mu.Lock()
+	p.waited, p.waitErr, p.lifecycleObserved = true, nil, true
+	p.mu.Unlock()
+	return result, nil
+}
+
+func (p *process) finished() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.waited
+}
+
+func (p *process) Finalize(ctx context.Context) (job.RuntimeFinalization, error) {
+	if err := p.JoinWait(ctx); err != nil {
+		return job.RuntimeFinalization{}, err
+	}
+	if err := p.enterFinalization(); err != nil {
+		return job.RuntimeFinalization{}, err
+	}
+	defer p.finishFinalization()
+	if !p.finished() {
+		return job.RuntimeFinalization{}, errors.New("target terminal observation is absent")
+	}
+	egressRaw, _, egressErr := p.runtime.stopEgress(ctx)
+	if egressErr != nil {
+		return job.RuntimeFinalization{Egress: egressRaw}, egressErr
+	}
+	if _, err := p.runtime.proveOwned(ctx); err != nil {
+		return job.RuntimeFinalization{Egress: egressRaw}, err
+	}
+	if err := p.runtime.Podman.StopWithin(ctx, p.runtime.containerID, 1); err != nil {
+		if _, proofErr := p.runtime.proveOwned(ctx); proofErr != nil {
+			return job.RuntimeFinalization{}, errors.Join(err, proofErr)
+		}
+		if killErr := p.runtime.Podman.Kill(ctx, p.runtime.containerID); killErr != nil {
+			return job.RuntimeFinalization{}, errors.Join(err, killErr)
+		}
+		p.runtime.mu.Lock()
+		p.runtime.forced = true
+		p.runtime.mu.Unlock()
+	}
+	evidence, err := p.runtime.Podman.Inspect(ctx, p.runtime.containerID)
+	if err != nil {
+		return job.RuntimeFinalization{}, err
+	}
+	if evidence.Running {
+		return job.RuntimeFinalization{}, errors.New("runtime remains running after finalization stop")
+	}
+	if err := verifyStoppedEvidence(evidence, publicProviderPlan(p.invocation.Prepared.Result), p.runtime.name, p.runtime.containerID, p.runtime.ownerToken, p.identity.ImageDigest); err != nil {
+		return job.RuntimeFinalization{}, fmt.Errorf("verify stopped job runtime: %w", err)
+	}
+	if err := verifyMountFacts(ctx, p.runtime.mountFacts, p.runtime.mounts); err != nil {
+		return job.RuntimeFinalization{}, err
+	}
+	p.mu.Lock()
+	lifecycleObserved := p.lifecycleObserved
+	p.mu.Unlock()
+	if lifecycleObserved {
+		if _, err := joblifecycle.ReadSlot(p.runtime.lifecycleFile, p.runtime.lifecycleKey, p.runtime.lifecycleID); err != nil {
+			return job.RuntimeFinalization{}, fmt.Errorf("target-local lifecycle changed before finalization: %w", err)
+		}
+	}
+	after, err := runtimeEvidence("after", p.runtime.now().UTC(), evidence, p.invocation, p.identity.ImageDigest, p.runtime.mountFacts, nil)
+	if err != nil {
+		return job.RuntimeFinalization{}, err
+	}
+	artifacts, err := p.extractArtifacts(ctx)
+	if err != nil {
+		return job.RuntimeFinalization{After: after}, err
+	}
+	return job.RuntimeFinalization{After: after, Egress: egressRaw, Artifacts: artifacts}, nil
+}
+
+func verifyStoppedEvidence(evidence backend.Evidence, result plan.Result, name, containerID, ownerToken, imageDigest string) error {
+	if containerID == "" || evidence.ID != containerID || evidence.Name != name || evidence.Labels["io.kenogram.job-owner"] != ownerToken ||
+		evidence.Labels["io.kenogram.plan-digest"] != result.PlanDigest ||
+		evidence.Labels["io.kenogram.declaration-digest"] != result.DeclarationDigest {
+		return errors.New("stopped runtime identity or ownership labels disagree")
+	}
+	if !evidenceHasImageDigest(evidence, imageDigest) {
+		return errors.New("stopped runtime image identity is absent or changed")
+	}
+	return nil
+}
+
+func targetEnvironmentItems(invocation job.Invocation) ([]jobenv.Item, error) {
+	items := make([]jobenv.Item, 0, len(invocation.Request.Command.Environment))
+	for _, requested := range invocation.Request.Command.Environment {
+		if reservedProxyEnvironment(requested.Name) {
+			return nil, errors.New("target environment cannot override governed proxy variables")
+		}
+		if requested.PublicValue != nil {
+			items = append(items, jobenv.Item{Name: requested.Name, Value: []byte(*requested.PublicValue)})
+			continue
+		}
+		var selected *plan.Copy
+		for index := range invocation.Prepared.Result.Plan.Copies {
+			copy := &invocation.Prepared.Result.Plan.Copies[index]
+			if copy.Secret && copy.Target == requested.SecretFile {
+				if selected != nil {
+					return nil, errors.New("secret environment binding is ambiguous")
+				}
+				selected = copy
+			}
+		}
+		if selected == nil {
+			return nil, errors.New("secret environment binding is absent")
+		}
+		value, err := readSecretSource(*selected)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, jobenv.Item{Name: requested.Name, Value: value})
+	}
+	return items, nil
+}
+
+func encodeTargetEnvironment(items []jobenv.Item, lifecycleKey []byte, proxyAddress string) ([]byte, error) {
+	items = append([]jobenv.Item{}, items...)
+	if proxyAddress != "" {
+		value := []byte("http://" + proxyAddress)
+		for _, name := range job.EgressEnvironmentKeys {
+			items = append(items, jobenv.Item{Name: name, Value: append([]byte{}, value...)})
+		}
+	}
+	return jobenv.EncodeLaunch(items, lifecycleKey)
+}
+
+func reservedProxyEnvironment(name string) bool {
+	switch strings.ToUpper(name) {
+	case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY":
+		return true
+	default:
+		return false
+	}
+}
+
+func readSecretSource(copy plan.Copy) ([]byte, error) {
+	return readSecretSourceWithHook(copy, nil)
+}
+
+func readSecretSourceWithHook(copy plan.Copy, afterOpen func()) ([]byte, error) {
+	file, err := os.Open(copy.Source)
+	if err != nil {
+		return nil, errors.New("open secret environment source")
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || opened.Size() < 0 || opened.Size() > jobenv.MaximumValueBytes {
+		return nil, errors.New("opened secret environment source is not a bounded regular file")
+	}
+	if afterOpen != nil {
+		afterOpen()
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, jobenv.MaximumValueBytes+1))
+	if err != nil || len(raw) > jobenv.MaximumValueBytes || bytes.IndexByte(raw, 0) >= 0 {
+		return nil, errors.New("secret environment source is unreadable, oversized, or contains NUL")
+	}
+	after, err := file.Stat()
+	if err != nil || !os.SameFile(opened, after) || opened.Size() != after.Size() || !opened.ModTime().Equal(after.ModTime()) {
+		return nil, errors.New("secret environment source changed during read")
+	}
+	if observed := plan.DigestRegularCopyBytes(raw, opened.Mode()); observed != copy.SourceDigest {
+		return nil, errors.New("opened secret environment bytes disagree with planned copy identity")
+	}
+	return raw, nil
+}
+
+func (p *process) extractArtifacts(ctx context.Context) ([]job.Artifact, error) {
+	request := p.invocation.Request.Artifacts
+	if request == nil {
+		return nil, nil
+	}
+	destination := filepath.Join(p.runtime.scratch, "artifacts")
+	binding, err := artifactMountBinding(request.ContainerRoot, p.runtime.mountFacts, p.runtime.scratch)
+	if err != nil {
+		return nil, err
+	}
+	command := []string{
+		p.runtime.helperSource, "_job-collect", p.runtime.containerID, p.runtime.name,
+		p.runtime.ownerToken, request.ContainerRoot, destination,
+		fmt.Sprint(request.MaxEntries), fmt.Sprint(request.MaxBytes),
+		binding.Role, binding.Target, binding.Scratch,
+		fmt.Sprint(binding.Device), fmt.Sprint(binding.Inode),
+	}
+	if err := p.runtime.Podman.RunUnshare(ctx, command); err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(destination)
+	if err != nil {
+		return nil, err
+	}
+	// The artifact open closures share this descriptor until Cleanup removes the
+	// scratch tree. It is intentionally left open for the core's immediate copy.
+	artifacts := []job.Artifact{}
+	var total int64
+	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if path == "." || entry.IsDir() {
+			return nil
+		}
+		info, err := root.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("target artifact %q is not a regular file", path)
+		}
+		if int64(len(artifacts)) >= request.MaxEntries || info.Size() < 0 || info.Size() > request.MaxBytes-total {
+			return errors.New("target artifact inventory exceeds request bounds")
+		}
+		total += info.Size()
+		rel := filepath.ToSlash(path)
+		artifacts = append(artifacts, job.Artifact{Path: rel, Open: func() (io.ReadCloser, error) {
+			before, err := root.Lstat(rel)
+			if err != nil || !before.Mode().IsRegular() {
+				return nil, fmt.Errorf("artifact %q changed before open", rel)
+			}
+			file, err := root.Open(rel)
+			if err != nil {
+				return nil, err
+			}
+			opened, err := file.Stat()
+			if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+				file.Close()
+				return nil, fmt.Errorf("artifact %q changed during open", rel)
+			}
+			return file, nil
+		}})
+		return nil
+	})
+	if err != nil {
+		root.Close()
+		return nil, err
+	}
+	p.runtime.mu.Lock()
+	p.runtime.artifactRoots = append(p.runtime.artifactRoots, root)
+	p.runtime.mu.Unlock()
+	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].Path < artifacts[j].Path })
+	return artifacts, nil
+}
+
+func artifactMountBinding(containerRoot string, facts []jobcontract.RuntimeMountObservation, scratch string) (ArtifactMountBinding, error) {
+	selected := jobcontract.RuntimeMountObservation{}
+	for _, fact := range facts {
+		if !containerPathWithin(containerRoot, fact.Target) || len(fact.Target) <= len(selected.Target) {
+			continue
+		}
+		selected = fact
+	}
+	if selected.Target == "" {
+		return ArtifactMountBinding{Role: "rootfs"}, nil
+	}
+	if selected.FileType != "directory" {
+		return ArtifactMountBinding{}, errors.New("target artifact root resolves through a non-directory mount")
+	}
+	binding := ArtifactMountBinding{Role: selected.Role, Target: selected.Target, Device: selected.Device, Inode: selected.Inode}
+	if selected.Role == "workspace" {
+		binding.Scratch = scratch
+	}
+	return binding, nil
+}
+
+func containerPathWithin(path, root string) bool {
+	return path == root || root == "/" || strings.HasPrefix(path, root+"/")
+}
+
+// CollectArtifacts is the narrow helper entered under `podman unshare`. It
+// re-proves the stopped container identity, mounts its root only inside the
+// provider user namespace, copies a bounded regular-file tree, and unmounts it.
+func CollectArtifacts(ctx context.Context, podman *backend.Podman, containerID, name, ownerToken, containerRoot, destination string, maximumEntries, maximumBytes int64, binding ArtifactMountBinding) (retErr error) {
+	if podman == nil || name == "" || !containerIDPattern.MatchString(containerID) || !ownerTokenPattern.MatchString(ownerToken) ||
+		!filepath.IsAbs(containerRoot) || filepath.Clean(containerRoot) != containerRoot ||
+		!filepath.IsAbs(destination) || filepath.Clean(destination) != destination ||
+		maximumEntries < 1 || maximumEntries > 10_000 || maximumBytes < 1 || maximumBytes > 1<<30 ||
+		!validArtifactMountBinding(binding) {
+		return errors.New("artifact collector authority is invalid")
+	}
+	evidence, err := podman.Inspect(ctx, containerID)
+	if err != nil || evidence.Running || evidence.ID != containerID || evidence.Name != name || evidence.Labels["io.kenogram.job-owner"] != ownerToken {
+		return errors.New("stopped artifact source identity is unproved")
+	}
+	mount, matched, err := resolveArtifactMount(evidence.Mounts, containerRoot)
+	if err != nil {
+		return err
+	}
+	if matched {
+		if binding.Role == "rootfs" || binding.Target != mount.Destination || (binding.Role != "declared" && binding.Role != "workspace") {
+			return errors.New("artifact mount authority disagrees with the inspected runtime")
+		}
+		if binding.Role == "workspace" && mount.Source != worldfs.For(binding.Scratch, "ephemeral").WorkspacePath(binding.Target) {
+			return errors.New("artifact workspace source is not Kenogram-owned")
+		}
+		identity, identityErr := filesystemIdentityAt(mount.Source)
+		if identityErr != nil || identity != (FilesystemIdentity{Device: binding.Device, Inode: binding.Inode}) {
+			return errors.New("artifact mount source identity changed")
+		}
+		relative := strings.TrimPrefix(containerRoot, mount.Destination)
+		if relative == "" {
+			relative = "/"
+		}
+		return collectArtifactTreeFromMountedRoot(ctx, mount.Source, relative, destination, maximumEntries, maximumBytes)
+	}
+	if binding.Role != "rootfs" {
+		return errors.New("artifact mount authority is absent from the inspected runtime")
+	}
+	mounted, err := podman.MountRoot(ctx, containerID)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		unmountCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		// Unmount is destructive provider state. Re-prove immutable identity and
+		// owner immediately before issuing it.
+		proof, proofErr := podman.Inspect(unmountCtx, containerID)
+		if proofErr != nil || proof.ID != containerID || proof.Labels["io.kenogram.job-owner"] != ownerToken {
+			retErr = errors.Join(retErr, errors.New("artifact source ownership changed before unmount"))
+			return
+		}
+		retErr = errors.Join(retErr, podman.Unmount(unmountCtx, containerID))
+	}()
+	return collectArtifactTreeFromMountedRoot(ctx, mounted, containerRoot, destination, maximumEntries, maximumBytes)
+}
+
+func validArtifactMountBinding(binding ArtifactMountBinding) bool {
+	if binding.Role == "rootfs" {
+		return binding.Target == "" && binding.Scratch == "" && binding.Device == 0 && binding.Inode == 0
+	}
+	if (binding.Role != "declared" && binding.Role != "workspace") || !filepath.IsAbs(binding.Target) || filepath.Clean(binding.Target) != binding.Target || binding.Device == 0 || binding.Inode == 0 {
+		return false
+	}
+	if binding.Role == "workspace" {
+		return filepath.IsAbs(binding.Scratch) && filepath.Clean(binding.Scratch) == binding.Scratch
+	}
+	return binding.Scratch == ""
+}
+
+func resolveArtifactMount(mounts []backend.EvidenceMount, containerRoot string) (backend.EvidenceMount, bool, error) {
+	selected := backend.EvidenceMount{}
+	for _, mount := range mounts {
+		if !containerPathWithin(containerRoot, mount.Destination) {
+			continue
+		}
+		if len(mount.Destination) == len(selected.Destination) && selected.Destination != "" {
+			return backend.EvidenceMount{}, false, errors.New("artifact root has ambiguous runtime mount authority")
+		}
+		if len(mount.Destination) > len(selected.Destination) {
+			selected = mount
+		}
+	}
+	return selected, selected.Destination != "", nil
+}
+
+func collectArtifactTreeFromMountedRoot(ctx context.Context, mounted, containerRoot, destination string, maximumEntries, maximumBytes int64) error {
+	root, err := os.OpenRoot(mounted)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	relative := filepath.FromSlash(strings.TrimPrefix(containerRoot, "/"))
+	current := root
+	for _, component := range strings.Split(relative, string(os.PathSeparator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		info, err := current.Lstat(component)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			if current != root {
+				current.Close()
+			}
+			return errors.New("target artifact root traversal contains a non-directory or symlink")
+		}
+		next, err := current.OpenRoot(component)
+		if current != root {
+			current.Close()
+		}
+		if err != nil {
+			return err
+		}
+		opened, err := next.Stat(".")
+		if err != nil || !opened.IsDir() || !os.SameFile(info, opened) {
+			next.Close()
+			return errors.New("target artifact root component changed during descriptor open")
+		}
+		current = next
+	}
+	if current != root {
+		defer current.Close()
+	}
+	return collectArtifactRoot(ctx, current, destination, maximumEntries, maximumBytes)
+}
+
+func collectArtifactTree(ctx context.Context, source, destination string, maximumEntries, maximumBytes int64) error {
+	info, err := os.Lstat(source)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("target artifact root is not a directory")
+	}
+	sourceRoot, err := os.OpenRoot(source)
+	if err != nil {
+		return err
+	}
+	defer sourceRoot.Close()
+	return collectArtifactRoot(ctx, sourceRoot, destination, maximumEntries, maximumBytes)
+}
+
+func collectArtifactRoot(ctx context.Context, sourceRoot *os.Root, destination string, maximumEntries, maximumBytes int64) error {
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		return err
+	}
+	destinationRoot, err := os.OpenRoot(destination)
+	if err != nil {
+		return err
+	}
+	defer destinationRoot.Close()
+	var files, nodes, total int64
+	return fs.WalkDir(sourceRoot.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		nodes++
+		if nodes > 20_000 {
+			return errors.New("target artifact traversal exceeds provider work bound")
+		}
+		if path == "." {
+			return nil
+		}
+		info, err := sourceRoot.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("target artifact %q changed or is a symlink", path)
+		}
+		if info.IsDir() {
+			return destinationRoot.MkdirAll(path, 0o700)
+		}
+		rel := filepath.ToSlash(path)
+		if !info.Mode().IsRegular() || jobcontract.ValidateEvidenceRelativePath(rel) != nil {
+			return fmt.Errorf("target artifact %q is not a regular safe path", path)
+		}
+		files++
+		if files > maximumEntries || info.Size() < 0 || info.Size() > maximumBytes-total {
+			return errors.New("target artifact inventory exceeds request bounds")
+		}
+		input, err := sourceRoot.Open(path)
+		if err != nil {
+			return err
+		}
+		opened, err := input.Stat()
+		if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+			input.Close()
+			return fmt.Errorf("target artifact %q changed during open", path)
+		}
+		output, err := destinationRoot.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			input.Close()
+			return err
+		}
+		written, copyErr := io.Copy(output, io.LimitReader(input, info.Size()+1))
+		after, statErr := input.Stat()
+		closeInputErr := input.Close()
+		syncErr := output.Sync()
+		closeOutputErr := output.Close()
+		if copyErr != nil || statErr != nil || closeInputErr != nil || syncErr != nil || closeOutputErr != nil || written != info.Size() || !os.SameFile(opened, after) || opened.Size() != after.Size() || !opened.ModTime().Equal(after.ModTime()) {
+			return errors.Join(copyErr, statErr, closeInputErr, syncErr, closeOutputErr, fmt.Errorf("target artifact %q changed during bounded copy", path))
+		}
+		total += written
+		return nil
+	})
+}
+
+func runtimeEvidence(phase string, observed time.Time, evidence backend.Evidence, invocation job.Invocation, imageDigest string, mounts []jobcontract.RuntimeMountObservation, egressAdmission *jobcontract.RuntimeEgressAdmission) ([]byte, error) {
+	observation := jobcontract.RuntimeObservation{
+		Schema: jobcontract.RuntimeObservationSchema, Phase: phase, ObservedAt: observed.Format(time.RFC3339Nano), Provider: "podman-cli",
+		ContainerID: evidence.ID, ContainerName: evidence.Name, Running: evidence.Running,
+		ImageReference: invocation.Prepared.Result.Plan.World.Base, ImageDigest: imageDigest,
+		PlanSHA256: "sha256:" + invocation.Prepared.Result.EvidenceDigest, DeclarationSHA256: "sha256:" + invocation.Prepared.Result.DeclarationDigest, Generation: generation,
+		NetworkMode: evidence.NetworkMode, IPCMode: evidence.IPCMode, IPCIsolated: evidence.IPCIsolatedFromHost,
+		PIDMode: evidence.PIDMode, UTSMode: evidence.UTSMode, UserNSMode: evidence.UserNSMode, User: evidence.User,
+		Hostname: evidence.Hostname, WorkingDirectory: evidence.WorkingDir, BoundingCaps: append([]string{}, evidence.BoundingCaps...),
+		NoNewPrivileges: containsFold(evidence.SecurityOpt, "no-new-privileges"), SeccompMode: int64(evidence.SeccompMode), Devices: int64(evidence.Devices),
+		UIDIdentity: mapsHostIdentity(evidence.UIDMap, int64(os.Getuid())), GIDIdentity: mapsHostIdentity(evidence.GIDMap, int64(os.Getgid())),
+		MemoryBytes: evidence.Memory, NanoCPUs: evidence.NanoCPUs, PIDs: evidence.PIDs, Mounts: append([]jobcontract.RuntimeMountObservation{}, mounts...), EgressAdmission: egressAdmission,
+	}
+	if phase == "after" {
+		// These properties require a live process to inspect. Preserve their
+		// absence honestly rather than copying a stale live-process claim.
+		observation.IPCIsolated, observation.NoNewPrivileges, observation.UIDIdentity, observation.GIDIdentity = false, false, false, false
+		observation.SeccompMode = 0
+		observation.BoundingCaps = []string{}
+	}
+	if err := jobcontract.ValidateRuntimeObservation(observation); err != nil {
+		return nil, err
+	}
+	return json.Marshal(observation)
+}
+
+func containsFold(values []string, wanted string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, wanted) || strings.HasPrefix(strings.ToLower(value), strings.ToLower(wanted)+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func mapsHostIdentity(mappings []backend.IDMap, id int64) bool {
+	for _, mapping := range mappings {
+		if mapping.Size > 0 && id >= mapping.HostID && id < mapping.HostID+mapping.Size && mapping.ContainerID+id-mapping.HostID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func observedImageDigest(evidence backend.Evidence) string {
+	for _, candidate := range []string{evidence.ImageDigest, evidence.ImageReference} {
+		if digestPattern.MatchString(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func publicProviderPlan(result plan.Result) plan.Result {
+	result.PlanDigest = result.EvidenceDigest
+	return result
+}
+
+func validateObservedImage(reference string, evidence backend.Evidence) (string, error) {
+	expected := ""
+	if strings.HasPrefix(strings.ToLower(reference), "sha256:") {
+		expected = strings.ToLower(reference)
+	} else if index := strings.LastIndex(strings.ToLower(reference), "@sha256:"); index >= 0 {
+		expected = strings.ToLower(reference[index+1:])
+	}
+	if expected != "" {
+		if evidenceHasImageDigest(evidence, expected) {
+			return expected, nil
+		}
+		return "", errors.New("observed image digest disagrees with declared pinned image")
+	}
+	if observed := observedImageDigest(evidence); observed != "" {
+		return observed, nil
+	}
+	return "", errors.New("runtime did not expose an immutable image digest")
+}
+
+func evidenceHasImageDigest(evidence backend.Evidence, wanted string) bool {
+	for _, candidate := range []string{evidence.ImageDigest, evidence.ImageReference} {
+		if candidate == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func jobContainerName(jobID, ownerToken string) string {
+	sum := sha256.Sum256([]byte(jobID + "\x00" + ownerToken))
+	prefix := jobID
+	if len(prefix) > 32 {
+		prefix = prefix[:32]
+	}
+	return "kenogram-job-" + prefix + "-" + hex.EncodeToString(sum[:6])
+}
+
+func randomToken() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+func runningExecutable() (string, error) {
+	if runtime.GOOS == "linux" {
+		return "/proc/self/exe", nil
+	}
+	return os.Executable()
+}
+
+func stageHelper(ctx context.Context, resolve func() (string, error), scratch string) (string, jobcontract.RuntimeMountObservation, error) {
+	source, err := resolve()
+	if err != nil {
+		return "", jobcontract.RuntimeMountObservation{}, fmt.Errorf("resolve governed job helper: %w", err)
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return "", jobcontract.RuntimeMountObservation{}, errors.New("open governed job helper")
+	}
+	defer input.Close()
+	info, err := input.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 1<<30 {
+		return "", jobcontract.RuntimeMountObservation{}, errors.New("kernel-resolved governed job helper is not a bounded regular file")
+	}
+	target := filepath.Join(scratch, "job-exec")
+	output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o555)
+	if err != nil {
+		return "", jobcontract.RuntimeMountObservation{}, err
+	}
+	written, copyErr := io.Copy(output, &contextReader{ctx: ctx, reader: io.LimitReader(input, (1<<30)+1)})
+	afterInput, inputStatErr := input.Stat()
+	syncErr := output.Sync()
+	closeErr := output.Close()
+	if copyErr != nil || inputStatErr != nil || syncErr != nil || closeErr != nil || written != info.Size() || !os.SameFile(info, afterInput) || afterInput.Size() != info.Size() || !afterInput.ModTime().Equal(info.ModTime()) {
+		return "", jobcontract.RuntimeMountObservation{}, errors.Join(copyErr, inputStatErr, syncErr, closeErr, errors.New("governed job helper copy is incomplete or changed during copy"))
+	}
+	if err := os.Chmod(target, 0o555); err != nil {
+		return "", jobcontract.RuntimeMountObservation{}, err
+	}
+	fact, err := captureSourceFact(ctx, target, "", jobHelperPath, "ro", "helper", true)
+	if err != nil {
+		return "", jobcontract.RuntimeMountObservation{}, err
+	}
+	return target, fact, nil
+}
+
+func validateRuntimeMountCount(workspaces, declared int) error {
+	const owned = 2
+	if workspaces < 0 || declared < 0 || workspaces > jobcontract.MaxRuntimeMounts-owned || declared > jobcontract.MaxRuntimeMounts-owned-workspaces {
+		return fmt.Errorf("runtime mount count exceeds %d", jobcontract.MaxRuntimeMounts)
+	}
+	return nil
+}
+
+func validateRuntimeMountPaths(result plan.Plan) error {
+	for _, target := range result.Workspace {
+		if err := backend.ValidateMountArgumentPath(target); err != nil {
+			return fmt.Errorf("workspace mount target %q: %w", target, err)
+		}
+	}
+	for _, mount := range result.Mounts {
+		if err := backend.ValidateMountArgumentPath(mount.Source); err != nil {
+			return fmt.Errorf("declared mount source %q: %w", mount.Source, err)
+		}
+		if err := backend.ValidateMountArgumentPath(mount.Target); err != nil {
+			return fmt.Errorf("declared mount target %q: %w", mount.Target, err)
+		}
+	}
+	return nil
+}
+
+func validateRuntimeOwnedPathIsolation(result plan.Plan, scratchRoot, scratch string) error {
+	rootInfo, rootErr := os.Lstat(scratchRoot)
+	scratchInfo, scratchErr := os.Lstat(scratch)
+	if rootErr != nil || scratchErr != nil || !rootInfo.IsDir() || !scratchInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 || scratchInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.Join(rootErr, scratchErr, errors.New("runtime-owned scratch authority is invalid"))
+	}
+	type sourceAuthority struct {
+		kind   string
+		source string
+	}
+	sources := make([]sourceAuthority, 0, len(result.Copies)+len(result.Mounts))
+	for _, copy := range result.Copies {
+		sources = append(sources, sourceAuthority{kind: "copy", source: copy.Source})
+	}
+	for _, mount := range result.Mounts {
+		sources = append(sources, sourceAuthority{kind: "mount", source: mount.Source})
+	}
+	canonicalRoot, canonicalScratch := canonicalHostPath(scratchRoot), canonicalHostPath(scratch)
+	for _, authority := range sources {
+		canonicalSource := canonicalHostPath(authority.source)
+		if hostPathsOverlap(canonicalSource, canonicalRoot) || hostPathsOverlap(canonicalSource, canonicalScratch) {
+			return fmt.Errorf("declared %s source overlaps the private runtime scratch authority", authority.kind)
+		}
+		info, err := os.Lstat(authority.source)
+		if err != nil {
+			return fmt.Errorf("inspect declared %s source for scratch isolation: %w", authority.kind, err)
+		}
+		if os.SameFile(info, rootInfo) || os.SameFile(info, scratchInfo) {
+			return fmt.Errorf("declared %s source aliases the private runtime scratch authority", authority.kind)
+		}
+	}
+	return nil
+}
+
+func validateBackendMountPaths(mounts []backend.Mount) error {
+	for _, mount := range mounts {
+		if err := backend.ValidateMountArgumentPath(mount.Source); err != nil {
+			return fmt.Errorf("runtime mount source %q: %w", mount.Source, err)
+		}
+		if err := backend.ValidateMountArgumentPath(mount.Target); err != nil {
+			return fmt.Errorf("runtime mount target %q: %w", mount.Target, err)
+		}
+	}
+	return nil
+}
+
+func validateWritablePlanMounts(ctx context.Context, mounts []plan.Mount) error {
+	for _, mount := range mounts {
+		if mount.Mode == "rw" {
+			if err := inspectWritableSource(ctx, mount.Source); err != nil {
+				return fmt.Errorf("inspect writable mount %q: %w", mount.Target, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateWritableBackendMounts(ctx context.Context, mounts []backend.Mount) error {
+	for _, mount := range mounts {
+		if mount.Mode == "rw" {
+			if err := inspectWritableSource(ctx, mount.Source); err != nil {
+				return fmt.Errorf("inspect runtime-writable mount %q: %w", mount.Target, err)
+			}
+		}
+	}
+	return nil
+}
+
+func inspectWritableSource(ctx context.Context, source string) error {
+	protected := protectedRuntimeEndpoints()
+	identities := make([]fs.FileInfo, 0, len(protected))
+	for _, endpoint := range protected {
+		if info, err := os.Lstat(endpoint); err == nil {
+			identities = append(identities, info)
+		}
+		if info, err := os.Stat(endpoint); err == nil {
+			identities = append(identities, info)
+		}
+	}
+	return sourcetree.Inspect(ctx, source, func(entry sourcetree.Entry) error {
+		if entry.Info.Mode()&os.ModeSocket != 0 {
+			return fmt.Errorf("writable source contains socket node at %s", entry.Relative)
+		}
+		for _, protectedInfo := range identities {
+			if os.SameFile(entry.Info, protectedInfo) {
+				return fmt.Errorf("writable source contains a runtime-endpoint identity at %s", entry.Relative)
+			}
+		}
+		return nil
+	})
+}
+
+func validateReadOnlyWritableAliases(mounts []plan.Mount) error {
+	for left := range mounts {
+		for right := left + 1; right < len(mounts); right++ {
+			if mounts[left].Mode == mounts[right].Mode {
+				continue
+			}
+			leftInfo, leftErr := os.Lstat(mounts[left].Source)
+			rightInfo, rightErr := os.Lstat(mounts[right].Source)
+			if leftErr != nil || rightErr != nil {
+				return errors.Join(leftErr, rightErr)
+			}
+			same := os.SameFile(leftInfo, rightInfo)
+			overlap := hostPathsOverlap(canonicalHostPath(mounts[left].Source), canonicalHostPath(mounts[right].Source))
+			if same || overlap {
+				return fmt.Errorf("read-only and writable mount sources overlap at %q and %q", mounts[left].Source, mounts[right].Source)
+			}
+		}
+	}
+	return nil
+}
+
+type readOnlySnapshot struct {
+	path            string
+	authorityDigest string
+	digest          string
+	policy          string
+}
+
+func snapshotReadOnlyMounts(ctx context.Context, scratch string, mounts []plan.Mount) (map[string]readOnlySnapshot, error) {
+	return snapshotReadOnlyMountsWithProject(ctx, scratch, mounts, sourcetree.ProjectReadOnly)
+}
+
+func snapshotReadOnlyMountsWithProject(ctx context.Context, scratch string, mounts []plan.Mount, project func(context.Context, string) error) (result map[string]readOnlySnapshot, retErr error) {
+	result = map[string]readOnlySnapshot{}
+	stagedPaths := []string{}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		for _, path := range stagedPaths {
+			retErr = errors.Join(retErr, sourcetree.PrepareRemoval(cleanupCtx, path))
+		}
+	}()
+	root := filepath.Join(scratch, "read-only-mounts")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		return nil, err
+	}
+	for index, mount := range mounts {
+		if mount.Mode != "ro" {
+			continue
+		}
+		info, err := os.Lstat(mount.Source)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("read-only mount %q source is invalid", mount.Target)
+		}
+		observedType := "file"
+		if info.IsDir() {
+			observedType = "directory"
+		}
+		if observedType != mount.SourceType {
+			return nil, fmt.Errorf("read-only mount %q source type changed", mount.Target)
+		}
+		before, err := boundedSourceTreeDigest(ctx, mount.Source, info)
+		if err != nil {
+			return nil, err
+		}
+		destination := filepath.Join(root, fmt.Sprintf("%03d", index))
+		if err := sourcetree.Copy(ctx, mount.Source, destination); err != nil {
+			return nil, err
+		}
+		stagedPaths = append(stagedPaths, destination)
+		afterInfo, err := os.Lstat(mount.Source)
+		if err != nil || !os.SameFile(info, afterInfo) {
+			return nil, errors.New("read-only mount source changed during snapshot")
+		}
+		after, err := boundedSourceTreeDigest(ctx, mount.Source, afterInfo)
+		if err != nil {
+			return nil, err
+		}
+		stagedInfo, err := os.Lstat(destination)
+		if err != nil {
+			return nil, err
+		}
+		staged, expectedProjection, err := boundedSourceTreeAndProjectionDigests(ctx, destination, stagedInfo)
+		if err != nil {
+			return nil, err
+		}
+		if before != after || before != staged {
+			return nil, fmt.Errorf("read-only mount %q changed during immutable snapshot", mount.Target)
+		}
+		if err := project(ctx, destination); err != nil {
+			return nil, fmt.Errorf("project read-only mount %q permissions: %w", mount.Target, err)
+		}
+		projectedInfo, err := os.Lstat(destination)
+		if err != nil || !os.SameFile(stagedInfo, projectedInfo) {
+			return nil, errors.Join(err, fmt.Errorf("read-only mount %q identity changed during permission projection", mount.Target))
+		}
+		projected, err := boundedSourceTreeDigest(ctx, destination, projectedInfo)
+		if err != nil {
+			return nil, err
+		}
+		if projected != expectedProjection {
+			return nil, fmt.Errorf("read-only mount %q permission projection changed content or inventory", mount.Target)
+		}
+		result[mount.Target] = readOnlySnapshot{
+			path: destination, authorityDigest: "sha256:" + before,
+			digest: "sha256:" + projected, policy: jobcontract.RuntimeReadOnlyPermissionPolicy,
+		}
+	}
+	return result, nil
+}
+
+func verifyReadOnlySnapshotFacts(facts []jobcontract.RuntimeMountObservation, snapshots map[string]readOnlySnapshot) error {
+	for target, snapshot := range snapshots {
+		matched := false
+		for _, fact := range facts {
+			if fact.Target == target && fact.Role == "declared" && fact.Mode == "ro" && fact.AuthoritySHA256 == snapshot.authorityDigest && fact.SHA256 == snapshot.digest && fact.PermissionPolicy == snapshot.policy {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("read-only mount %q normalized snapshot digest is absent from runtime evidence", target)
+		}
+	}
+	return nil
+}
+
+func captureMountFacts(ctx context.Context, mounts []backend.Mount, result plan.Result, snapshots map[string]readOnlySnapshot) ([]jobcontract.RuntimeMountObservation, error) {
+	facts := make([]jobcontract.RuntimeMountObservation, 0, len(mounts))
+	for _, mount := range mounts {
+		role, authoritySource := "", ""
+		switch mount.Target {
+		case jobHelperPath:
+			role = "helper"
+		case jobLifecyclePath:
+			role = "lifecycle"
+		default:
+			for _, target := range result.Plan.Workspace {
+				if mount.Target == target {
+					role = "workspace"
+				}
+			}
+			for _, declared := range result.Plan.Mounts {
+				if mount.Target == declared.Target && mount.Mode == declared.Mode {
+					role = "declared"
+					authoritySource = declared.Source
+				}
+			}
+		}
+		if role == "" {
+			return nil, fmt.Errorf("mount %q has no retained authority role", mount.Target)
+		}
+		fact, err := captureSourceFact(ctx, mount.Source, authoritySource, mount.Target, mount.Mode, role, mount.Mode == "ro")
+		if err != nil {
+			return nil, fmt.Errorf("capture mount %q identity: %w", mount.Target, err)
+		}
+		if snapshot, ok := snapshots[mount.Target]; ok {
+			fact.AuthoritySHA256 = snapshot.authorityDigest
+			fact.PermissionPolicy = snapshot.policy
+		}
+		facts = append(facts, fact)
+	}
+	sort.Slice(facts, func(i, j int) bool { return facts[i].Target < facts[j].Target })
+	return facts, nil
+}
+
+func captureSourceFact(ctx context.Context, source, authoritySource, target, mode, role string, content bool) (jobcontract.RuntimeMountObservation, error) {
+	before, err := os.Lstat(source)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || (!before.IsDir() && !before.Mode().IsRegular()) {
+		return jobcontract.RuntimeMountObservation{}, errors.New("source is not a regular non-symlink file or directory")
+	}
+	stat, ok := before.Sys().(*syscall.Stat_t)
+	if !ok || stat.Dev == 0 || stat.Ino == 0 {
+		return jobcontract.RuntimeMountObservation{}, errors.New("source device and inode are unavailable")
+	}
+	digest := ""
+	if content {
+		var observed string
+		var err error
+		if role == "declared" {
+			observed, err = boundedSourceTreeDigest(ctx, source, before)
+		} else {
+			observed, err = boundedSourceContentDigest(ctx, source, before)
+		}
+		if err != nil {
+			return jobcontract.RuntimeMountObservation{}, err
+		}
+		digest = "sha256:" + observed
+	}
+	fileType := "file"
+	if before.IsDir() {
+		fileType = "directory"
+	}
+	permissionPolicy := ""
+	switch {
+	case role == "workspace":
+		const permissionBits = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+		if before.Mode()&permissionBits != 0o777 {
+			return jobcontract.RuntimeMountObservation{}, errors.New("workspace source does not satisfy portable-writable-v1")
+		}
+		permissionPolicy = jobcontract.RuntimeWorkspacePermissionPolicy
+	case role == "declared" && mode == "ro":
+		permissionPolicy = jobcontract.RuntimeReadOnlyPermissionPolicy
+	}
+	semanticSource, err := jobcontract.RuntimeMountSource(role, target, mode, authoritySource, digest)
+	if err != nil {
+		return jobcontract.RuntimeMountObservation{}, err
+	}
+	return jobcontract.RuntimeMountObservation{Role: role, AuthoritySource: authoritySource, PermissionPolicy: permissionPolicy, Source: semanticSource, Target: target, Mode: mode, Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: fileType, SHA256: digest, IdentityVerified: true}, nil
+}
+
+func filesystemIdentityAt(path string) (FilesystemIdentity, error) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return FilesystemIdentity{}, errors.New("filesystem identity is not a non-symlink directory")
+	}
+	return filesystemIdentity(info)
+}
+
+func filesystemIdentity(info fs.FileInfo) (FilesystemIdentity, error) {
+	if info == nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return FilesystemIdentity{}, errors.New("filesystem identity is not a non-symlink directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Dev == 0 || stat.Ino == 0 {
+		return FilesystemIdentity{}, errors.New("filesystem device and inode are unavailable")
+	}
+	return FilesystemIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}, nil
+}
+
+func boundedSourceContentDigest(ctx context.Context, source string, info fs.FileInfo) (string, error) {
+	digest, err := sourcetree.ContentDigest(ctx, source)
+	if err != nil {
+		return "", err
+	}
+	after, err := os.Lstat(source)
+	if err != nil || !os.SameFile(info, after) || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) {
+		return "", errors.New("source changed during bounded content digest")
+	}
+	return digest, nil
+}
+
+func boundedSourceTreeDigest(ctx context.Context, source string, info fs.FileInfo) (string, error) {
+	digest, _, err := boundedSourceTreeAndProjectionDigests(ctx, source, info)
+	return digest, err
+}
+
+func boundedSourceTreeAndProjectionDigests(ctx context.Context, source string, info fs.FileInfo) (string, string, error) {
+	digest, projected, err := sourcetree.DigestAndReadOnlyProjection(ctx, source)
+	if err != nil {
+		return "", "", err
+	}
+	after, err := os.Lstat(source)
+	if err != nil || !os.SameFile(info, after) || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) || info.Mode().Perm() != after.Mode().Perm() {
+		return "", "", errors.New("source changed during bounded content-and-mode digest")
+	}
+	return digest, projected, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
+}
+
+func verifyMountFacts(ctx context.Context, facts []jobcontract.RuntimeMountObservation, mounts []backend.Mount) error {
+	for _, expected := range facts {
+		observedSource := ""
+		for _, mount := range mounts {
+			if mount.Target == expected.Target && mount.Mode == expected.Mode {
+				observedSource = mount.Source
+			}
+		}
+		if observedSource == "" {
+			return fmt.Errorf("mount %q observed source is unavailable", expected.Target)
+		}
+		observed, err := captureSourceFact(ctx, observedSource, expected.AuthoritySource, expected.Target, expected.Mode, expected.Role, expected.SHA256 != "")
+		if err != nil || observed.Source != expected.Source || observed.Device != expected.Device || observed.Inode != expected.Inode || observed.FileType != expected.FileType || observed.Role != expected.Role || observed.AuthoritySource != expected.AuthoritySource || observed.SHA256 != expected.SHA256 || observed.PermissionPolicy != expected.PermissionPolicy {
+			return fmt.Errorf("mount %q source identity changed", expected.Target)
+		}
+	}
+	return nil
+}
+
+func jobMounts(layout worldfs.Layout, result plan.Result, readOnlySnapshots map[string]readOnlySnapshot) ([]backend.Mount, error) {
+	mounts := []backend.Mount{}
+	targets := []string{jobHelperPath, jobLifecyclePath}
+	for _, target := range result.Plan.Workspace {
+		if overlappingContainerTarget(target, targets) {
+			return nil, fmt.Errorf("workspace target %q overlaps another runtime-owned target", target)
+		}
+		source, err := layout.EnsurePortableWritableWorkspace(target)
+		if err != nil {
+			return nil, err
+		}
+		mounts = append(mounts, backend.Mount{Source: source, Target: target, Mode: "rw"})
+		targets = append(targets, target)
+	}
+	for _, mount := range result.Plan.Mounts {
+		if overlappingContainerTarget(mount.Target, targets) {
+			return nil, fmt.Errorf("mount target %q overlaps another runtime-owned target", mount.Target)
+		}
+		if err := validateMountSource(mount.Source); err != nil {
+			return nil, fmt.Errorf("runtime control socket mount is forbidden: %s", mount.Source)
+		}
+		observedType, err := runtimeMountSourceType(mount.Source)
+		if err != nil || observedType != mount.SourceType {
+			return nil, fmt.Errorf("mount %q source type changed after planning", mount.Target)
+		}
+		source := mount.Source
+		if mount.Mode == "ro" {
+			snapshot, ok := readOnlySnapshots[mount.Target]
+			if !ok {
+				return nil, fmt.Errorf("read-only mount %q lacks an immutable snapshot", mount.Target)
+			}
+			source = snapshot.path
+		}
+		mounts = append(mounts, backend.Mount{Source: source, Target: mount.Target, Mode: mount.Mode})
+		targets = append(targets, mount.Target)
+	}
+	return mounts, nil
+}
+
+func runtimeMountSourceType(source string) (string, error) {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("mount source is a symlink")
+	}
+	if info.IsDir() {
+		return "directory", nil
+	}
+	if info.Mode().IsRegular() {
+		return "file", nil
+	}
+	return "", errors.New("mount source is neither a regular file nor a directory")
+}
+
+func overlappingContainerTarget(candidate string, existing []string) bool {
+	for _, target := range existing {
+		if candidate == target || strings.HasPrefix(candidate, target+"/") || strings.HasPrefix(target, candidate+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func pathIsAbsoluteCommand(value string) bool {
+	return filepath.IsAbs(value) && filepath.Clean(value) == value
+}
+
+func validateMountSource(source string) error {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+		return errors.New("mount source is not a regular non-symlink file or directory")
+	}
+	canonical := canonicalHostPath(source)
+	for _, item := range protectedRuntimeEndpoints() {
+		if item != "" && hostPathsOverlap(canonical, canonicalHostPath(item)) {
+			return fmt.Errorf("mount source overlaps protected host path %q", item)
+		}
+	}
+	return nil
+}
+
+func protectedRuntimeEndpoints() []string {
+	uid := fmt.Sprint(os.Getuid())
+	protected := []string{
+		filepath.Join("/run/user", uid, "podman", "podman.sock"),
+		filepath.Join("/run/user", uid, "docker.sock"),
+		"/run/podman/podman.sock",
+		"/run/docker.sock",
+		"/var/run/podman/podman.sock",
+		"/var/run/docker.sock",
+	}
+	if runtimeDir := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")); runtimeDir != "" {
+		protected = append(protected,
+			filepath.Join(runtimeDir, "podman", "podman.sock"),
+			filepath.Join(runtimeDir, "docker.sock"),
+		)
+	}
+	for _, variable := range []string{"CONTAINER_HOST", "DOCKER_HOST"} {
+		if endpoint := strings.TrimSpace(os.Getenv(variable)); strings.HasPrefix(endpoint, "unix://") {
+			protected = append(protected, strings.TrimPrefix(endpoint, "unix://"))
+		}
+	}
+	return protected
+}
+
+func canonicalHostPath(value string) string {
+	clean := filepath.Clean(value)
+	if evaluated, err := filepath.EvalSymlinks(clean); err == nil {
+		return filepath.Clean(evaluated)
+	}
+	return clean
+}
+
+func hostPathsOverlap(left, right string) bool {
+	return left == right || strings.HasPrefix(left, right+string(os.PathSeparator)) || strings.HasPrefix(right, left+string(os.PathSeparator))
+}
+
+func materializeCopies(ctx context.Context, podman *backend.Podman, layout worldfs.Layout, container string, result plan.Result) error {
+	for index, copy := range result.Plan.Copies {
+		live, err := plan.DigestSourceContext(ctx, copy.Source)
+		if err != nil || live != copy.SourceDigest {
+			return fmt.Errorf("copy source %s changed after planning", copy.Source)
+		}
+		stage, err := layout.StageSourceContext(ctx, generation, index, copy.Source, copy.Mode)
+		if err != nil {
+			return err
+		}
+		staged, err := plan.DigestSourceContext(ctx, stage)
+		if err != nil || staged != copy.SourceDigest {
+			return fmt.Errorf("staging did not preserve copy source %s", copy.Source)
+		}
+		if err := layout.ApplyStageMode(stage, copy.Mode); err != nil {
+			return err
+		}
+		if err := podman.Copy(ctx, container, stage, copy.Target); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(stage); err != nil {
+			return fmt.Errorf("remove materialized copy staging: %w", err)
+		}
+	}
+	return nil
+}
+
+func configureProcess(command *exec.Cmd) {
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}

@@ -1,6 +1,7 @@
 package decl
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,14 @@ func TestValidateAcceptsExactLocalImageID(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsOptionShapedPinnedImageReference(t *testing.T) {
+	d, dir := validForValidation(t)
+	d.World.Base = "--pull=always@sha256:" + strings.Repeat("a", 64)
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "image reference") {
+		t.Fatalf("option-shaped image accepted: %v", err)
+	}
+}
+
 func TestValidateRejectsPermissiveSecret(t *testing.T) {
 	d, dir := validForValidation(t)
 	if err := os.Chmod(filepath.Join(dir, "secret"), 0o640); err != nil {
@@ -87,6 +96,37 @@ func TestValidateChecksEverySecretTreeNode(t *testing.T) {
 	if err := Validate(d, dir); err != nil {
 		t.Fatalf("private secret tree rejected: %v", err)
 	}
+}
+
+func TestValidateRejectsNestedSecretSymlinkAndSpecialNode(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		d, dir := validForValidation(t)
+		secretDir := filepath.Join(dir, "secret-dir")
+		if err := os.Mkdir(secretDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(dir, "secret"), filepath.Join(secretDir, "alias")); err != nil {
+			t.Fatal(err)
+		}
+		d.Copies[0].Source = "secret-dir"
+		if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("nested secret symlink = %v", err)
+		}
+	})
+	t.Run("special node", func(t *testing.T) {
+		d, dir := validForValidation(t)
+		secretDir := filepath.Join(dir, "secret-dir")
+		if err := os.Mkdir(secretDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(filepath.Join(secretDir, "pipe"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		d.Copies[0].Source = "secret-dir"
+		if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "unsupported node") {
+			t.Fatalf("nested secret special node = %v", err)
+		}
+	})
 }
 
 func TestValidateRejectsSpecialMountSource(t *testing.T) {
@@ -121,9 +161,25 @@ func TestValidateRejectsDuplicateNetworkAndServices(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 	d, dir = validForValidation(t)
+	d.Network.Allow = []NetworkAllow{{Host: "example.com", Port: 443}, {Host: "example.com.", Port: 443}}
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "duplicate network") {
+		t.Fatalf("trailing-dot duplicate = %v", err)
+	}
+	d, dir = validForValidation(t)
 	d.Services = append(d.Services, d.Services[0])
 	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "duplicate service") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestValidateBoundsGovernedNetworkDestinations(t *testing.T) {
+	d, dir := validForValidation(t)
+	d.Network.Allow = make([]NetworkAllow, 257)
+	for index := range d.Network.Allow {
+		d.Network.Allow[index] = NetworkAllow{Host: fmt.Sprintf("host-%03d.example", index), Port: 443}
+	}
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "256") {
+		t.Fatalf("network destination bound = %v", err)
 	}
 }
 
@@ -182,5 +238,41 @@ func TestValidateRejectsSymlinkedSource(t *testing.T) {
 	d.Mounts[0].Source = "linked"
 	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestValidateRejectsSymlinkedIntermediateSource(t *testing.T) {
+	d, dir := validForValidation(t)
+	if err := os.Mkdir(filepath.Join(dir, "real"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "real", "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	d.Mounts[0].Source = "linked/file"
+	if err := Validate(d, dir); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestResolveSourceCanonicalizesTrustedDeclarationDirectory(t *testing.T) {
+	d, dir := validForValidation(t)
+	resolved, err := ResolveSource(dir, d.Mounts[0].Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(canonicalDir, d.Mounts[0].Source)
+	if resolved != want {
+		t.Fatalf("resolved source = %q, want %q", resolved, want)
+	}
+	if err := Validate(d, dir); err != nil {
+		t.Fatalf("trusted declaration-directory alias rejected: %v", err)
 	}
 }

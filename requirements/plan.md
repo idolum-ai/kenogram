@@ -6,9 +6,19 @@ Planning resolves source paths relative to the declaration directory and cleans
 all absolute target paths. A semantic plan is encoded as JSON from fixed-order
 struct fields. Declaration formatting and comments cannot affect this encoding.
 Copied source files and trees are deterministically content-digested into the
-plan; changing configuration bytes changes its exact fingerprint. Live mounts
-and carried workspace are evidenced separately because their bytes intentionally
-drift.
+plan; changing configuration bytes changes its exact fingerprint. A live mount's
+resolved authority path, target, mode, and planned file-or-directory source type
+are semantic fields. Live mount bytes and carried workspace are evidenced
+separately because their contents intentionally drift.
+
+All source-tree planning and digest work uses the shared descriptor-rooted,
+context-aware traversal boundary: at most 20,000 entries, 1 GiB of regular-file
+content, depth 128, and 4,096 bytes per relative path. Symlinks and special
+nodes fail closed. The same walker performs runtime copy and snapshot staging,
+and validates permissions across secret trees, so planning cannot admit a tree
+that staging silently traverses under different resource rules. Governed
+preparation threads its caller context through declaration validation and fails
+before provider preflight on cancellation or a source-tree bound violation.
 
 Named loopback interfaces are semantic plan fields. Changing a name or address
 therefore changes the plan digest and requires ordinary generation replacement.
@@ -30,6 +40,17 @@ produce that marker.
 The plan digest is lowercase SHA-256 over the canonical semantic JSON followed by
 one newline. The declaration digest is lowercase SHA-256 over the exact input
 bytes. Both are printed by dry-run and present in JSON output.
+
+Machine JSON also carries `evidence_digest`, the independently recomputable
+SHA-256 of the same plan after each secret copy's content digest is replaced by
+the literal `<redacted>`. When planning has a producer filesystem context, the
+machine result also retains its canonical declaration-directory
+`source_anchor`, and that anchor participates in `evidence_digest`. Relative
+sources can therefore be re-projected lexically on an isolated audit host
+without reopening the producer checkout. The operational `plan_digest` remains
+independent of checkout location and continues to change when secret source
+bytes change, but an offline evidence consumer is not asked to guess those
+bytes in order to verify the retained public projection.
 
 These digests establish provenance and conservative operational equality. They
 do not define behavioral or ontological identity: different realizations may

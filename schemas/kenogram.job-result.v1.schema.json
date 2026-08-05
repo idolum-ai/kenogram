@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://idolum.ai/kenogram/schemas/kenogram.job-result.v1.schema.json",
+  "title": "Kenogram governed job result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "job_id", "status", "request_sha256", "evidence_manifest", "identity", "target", "stdout", "stderr", "finalization", "cleanup", "reasons"],
+  "properties": {
+    "schema": {"const": "kenogram.job-result.v1"},
+    "job_id": {"$ref": "#/$defs/id"},
+    "status": {"enum": ["complete", "incomplete", "refused"]},
+    "request_sha256": {"$ref": "#/$defs/digest"},
+    "evidence_manifest": {"const": "manifest.json"},
+    "identity": {"$ref": "#/$defs/identity"},
+    "target": {"$ref": "#/$defs/target"},
+    "stdout": {"$ref": "#/$defs/stream"},
+    "stderr": {"$ref": "#/$defs/stream"},
+    "finalization": {"$ref": "#/$defs/finalization"},
+    "cleanup": {"$ref": "#/$defs/cleanup"},
+    "reasons": {"$ref": "#/$defs/reasons"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "complete"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "reasons": {"maxItems": 0},
+          "target": {"not": {"properties": {"kind": {"enum": ["not_started", "unknown"]}}, "required": ["kind"]}},
+          "stdout": {"properties": {"truncated": {"const": false}}},
+          "stderr": {"properties": {"truncated": {"const": false}}},
+          "cleanup": {"properties": {"status": {"const": "complete"}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"enum": ["incomplete", "refused"]}}, "required": ["status"]},
+      "then": {"properties": {"reasons": {"minItems": 1}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "refused"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "target": {"properties": {"kind": {"const": "not_started"}}},
+          "cleanup": {"properties": {"status": {"const": "complete"}}}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "wire_nonnegative": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "timestamp": {"type": "string", "format": "date-time", "maxLength": 64},
+    "reasons": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"}
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["declaration_sha256", "plan_sha256", "generation", "image_reference", "image_digest", "runtime_evidence_sha256", "provenance_sha256", "runtime_provider"],
+      "properties": {
+        "declaration_sha256": {"$ref": "#/$defs/digest"},
+        "plan_sha256": {"$ref": "#/$defs/digest"},
+        "generation": {"$ref": "#/$defs/wire_nonnegative"},
+        "image_reference": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000]+$"},
+        "image_digest": {"oneOf": [{"const": ""}, {"$ref": "#/$defs/digest"}]},
+        "runtime_evidence_sha256": {"oneOf": [{"const": ""}, {"$ref": "#/$defs/digest"}]},
+        "egress_sha256": {"$ref": "#/$defs/digest"},
+        "provenance_sha256": {"$ref": "#/$defs/digest"},
+        "runtime_provider": {"type": "string", "enum": ["", "podman-cli"]}
+      }
+    },
+    "target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "exit_status", "started_at", "finished_at", "duration_ns"],
+          "properties": {
+            "kind": {"const": "exited"},
+            "exit_status": {"type": "integer", "minimum": 0, "maximum": 255},
+            "started_at": {"$ref": "#/$defs/timestamp"},
+            "finished_at": {"$ref": "#/$defs/timestamp"},
+            "duration_ns": {"$ref": "#/$defs/wire_nonnegative"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "signal", "started_at", "finished_at", "duration_ns"],
+          "properties": {
+            "kind": {"const": "signaled"},
+            "signal": {"type": "integer", "minimum": 1, "maximum": 64},
+            "started_at": {"$ref": "#/$defs/timestamp"},
+            "finished_at": {"$ref": "#/$defs/timestamp"},
+            "duration_ns": {"$ref": "#/$defs/wire_nonnegative"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {"kind": {"const": "not_started"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {"kind": {"const": "unknown"}}
+        }
+      ]
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "captured_bytes", "total_bytes", "truncated"],
+      "properties": {
+        "path": {"enum": ["stdout.bin", "stderr.bin"]},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "captured_bytes": {"$ref": "#/$defs/wire_nonnegative"},
+        "total_bytes": {"$ref": "#/$defs/wire_nonnegative"},
+        "truncated": {"type": "boolean"}
+      }
+    },
+    "finalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["started_at", "finished_at", "duration_ns"],
+      "properties": {
+        "started_at": {"$ref": "#/$defs/timestamp"},
+        "finished_at": {"$ref": "#/$defs/timestamp"},
+        "duration_ns": {"$ref": "#/$defs/wire_nonnegative"}
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "container_absent", "proxy_absent", "process_group_empty", "forced", "duration_ns", "reasons"],
+      "properties": {
+        "status": {"enum": ["complete", "incomplete"]},
+        "container_absent": {"type": "boolean"},
+        "proxy_absent": {"type": "boolean"},
+        "process_group_empty": {"type": "boolean"},
+        "forced": {"type": "boolean"},
+        "duration_ns": {"$ref": "#/$defs/wire_nonnegative"},
+        "reasons": {"$ref": "#/$defs/reasons"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "complete"}}, "required": ["status"]},
+          "then": {
+            "properties": {
+              "container_absent": {"const": true},
+              "proxy_absent": {"const": true},
+              "process_group_empty": {"const": true},
+              "reasons": {"maxItems": 0}
+            }
+          },
+          "else": {"properties": {"reasons": {"minItems": 1}}}
+        }
+      ]
+    }
+  }
+}

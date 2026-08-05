@@ -212,11 +212,20 @@ func Prepare(path string) (Prepared, error) {
 	return PrepareBytes(raw, path)
 }
 func PrepareBytes(raw []byte, path string) (Prepared, error) {
+	return PrepareBytesContext(context.Background(), raw, path)
+}
+
+// PrepareBytesContext threads cancellation through source-tree validation and
+// digest work while preserving the ordinary preparation API.
+func PrepareBytesContext(ctx context.Context, raw []byte, path string) (Prepared, error) {
+	if err := ctx.Err(); err != nil {
+		return Prepared{}, err
+	}
 	d, err := decl.Parse(raw)
 	if err != nil {
 		return Prepared{}, fmt.Errorf("parse declaration: %w", err)
 	}
-	result, err := plan.Build(d, path, raw)
+	result, err := plan.BuildContext(ctx, d, path, raw)
 	if err != nil {
 		return Prepared{}, fmt.Errorf("validate declaration: %w", err)
 	}
@@ -1125,11 +1134,11 @@ func (a *App) liveProxyIdentity(l worldfs.Layout) (proxyProcessIdentity, bool) {
 	if err != nil || pid <= 1 || lockfile.ProcessStart(pid) != fields[1] {
 		return proxyProcessIdentity{}, false
 	}
-	cmdline, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	cmdline, err := lockfile.ProcessCommand(pid)
 	if err != nil {
 		return proxyProcessIdentity{}, false
 	}
-	if !strings.Contains(string(cmdline), "_proxy") || !strings.Contains(string(cmdline), l.ProxySocket) {
+	if !strings.Contains(cmdline, "_proxy") || !strings.Contains(cmdline, l.ProxySocket) {
 		return proxyProcessIdentity{}, false
 	}
 	if err := syscall.Kill(pid, 0); err != nil {
@@ -1494,10 +1503,25 @@ func canonicalHostPath(path string) string {
 	if err != nil {
 		return filepath.Clean(path)
 	}
-	if evaluated, err := filepath.EvalSymlinks(absolute); err == nil {
-		return filepath.Clean(evaluated)
+	return canonicalizeExistingAncestor(absolute)
+}
+
+func canonicalizeExistingAncestor(value string) string {
+	clean := filepath.Clean(value)
+	candidate := clean
+	suffix := []string{}
+	for {
+		if evaluated, err := filepath.EvalSymlinks(candidate); err == nil {
+			parts := append([]string{filepath.Clean(evaluated)}, suffix...)
+			return filepath.Join(parts...)
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			return clean
+		}
+		suffix = append([]string{filepath.Base(candidate)}, suffix...)
+		candidate = parent
 	}
-	return filepath.Clean(absolute)
 }
 
 func hostPathsOverlap(first, second string) bool {
@@ -1506,29 +1530,23 @@ func hostPathsOverlap(first, second string) bool {
 	if firstErr != nil || secondErr != nil {
 		return false
 	}
-	first, second = filepath.Clean(first), filepath.Clean(second)
-	if evaluated, err := filepath.EvalSymlinks(first); err == nil {
-		first = filepath.Clean(evaluated)
-	}
-	if evaluated, err := filepath.EvalSymlinks(second); err == nil {
-		second = filepath.Clean(evaluated)
-	}
+	first, second = canonicalizeExistingAncestor(first), canonicalizeExistingAncestor(second)
 	return first == second || strings.HasPrefix(first, second+string(os.PathSeparator)) || strings.HasPrefix(second, first+string(os.PathSeparator))
 }
 func (a *App) materialize(ctx context.Context, l worldfs.Layout, container string, generation int64, p Prepared) error {
 	for i, c := range p.Result.Plan.Copies {
-		liveDigest, err := plan.DigestSource(c.Source)
+		liveDigest, err := plan.DigestSourceContext(ctx, c.Source)
 		if err != nil {
 			return err
 		}
 		if liveDigest != c.SourceDigest {
 			return fmt.Errorf("copy source %s changed after planning", c.Source)
 		}
-		stage, err := l.StageSource(generation, i, c.Source, c.Mode)
+		stage, err := l.StageSourceContext(ctx, generation, i, c.Source, c.Mode)
 		if err != nil {
 			return err
 		}
-		stagedDigest, err := plan.DigestSource(stage)
+		stagedDigest, err := plan.DigestSourceContext(ctx, stage)
 		if err != nil {
 			return err
 		}
@@ -1762,11 +1780,11 @@ func (a *App) stopProxy(l worldfs.Layout) error {
 		if start != fields[1] {
 			return fmt.Errorf("proxy PID %d was reused; ownership is uncertain", pid)
 		}
-		cmdline, readErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+		cmdline, readErr := lockfile.ProcessCommand(pid)
 		if readErr != nil {
 			return fmt.Errorf("observe proxy PID %d: %w", pid, readErr)
 		}
-		if !strings.Contains(string(cmdline), "_proxy") || !strings.Contains(string(cmdline), l.ProxySocket) {
+		if !strings.Contains(cmdline, "_proxy") || !strings.Contains(cmdline, l.ProxySocket) {
 			return fmt.Errorf("proxy PID %d ownership is uncertain", pid)
 		}
 		if killErr := syscall.Kill(pid, syscall.SIGTERM); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {

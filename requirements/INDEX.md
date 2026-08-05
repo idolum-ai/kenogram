@@ -19,6 +19,8 @@ work are documented in [`../docs/kenogrammatics.md`](../docs/kenogrammatics.md).
 5. [`network.md`](network.md) — ten normative absence and proxy invariants.
 6. [`lifecycle.md`](lifecycle.md) — materialization and binary replacement contract.
 7. [`history.md`](history.md) — durable state, evidence, and hash-chain contract.
+8. [`jobs.md`](jobs.md) — bounded governed-job request, result, evidence, and cleanup contract.
+9. [`provenance.md`](provenance.md) — immutable executable and release identity contract.
 
 ## Evidence and known limits
 
@@ -37,6 +39,8 @@ evaluation but outside the supported Linux runtime promise.
 | Lifecycle | Durable rollback/commit transition, persisted-runtime 15-boundary SIGKILL recovery-only matrix, stopped-commit restart, terminal transition destruction, replay-safe service acknowledgement, Engram E2E, and isolated OpenClaw/Hermes replacement | Syscall-granular power-loss testing and exhaustive non-`up` action failpoints | Before stable |
 | History | Tamper/truncated-tail unit tests plus E2E tombstone outcomes | Power-loss testing on multiple filesystems | Before stable |
 | Experimental Apple transport | Canonical shell-inert argv envelope, explicit stdin/TTY flags, remote exit-status preservation, graceful signal forwarding, Darwin/arm64 cross-build, and native macOS launcher smoke test | Real Apple machine argv/TTY/signal proof, nested rootless Podman, and the full lifecycle/network matrix | Experimental |
+| Governed jobs | Closed bounded schemas and validators; context-ignoring-provider deadline regressions; unavoidable cleanup after admission; descriptor-bound request and artifact readers; shared bounded source traversal; writable socket/endpoint-alias refusal; semantic runtime mount sources; fixed-authority offline verification; secret-safe verifiable read-only and ephemeral-workspace permission projections; declared/observed image cross-binding; descriptor-owned create-only evidence and seal durability; K5 direct one-shot provider with joined Wait/finalization lifecycles, create-only namespace-cleanup authority, Podman 4.9 portable writable semantics, strict cross-phase runtime and authenticated target-lifecycle evidence; K6 namespace-pinned exact-destination egress with reserved target environment, bounded metadata-only lifecycle evidence, revocation/join proof, and hostile identity/policy tests; opt-in Linux exact-image, target, timeout/orphan, network-none, mount, secret, workspace/artifact, cleanup, and egress proof | Darwin uses explicit Linux-machine handoff and makes no local namespace claim; exact-head hosted K6 producer/replay and release-candidate replay remain required | Experimental |
+| Executable provenance | Closed release/development identity schema and semantic placeholder rejection | Machine JSON output, full-SHA release packaging, canonical release manifest, and external attestation are intentionally absent | Experimental |
 
 ### Design evidence outside the binding contract
 
@@ -76,5 +80,12 @@ evaluation but outside the supported Linux runtime promise.
   rootless Podman `vfs` stores before pulling. Unmeasured `vfs` lanes require an
   explicit local floor; unit contracts use fake responses and capacity probes.
 - `make architecture` checks required files and package dependency direction.
+- `go test ./internal/jobcontract ./internal/job` proves the governed-job and
+  executable-provenance documents plus hostile publication, cancellation,
+  artifact, and offline re-verification behavior.
+- `go test ./internal/jobenv ./internal/jobpodman` proves the bounded secret-safe
+  stdin handoff and adversarial direct-provider state machine. The governed-job
+  scenarios are included in opt-in `make integration` on Linux with rootless
+  Podman; Darwin compilation does not replace that enforcement proof.
 - `make stdlib-only` rejects third-party Go modules.
 - `make check` runs the fast local quality gate; runtime proofs remain separate.

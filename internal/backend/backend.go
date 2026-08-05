@@ -2,6 +2,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,12 +10,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/idolum-ai/kenogram/internal/lockfile"
+	"github.com/idolum-ai/kenogram/internal/mountpath"
 	"github.com/idolum-ai/kenogram/internal/plan"
 )
 
@@ -22,6 +25,10 @@ type Runner interface {
 	Run(context.Context, string, ...string) ([]byte, error)
 	Start(context.Context, string, ...string) error
 	Interactive(context.Context, string, ...string) error
+}
+
+type joinedProcessGroupRunner interface {
+	RunJoinedProcessGroup(context.Context, string, ...string) ([]byte, error)
 }
 
 // SignalCause records the signal that canceled an operation context so an
@@ -42,6 +49,39 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 		return nil, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+// RunJoinedProcessGroup gives namespace helpers a stronger cancellation
+// boundary than exec.CommandContext: the helper and every descendant in its
+// process group are killed, and the direct child is always waited before this
+// method returns.
+func (ExecRunner) RunJoinedProcessGroup(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	command := exec.Command(name, args...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var output bytes.Buffer
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Start(); err != nil {
+		return nil, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			return nil, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(output.String()))
+		}
+		return output.Bytes(), nil
+	case <-ctx.Done():
+		killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		if errors.Is(killErr, syscall.ESRCH) {
+			killErr = nil
+		}
+		waitErr := <-done
+		return nil, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), errors.Join(ctx.Err(), killErr, waitErr))
+	}
 }
 func (ExecRunner) Start(ctx context.Context, name string, args ...string) error {
 	command := exec.CommandContext(ctx, name, args...)
@@ -169,11 +209,52 @@ type Mount struct {
 
 func (p *Podman) Create(ctx context.Context, result plan.Result, generation int64, mounts []Mount) (string, error) {
 	name := ContainerName(result.Plan.Name, generation)
-	args := []string{"create", "--name", name, "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--image-volume", "ignore", "--hostname", result.Plan.World.Hostname, "--user", result.Plan.World.User, "--workdir", result.Plan.World.Workdir, "--cpus", strconv.FormatInt(result.Plan.Resources.CPUs, 10), "--memory", strconv.FormatInt(result.Plan.Resources.MemoryBytes, 10), "--pids-limit", strconv.FormatInt(result.Plan.Resources.PIDs, 10), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=" + result.Plan.Name, "--label", "io.kenogram.generation=" + strconv.FormatInt(generation, 10), "--label", "io.kenogram.plan-digest=" + result.PlanDigest, "--label", "io.kenogram.declaration-digest=" + result.DeclarationDigest, "--env", "NO_PROXY=localhost,127.0.0.1"}
-	if len(result.Plan.NetworkAllow) > 0 {
+	return p.CreateNamed(ctx, name, result, generation, mounts)
+}
+
+// CreateNamed creates one generation under a caller-owned collision-resistant
+// name while retaining the declaration and plan labels used by verification.
+func (p *Podman) CreateNamed(ctx context.Context, name string, result plan.Result, generation int64, mounts []Mount) (string, error) {
+	return p.CreateNamedWithLabels(ctx, name, result, generation, mounts, nil)
+}
+
+func (p *Podman) CreateNamedWithLabels(ctx context.Context, name string, result plan.Result, generation int64, mounts []Mount, labels map[string]string) (string, error) {
+	return p.createNamedWithLabels(ctx, name, result, generation, mounts, labels, "/usr/bin/tail", []string{"-f", "/dev/null"}, false)
+}
+
+// CreateGovernedJob creates a one-shot job holder whose executable is supplied
+// by Kenogram itself rather than trusting the declared image entrypoint or
+// requiring target-local shell utilities.
+func (p *Podman) CreateGovernedJob(ctx context.Context, name string, result plan.Result, generation int64, mounts []Mount, labels map[string]string, helperPath string) (string, error) {
+	if !filepath.IsAbs(helperPath) || filepath.Clean(helperPath) != helperPath {
+		return "", errors.New("governed job helper path must be absolute and clean")
+	}
+	return p.createNamedWithLabels(ctx, name, result, generation, mounts, labels, helperPath, []string{"_job-hold"}, true)
+}
+
+func (p *Podman) createNamedWithLabels(ctx context.Context, name string, result plan.Result, generation int64, mounts []Mount, labels map[string]string, entrypoint string, command []string, returnID bool) (string, error) {
+	args := []string{"create", "--name", name, "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--image-volume", "ignore", "--hostname", result.Plan.World.Hostname, "--user", result.Plan.World.User, "--workdir", result.Plan.World.Workdir, "--cpus", strconv.FormatInt(result.Plan.Resources.CPUs, 10), "--memory", strconv.FormatInt(result.Plan.Resources.MemoryBytes, 10), "--pids-limit", strconv.FormatInt(result.Plan.Resources.PIDs, 10), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=" + result.Plan.Name, "--label", "io.kenogram.generation=" + strconv.FormatInt(generation, 10), "--label", "io.kenogram.plan-digest=" + result.PlanDigest, "--label", "io.kenogram.declaration-digest=" + result.DeclarationDigest}
+	if !returnID {
+		args = append(args, "--env", "NO_PROXY=localhost,127.0.0.1")
+	}
+	labelNames := make([]string, 0, len(labels))
+	for key := range labels {
+		labelNames = append(labelNames, key)
+	}
+	sort.Strings(labelNames)
+	for _, key := range labelNames {
+		args = append(args, "--label", key+"="+labels[key])
+	}
+	if len(result.Plan.NetworkAllow) > 0 && !returnID {
 		args = append(args, "--env", "HTTP_PROXY=http://127.0.0.1:3128", "--env", "HTTPS_PROXY=http://127.0.0.1:3128")
 	}
 	for _, m := range mounts {
+		if err := ValidateMountArgumentPath(m.Source); err != nil {
+			return "", fmt.Errorf("invalid mount source: %w", err)
+		}
+		if err := ValidateMountArgumentPath(m.Target); err != nil {
+			return "", fmt.Errorf("invalid mount target: %w", err)
+		}
 		options := m.Mode + ",nodev,nosuid"
 		if m.NoExec {
 			options += ",noexec"
@@ -183,14 +264,69 @@ func (p *Podman) Create(ctx context.Context, result plan.Result, generation int6
 	// A declaration owns the world's process model. Explicitly replace any
 	// image entrypoint so a base image cannot run bootstrap code before the
 	// inert holder or reinterpret tail's arguments as its own command.
-	args = append(args, "--entrypoint", "/usr/bin/tail", result.Plan.World.Base, "-f", "/dev/null")
-	if _, err := p.Runner.Run(ctx, p.Binary, args...); err != nil {
+	// End provider option parsing before the image reference. The declaration
+	// validator also rejects option-shaped references, but this delimiter keeps
+	// the execution boundary safe if a future parser accidentally regresses.
+	args = append(args, "--entrypoint", entrypoint, "--", result.Plan.World.Base)
+	args = append(args, command...)
+	raw, err := p.Runner.Run(ctx, p.Binary, args...)
+	if err != nil {
 		return "", err
+	}
+	if returnID {
+		id := strings.TrimSpace(string(raw))
+		if len(id) != 64 {
+			return "", errors.New("podman create did not return an immutable container ID")
+		}
+		for _, character := range id {
+			if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+				return "", errors.New("podman create returned an invalid container ID")
+			}
+		}
+		return id, nil
 	}
 	return name, nil
 }
+
+// ValidateMountArgumentPath rejects bytes that the Podman --mount key/value
+// grammar can reinterpret as field separators, assignments, quoting, or
+// escaping. Each accepted path remains one unambiguous structured argv value.
+func ValidateMountArgumentPath(value string) error {
+	return mountpath.Validate(value)
+}
 func (p *Podman) Copy(ctx context.Context, container, source, target string) error {
 	_, err := p.Runner.Run(ctx, p.Binary, "cp", source, container+":"+target)
+	return err
+}
+
+func (p *Podman) MountRoot(ctx context.Context, container string) (string, error) {
+	raw, err := p.Runner.Run(ctx, p.Binary, "mount", container)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) != 1 || !filepath.IsAbs(fields[0]) || filepath.Clean(fields[0]) != fields[0] {
+		return "", errors.New("podman mount returned an invalid root path")
+	}
+	return fields[0], nil
+}
+
+func (p *Podman) Unmount(ctx context.Context, container string) error {
+	_, err := p.Runner.Run(ctx, p.Binary, "unmount", container)
+	return err
+}
+
+func (p *Podman) RunUnshare(ctx context.Context, command []string) error {
+	if len(command) == 0 || command[0] == "" {
+		return errors.New("podman unshare command must not be empty")
+	}
+	args := append([]string{"unshare"}, command...)
+	var err error
+	if runner, ok := p.Runner.(joinedProcessGroupRunner); ok {
+		_, err = runner.RunJoinedProcessGroup(ctx, p.Binary, args...)
+	} else {
+		_, err = p.Runner.Run(ctx, p.Binary, args...)
+	}
 	return err
 }
 func (p *Podman) Start(ctx context.Context, name string) error {
@@ -198,7 +334,19 @@ func (p *Podman) Start(ctx context.Context, name string) error {
 	return err
 }
 func (p *Podman) Stop(ctx context.Context, name string) error {
-	_, err := p.Runner.Run(ctx, p.Binary, "stop", "--time", "10", name)
+	return p.StopWithin(ctx, name, 10)
+}
+
+func (p *Podman) StopWithin(ctx context.Context, name string, seconds int) error {
+	if seconds < 0 || seconds > 600 {
+		return fmt.Errorf("invalid stop timeout %d", seconds)
+	}
+	_, err := p.Runner.Run(ctx, p.Binary, "stop", "--time", strconv.Itoa(seconds), name)
+	return err
+}
+
+func (p *Podman) Kill(ctx context.Context, name string) error {
+	_, err := p.Runner.Run(ctx, p.Binary, "kill", "--signal", "KILL", name)
 	return err
 }
 func (p *Podman) Destroy(ctx context.Context, name string) error {
@@ -215,6 +363,29 @@ func (p *Podman) Exists(ctx context.Context, name string) (bool, error) {
 	}
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.TrimSpace(line) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ExistsID observes an immutable full container ID without consulting its
+// mutable display name.
+func (p *Podman) ExistsID(ctx context.Context, id string) (bool, error) {
+	if len(id) != 64 {
+		return false, errors.New("container ID is invalid")
+	}
+	for _, character := range id {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false, errors.New("container ID is invalid")
+		}
+	}
+	raw, err := p.Runner.Run(ctx, p.Binary, "ps", "--all", "--no-trunc", "--format", "{{.ID}}")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == id {
 			return true, nil
 		}
 	}
@@ -240,10 +411,13 @@ func (p *Podman) Attach(ctx context.Context, name string, command []string) erro
 }
 
 type Evidence struct {
+	ID                     string
 	Name                   string
 	Running                bool
 	PID                    int
 	ProcessStart           string
+	ImageReference         string
+	ImageDigest            string
 	NetworkMode            string
 	IPCMode                string
 	IPCIsolatedFromHost    bool
@@ -278,7 +452,10 @@ type EvidenceMount struct {
 	IdentityVerified bool
 }
 type inspectDocument struct {
+	ID           string   `json:"Id"`
 	Name         string   `json:"Name"`
+	Image        string   `json:"Image"`
+	ImageDigest  string   `json:"ImageDigest"`
 	BoundingCaps []string `json:"BoundingCaps"`
 	State        struct {
 		Running bool `json:"Running"`
@@ -337,7 +514,14 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 		return Evidence{}, fmt.Errorf("decode podman inspect: got %d documents, want 1", len(docs))
 	}
 	d := docs[0]
-	e := Evidence{Name: strings.TrimPrefix(d.Name, "/"), Running: d.State.Running, PID: d.State.Pid, NetworkMode: d.HostConfig.NetworkMode, IPCMode: d.HostConfig.IpcMode, PIDMode: d.HostConfig.PidMode, UTSMode: d.HostConfig.UTSMode, UserNSMode: d.HostConfig.UsernsMode, User: d.Config.User, Hostname: d.Config.Hostname, WorkingDir: d.Config.WorkingDir, CapDrop: d.HostConfig.CapDrop, BoundingCaps: d.BoundingCaps, SecurityOpt: d.HostConfig.SecurityOpt, Devices: len(d.HostConfig.Devices), Labels: d.Config.Labels, Memory: d.HostConfig.Memory, NanoCPUs: d.HostConfig.NanoCPUs, PIDs: d.HostConfig.PidsLimit}
+	imageReference := ""
+	if d.Image != "" {
+		imageReference, err = CanonicalImageID(d.Image)
+		if err != nil {
+			return Evidence{}, fmt.Errorf("decode podman inspect image identity: %w", err)
+		}
+	}
+	e := Evidence{ID: d.ID, Name: strings.TrimPrefix(d.Name, "/"), Running: d.State.Running, PID: d.State.Pid, ImageReference: imageReference, ImageDigest: d.ImageDigest, NetworkMode: d.HostConfig.NetworkMode, IPCMode: d.HostConfig.IpcMode, PIDMode: d.HostConfig.PidMode, UTSMode: d.HostConfig.UTSMode, UserNSMode: d.HostConfig.UsernsMode, User: d.Config.User, Hostname: d.Config.Hostname, WorkingDir: d.Config.WorkingDir, CapDrop: d.HostConfig.CapDrop, BoundingCaps: d.BoundingCaps, SecurityOpt: d.HostConfig.SecurityOpt, Devices: len(d.HostConfig.Devices), Labels: d.Config.Labels, Memory: d.HostConfig.Memory, NanoCPUs: d.HostConfig.NanoCPUs, PIDs: d.HostConfig.PidsLimit}
 	if e.Running {
 		if e.PID <= 0 {
 			return Evidence{}, fmt.Errorf("runtime holder PID is absent")
@@ -398,6 +582,25 @@ func (p *Podman) Inspect(ctx context.Context, name string) (Evidence, error) {
 		return Evidence{}, fmt.Errorf("runtime holder process identity changed during inspection")
 	}
 	return e, nil
+}
+
+// CanonicalImageID accepts the two exact immutable-ID forms emitted by
+// supported Podman versions. A bare lowercase hexadecimal ID is normalized
+// without accepting tags, names, alternate algorithms, or malformed digests.
+func CanonicalImageID(value string) (string, error) {
+	digest := value
+	if strings.HasPrefix(digest, "sha256:") {
+		digest = strings.TrimPrefix(digest, "sha256:")
+	}
+	if len(digest) != 64 {
+		return "", fmt.Errorf("Podman image ID %q is not a canonical sha256 digest", value)
+	}
+	for _, character := range digest {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return "", fmt.Errorf("Podman image ID %q is not a canonical sha256 digest", value)
+		}
+	}
+	return "sha256:" + digest, nil
 }
 
 // ipcNamespaceIsolatedFromHost observes separation from Kenogram's ambient
@@ -532,6 +735,12 @@ func parseProcSeccomp(raw []byte) (int, error) {
 }
 
 func Verify(e Evidence, result plan.Result, generation int64, expectedMounts []Mount) error {
+	return VerifyNamed(e, result, generation, ContainerName(result.Plan.Name, generation), expectedMounts)
+}
+
+// VerifyNamed verifies an ephemeral caller-owned name without weakening any
+// namespace, identity, resource, label, or mount invariant.
+func VerifyNamed(e Evidence, result plan.Result, generation int64, expectedName string, expectedMounts []Mount) error {
 	if !e.Running {
 		return fmt.Errorf("container is not running")
 	}
@@ -565,9 +774,8 @@ func Verify(e Evidence, result plan.Result, generation int64, expectedMounts []M
 	if e.Devices != 0 {
 		return fmt.Errorf("unexpected device mappings: %d", e.Devices)
 	}
-	expected := ContainerName(result.Plan.Name, generation)
-	if e.Name != expected {
-		return fmt.Errorf("container name %q, want %q", e.Name, expected)
+	if e.Name != expectedName {
+		return fmt.Errorf("container name %q, want %q", e.Name, expectedName)
 	}
 	checks := map[string]string{"io.kenogram.world": result.Plan.Name, "io.kenogram.generation": strconv.FormatInt(generation, 10), "io.kenogram.plan-digest": result.PlanDigest, "io.kenogram.declaration-digest": result.DeclarationDigest}
 	for k, v := range checks {

@@ -9,10 +9,57 @@ plan; live mounts are not. Secret bytes and their digests are never emitted in
 plan output, logs, history, or generated projections. Host-private recovery
 state may retain a source digest, but never copied bytes.
 
+For governed one-shot jobs, declared read-only mounts are a narrower case: the
+runtime snapshots them into Kenogram-owned scratch under the shared bounded
+source-tree walker, proves an exact content-and-mode copy, then normalizes only
+the private staged copy under `portable-readonly-v1`. Directories become `0555`;
+files become `0444` plus execute bits for every contained identity only when the
+source was executable; no staged node remains writable. Evidence retains both
+the original authority digest and normalized delivered digest. Declared
+writable source trees are descriptor-root inspected and reject every socket or
+other special descendant before provider creation. Device/inode comparison also
+rejects aliases of accessible known container-runtime endpoints; no claim is
+made about aliases the host does not make inspectable.
+
+Kenogram-owned ephemeral workspace roots use `portable-writable-v1`: the exact
+bind root is `0777`, while every enclosing scratch directory remains `0700` and
+host-private. Each job is allocated beneath a dedicated private runtime-owned
+root. After allocation, every declared copy and mount source is rejected when
+its canonical path overlaps, or its identity aliases, that root or the job
+scratch; mounting a process-wide temporary parent can never expose newly
+created private state. Runtime evidence revalidates the root's identity and exact policy
+before target admission and finalization. This projection is never applied to
+operator-owned declared writable sources; those retain their authored modes
+and remain target-visible authority by explicit declaration. An artifact root
+is only a collection request. It must already exist or be target-creatable
+inside declared write authority; Kenogram never makes an unrelated image path
+writable to satisfy artifact collection.
+
+Artifact collection distinguishes image-root paths from bind-mounted paths.
+The deepest exact inspected mount boundary and its retained source inode bind
+the read; workspace mounts must also resolve beneath the exact private scratch.
+Cleanup persists a private owner/plan/declaration/scratch-bound inventory of
+the exact workspace source devices and inodes while the stopped container is
+still provable. After immutable container absence, the parent repeats the proof
+immediately before namespace entry; the helper binds that ID to the authority
+record without recursively invoking Podman and empties only the recorded
+Kenogram workspace roots. Wait and Finalize workers must both join before
+cleanup can mutate provider or filesystem authority. Failure
+retains the record for an idempotent post-absence retry. The finalization worker
+and every namespace-helper process group must be joined before cleanup can
+advance. Symlinks and special nodes inside a workspace are unlinked as names,
+not followed or interpreted. Declared writable sources are never cleanup
+targets, even when the target made their contents inaccessible to the host.
+The namespace cleanup helper opens each recorded workspace before comparing
+the opened directory's device and inode with retained authority; pathname
+checks and destructive descriptor-relative traversal are never separated.
+
 Relative sources resolve against the declaration directory, not the caller's
 working directory. Missing sources fail validation. Every file and directory in
-a secret tree must have no group or other permission bits; failed materialization
-removes staged bytes before returning.
+a secret tree must have no group or other permission bits. Secret permission
+validation uses the same descriptor-rooted, context-aware source-tree bounds as
+planning and staging; cancellation or a bound violation fails before governed
+provider preflight. Failed materialization removes staged bytes before returning.
 
 Symlinked host source paths are rejected and copied trees reject symlink nodes.
 Declared mounts cannot contain or overlap Kenogram state or known container
@@ -31,6 +78,15 @@ the holder's namespace. No container-runtime control socket is mounted into a
 world. Kenogram protects the host only to the extent provided by the
 kernel, rootless runtime, and its own correctness; declared rw mounts and secrets
 remain world-owned input by design.
+
+Governed-job egress does not add a container route. A descriptor-transferred
+loopback listener is bound to the exact verified holder namespaces and served
+by a host-owned proxy restricted to the canonical declaration allowlist.
+Request environment authority cannot override proxy variables. Retained egress
+evidence contains public identity and bounded outcome counters; it contains no
+diagnostic events or digest of discarded diagnostics, headers, payload, body,
+TLS plaintext, resolved IP, secret, runtime socket, or namespace capability
+descriptor.
 
 Named interfaces are trusted host-operator capability. Kenogram verifies the
 declaration and generation but does not authenticate, encrypt, authorize, or

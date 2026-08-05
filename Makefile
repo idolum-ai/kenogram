@@ -2,7 +2,7 @@ PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 BINARY := kenogram
 VERSION ?= dev
-COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+COMMIT := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X github.com/idolum-ai/kenogram/internal/version.Version=$(VERSION) -X github.com/idolum-ai/kenogram/internal/version.Commit=$(COMMIT) -X github.com/idolum-ai/kenogram/internal/version.Date=$(DATE)
 GOCACHE ?= /tmp/kenogram-go-build

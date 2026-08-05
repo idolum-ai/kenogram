@@ -190,6 +190,9 @@ engineering analogy, and its limits.
 - [Requirements and evidence](requirements/)
 - [Declaration schema](requirements/declaration.md)
 - [Operations and recovery](requirements/operations.md)
+- [Governed-job guide](docs/governed-jobs.md) and
+  [evidence contract](requirements/jobs.md) — bounded direct Linux execution,
+  create-only evidence, and offline verification.
 - [Contributing and evidence replay](CONTRIBUTING.md)
 - [Security policy and private reporting](.github/SECURITY.md)
 - [Release and immutable-publication contract](docs/release-strategy.md)

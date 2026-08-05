@@ -46,7 +46,53 @@ func TestExecRunnerSignalHelper(t *testing.T) {
 			time.Sleep(time.Hour)
 		}
 	}
+	if mode == "group-parent" {
+		child := exec.Command(os.Args[0], "-test.run=^TestExecRunnerSignalHelper$")
+		child.Env = append(os.Environ(), "KENOGRAM_SIGNAL_HELPER=group-child")
+		if err := child.Start(); err != nil {
+			os.Exit(116)
+		}
+		if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil {
+			os.Exit(117)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+	if mode == "group-child" {
+		time.Sleep(250 * time.Millisecond)
+		if err := os.WriteFile(observed, []byte("survived"), 0o600); err != nil {
+			os.Exit(118)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	os.Exit(115)
+}
+
+func TestExecRunnerKillsAndJoinsNamespaceHelperProcessGroup(t *testing.T) {
+	root := t.TempDir()
+	ready := filepath.Join(root, "ready")
+	survived := filepath.Join(root, "survived")
+	t.Setenv("KENOGRAM_SIGNAL_HELPER", "group-parent")
+	t.Setenv("KENOGRAM_SIGNAL_READY", ready)
+	t.Setenv("KENOGRAM_SIGNAL_OBSERVED", survived)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := (ExecRunner{}).RunJoinedProcessGroup(ctx, os.Args[0], "-test.run=^TestExecRunnerSignalHelper$")
+		done <- err
+	}()
+	waitForTestFile(t, ready)
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if _, err := os.Stat(survived); !os.IsNotExist(err) {
+		t.Fatalf("namespace helper descendant survived group cancellation: %v", err)
+	}
 }
 
 func TestExecRunnerForwardsSignalBeforeEscalation(t *testing.T) {
@@ -138,9 +184,72 @@ func TestCreateExactArgv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create", "--name", "kenogram-w-g7", "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--image-volume", "ignore", "--hostname", "h", "--user", "agent", "--workdir", "/workspace", "--cpus", "2", "--memory", "3", "--pids-limit", "4", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=w", "--label", "io.kenogram.generation=7", "--label", "io.kenogram.plan-digest=pd", "--label", "io.kenogram.declaration-digest=dd", "--env", "NO_PROXY=localhost,127.0.0.1", "--env", "HTTP_PROXY=http://127.0.0.1:3128", "--env", "HTTPS_PROXY=http://127.0.0.1:3128", "--mount", "type=bind,src=/host,dst=/workspace,rw,nodev,nosuid,noexec", "--entrypoint", "/usr/bin/tail", "base@sha256:x", "-f", "/dev/null"}
+	want := []string{"create", "--name", "kenogram-w-g7", "--network", "none", "--ipc", "private", "--pid", "private", "--uts", "private", "--userns", "keep-id", "--image-volume", "ignore", "--hostname", "h", "--user", "agent", "--workdir", "/workspace", "--cpus", "2", "--memory", "3", "--pids-limit", "4", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--label", "io.kenogram.world=w", "--label", "io.kenogram.generation=7", "--label", "io.kenogram.plan-digest=pd", "--label", "io.kenogram.declaration-digest=dd", "--env", "NO_PROXY=localhost,127.0.0.1", "--env", "HTTP_PROXY=http://127.0.0.1:3128", "--env", "HTTPS_PROXY=http://127.0.0.1:3128", "--mount", "type=bind,src=/host,dst=/workspace,rw,nodev,nosuid,noexec", "--entrypoint", "/usr/bin/tail", "--", "base@sha256:x", "-f", "/dev/null"}
 	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0].args, want) {
 		t.Fatalf("got %#v", f.calls)
+	}
+}
+
+func TestCreateRejectsAmbiguousMountGrammarBeforeRunnerContact(t *testing.T) {
+	for _, mount := range []Mount{
+		{Source: "/host,alias", Target: "/workspace", Mode: "ro"},
+		{Source: "/host", Target: "/workspace=alias", Mode: "ro"},
+		{Source: "/host\\alias", Target: "/workspace", Mode: "ro"},
+	} {
+		f := &fake{}
+		p := New(f)
+		r := plan.Result{Plan: plan.Plan{Name: "w", World: plan.World{Base: "base@sha256:x", Hostname: "h", User: "agent", Workdir: "/workspace"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 1, PIDs: 1}}}
+		if _, err := p.CreateGovernedJob(context.Background(), "job", r, 1, []Mount{mount}, nil, "/helper"); err == nil || !strings.Contains(err.Error(), "--mount") {
+			t.Fatalf("mount=%#v error=%v", mount, err)
+		}
+		if len(f.calls) != 0 {
+			t.Fatalf("ambiguous mount contacted runner: %v", f.calls)
+		}
+	}
+}
+
+func TestCreateGovernedJobUsesOnlyCallerOwnedHelper(t *testing.T) {
+	f := &fake{out: []byte(strings.Repeat("c", 64) + "\n")}
+	p := New(f)
+	r := plan.Result{PlanDigest: "pd", DeclarationDigest: "dd", Plan: plan.Plan{Name: "w", World: plan.World{Hostname: "h", Base: "sha256:" + strings.Repeat("a", 64), Workdir: "/workspace", User: "0"}, Resources: plan.Resources{CPUs: 1, MemoryBytes: 2, PIDs: 3}}}
+	_, err := p.CreateGovernedJob(context.Background(), "owned-job", r, 1, []Mount{{Source: "/host/kenogram", Target: "/etc/kenogram/job-exec", Mode: "ro"}}, map[string]string{"z": "last", "a": "first"}, "/etc/kenogram/job-exec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(f.calls[0].args, " ")
+	if !strings.HasSuffix(joined, "--entrypoint /etc/kenogram/job-exec -- "+r.Plan.World.Base+" _job-hold") {
+		t.Fatalf("argv=%q", joined)
+	}
+	if strings.Index(joined, "--label a=first") > strings.Index(joined, "--label z=last") {
+		t.Fatalf("additional labels are not deterministic: %q", joined)
+	}
+	if strings.Contains(joined, "docker.sock") || strings.Contains(joined, "podman.sock") {
+		t.Fatalf("provider socket leaked into argv: %q", joined)
+	}
+}
+
+func TestMountRootAndUnshareUseExactProviderArgv(t *testing.T) {
+	f := &fake{out: []byte("/run/user/1000/containers/root\n")}
+	p := New(f)
+	root, err := p.MountRoot(context.Background(), "owned-job")
+	if err != nil || root != "/run/user/1000/containers/root" {
+		t.Fatalf("root=%q error=%v", root, err)
+	}
+	f.out = nil
+	if err := p.RunUnshare(context.Background(), []string{"/opt/kenogram", "_job-collect", "owned-job"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 2 || !reflect.DeepEqual(f.calls[0].args, []string{"mount", "owned-job"}) || !reflect.DeepEqual(f.calls[1].args, []string{"unshare", "/opt/kenogram", "_job-collect", "owned-job"}) {
+		t.Fatalf("calls=%#v", f.calls)
+	}
+}
+
+func TestExistsIDUsesUntruncatedImmutableInventory(t *testing.T) {
+	id := strings.Repeat("c", 64)
+	f := &fake{out: []byte(id + "\n")}
+	exists, err := New(f).ExistsID(context.Background(), id)
+	if err != nil || !exists || !reflect.DeepEqual(f.calls[0].args, []string{"ps", "--all", "--no-trunc", "--format", "{{.ID}}"}) {
+		t.Fatalf("exists=%t error=%v calls=%#v", exists, err, f.calls)
 	}
 }
 func TestVerifyEvidence(t *testing.T) {
@@ -199,6 +308,51 @@ func TestInspectStoppedContainerDoesNotRequireLiveProcessEvidence(t *testing.T) 
 	}
 	if len(evidence.Mounts) != 1 || evidence.Mounts[0].IdentityVerified {
 		t.Fatalf("stopped mount evidence = %#v", evidence.Mounts)
+	}
+}
+
+func TestInspectCanonicalizesPodman49BareImageIdentity(t *testing.T) {
+	hex := strings.Repeat("a", 64)
+	f := &fake{out: []byte(`[{"Image":"` + hex + `","State":{"Running":false,"Pid":0}}]`)}
+	evidence, err := New(f).Inspect(context.Background(), "job")
+	if err != nil || evidence.ImageReference != "sha256:"+hex {
+		t.Fatalf("image_reference=%q error=%v", evidence.ImageReference, err)
+	}
+	f.out = []byte(`[{"Image":"` + strings.Repeat("g", 64) + `","State":{"Running":false,"Pid":0}}]`)
+	if _, err := New(f).Inspect(context.Background(), "job"); err == nil || !strings.Contains(err.Error(), "image identity") {
+		t.Fatalf("malformed bare image identity accepted: %v", err)
+	}
+}
+
+func TestCanonicalImageIDRejectsNoncanonicalRepresentations(t *testing.T) {
+	hex := strings.Repeat("a", 64)
+	for _, test := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "bare", value: hex, want: "sha256:" + hex},
+		{name: "prefixed", value: "sha256:" + hex, want: "sha256:" + hex},
+		{name: "short", value: hex[:63]},
+		{name: "long", value: hex + "a"},
+		{name: "nonhex", value: strings.Repeat("g", 64)},
+		{name: "uppercase", value: strings.Repeat("A", 64)},
+		{name: "wrong algorithm", value: "sha512:" + hex},
+		{name: "leading whitespace", value: " " + hex},
+		{name: "trailing whitespace", value: hex + "\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := CanonicalImageID(test.value)
+			if test.want == "" {
+				if err == nil {
+					t.Fatalf("CanonicalImageID(%q)=%q, want error", test.value, got)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("CanonicalImageID(%q)=%q, %v; want %q", test.value, got, err, test.want)
+			}
+		})
 	}
 }
 

@@ -2,6 +2,7 @@ package plan
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,8 +38,53 @@ func TestBuildDigestSeparatesSemanticsFromProvenance(t *testing.T) {
 	if first.DeclarationDigest == second.DeclarationDigest {
 		t.Fatal("byte provenance digest did not change")
 	}
-	if first.Plan.Mounts[0].Source != filepath.Join(filepath.Dir(path), "repo") {
+	expectedSource, err := decl.ResolveSource(filepath.Dir(path), "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Plan.Mounts[0].Source != expectedSource {
 		t.Fatalf("source not resolved: %s", first.Plan.Mounts[0].Source)
+	}
+	if first.Plan.Mounts[0].SourceType != "directory" {
+		t.Fatalf("source type=%q", first.Plan.Mounts[0].SourceType)
+	}
+}
+
+func TestDigestRegularCopyBytesMatchesCanonicalSourceDigest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copy")
+	raw := []byte("exact descriptor bytes")
+	if err := os.WriteFile(path, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	want, err := DigestSource(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DigestRegularCopyBytes(raw, 0o640); got != want {
+		t.Fatalf("got=%s want=%s", got, want)
+	}
+}
+
+func TestBuildRejectsAmbiguousMountGrammar(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		edit func(*decl.Declaration, string)
+	}{
+		{name: "source", edit: func(value *decl.Declaration, directory string) {
+			if err := os.Rename(filepath.Join(directory, "repo"), filepath.Join(directory, "repo,alias")); err != nil {
+				t.Fatal(err)
+			}
+			value.Mounts[0].Source = "repo,alias"
+		}},
+		{name: "target", edit: func(value *decl.Declaration, _ string) { value.Mounts[0].Target = "/workspace/repo,alias" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			declaration, path, raw := fixture(t, "")
+			test.edit(&declaration, filepath.Dir(path))
+			if _, err := Build(declaration, path, raw); err == nil || !strings.Contains(err.Error(), "--mount") {
+				t.Fatalf("error=%v", err)
+			}
+		})
 	}
 }
 
@@ -118,6 +164,36 @@ func TestRenderDoesNotReadOrPrintSourceContents(t *testing.T) {
 	if strings.Contains(string(encoded), result.Plan.Copies[0].SourceDigest) {
 		t.Fatal("JSON exposed secret digest")
 	}
+	var retained Result
+	if err := json.Unmarshal(encoded, &retained); err != nil {
+		t.Fatal(err)
+	}
+	_, evidenceDigest, err := EvidenceCanonicalWithAnchor(retained.Plan, retained.SourceAnchor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.EvidenceDigest != evidenceDigest || retained.EvidenceDigest == result.PlanDigest {
+		t.Fatalf("retained evidence digest=%q operational digest=%q recomputed=%q", retained.EvidenceDigest, result.PlanDigest, evidenceDigest)
+	}
+	if retained.PlanDigest != retained.EvidenceDigest {
+		t.Fatalf("retained plan digest=%q evidence digest=%q", retained.PlanDigest, retained.EvidenceDigest)
+	}
+	projected, err := ProjectEvidence(d, data, retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(mustJSON(t, retained), mustJSON(t, projected)) {
+		t.Fatalf("retained plan does not equal its declaration projection\nretained: %s\nprojected: %s", mustJSON(t, retained), mustJSON(t, projected))
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func TestCanonicalHasTrailingNewline(t *testing.T) {

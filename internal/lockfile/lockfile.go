@@ -68,16 +68,6 @@ func AcquireShared(path string) (*Lock, error) {
 	return &Lock{path: path, file: f}, nil
 }
 
-// ProcessStart returns the Linux process start-time field used to distinguish
-// a live process from a later process that reused its PID.
-func ProcessStart(pid int) string {
-	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return ""
-	}
-	return ProcessStartFromStat(string(raw))
-}
-
 // ProcessStartFromStat parses a Linux proc stat record without assuming that
 // the parenthesized command contains no spaces or closing parentheses.
 func ProcessStartFromStat(text string) string {

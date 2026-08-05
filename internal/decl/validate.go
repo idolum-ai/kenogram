@@ -1,6 +1,8 @@
 package decl
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -10,16 +12,41 @@ import (
 	"strings"
 
 	"github.com/idolum-ai/kenogram/internal/naming"
+	"github.com/idolum-ai/kenogram/internal/sourcetree"
 )
 
-var pinnedImage = regexp.MustCompile(`(?:@sha256:|^sha256:)[0-9a-fA-F]{64}$`)
+var pinnedImage = regexp.MustCompile(`^(?:sha256:[0-9a-fA-F]{64}|[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-fA-F]{64})$`)
+var validImage = regexp.MustCompile(`^(?:sha256:[0-9a-fA-F]{64}|[A-Za-z0-9][A-Za-z0-9._/:+@-]*)$`)
 
 // ImagePinned reports whether an image reference has immutable registry or
 // exact local content identity.
 func ImagePinned(image string) bool { return pinnedImage.MatchString(image) }
 
+func ImageReferenceValid(image string) bool {
+	return len(image) <= 4096 && validImage.MatchString(image)
+}
+
 // Validate checks schema constraints that depend on values and host metadata.
 func Validate(d Declaration, declarationDir string) error {
+	return ValidateContext(context.Background(), d, declarationDir)
+}
+
+// ValidateContext checks host-backed declaration semantics with cancellation
+// threaded through bounded source-tree inspection.
+func ValidateContext(ctx context.Context, d Declaration, declarationDir string) error {
+	return validate(ctx, d, declarationDir, true)
+}
+
+// ValidateEvidence checks declaration semantics that can be re-derived from a
+// retained declaration without reopening its external copy or mount sources.
+func ValidateEvidence(d Declaration, declarationDir string) error {
+	return validate(context.Background(), d, declarationDir, false)
+}
+
+func validate(ctx context.Context, d Declaration, declarationDir string, inspectSources bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if d.Version != 1 {
 		return fmt.Errorf("version must be 1, got %d", d.Version)
 	}
@@ -28,6 +55,9 @@ func Validate(d Declaration, declarationDir string) error {
 	}
 	if d.World.Hostname == "" || d.World.Base == "" || d.World.User == "" {
 		return fmt.Errorf("world hostname, base, and user must not be empty")
+	}
+	if !ImageReferenceValid(d.World.Base) {
+		return fmt.Errorf("world.base is not a strict image reference")
 	}
 	if !ImagePinned(d.World.Base) && !d.AllowUnpinned {
 		return fmt.Errorf("world.base must be pinned by sha256 digest or allow_unpinned must be true")
@@ -43,6 +73,9 @@ func Validate(d Declaration, declarationDir string) error {
 	}
 	seenPaths := map[string]bool{}
 	for i, path := range d.Workspace.Paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := absoluteClean(fmt.Sprintf("workspace.paths[%d]", i), path); err != nil {
 			return err
 		}
@@ -52,8 +85,16 @@ func Validate(d Declaration, declarationDir string) error {
 		seenPaths[path] = true
 	}
 	for i, c := range d.Copies {
-		if err := sourceExists(declarationDir, c.Source); err != nil {
-			return fmt.Errorf("copies[%d]: %w", i, err)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if c.Source == "" {
+			return fmt.Errorf("copies[%d]: source must not be empty", i)
+		}
+		if inspectSources {
+			if err := sourceExists(declarationDir, c.Source); err != nil {
+				return fmt.Errorf("copies[%d]: %w", i, err)
+			}
 		}
 		if err := absoluteClean(fmt.Sprintf("copies[%d].target", i), c.Target); err != nil {
 			return err
@@ -64,15 +105,27 @@ func Validate(d Declaration, declarationDir string) error {
 		if reservedOverlap(c.Target) {
 			return fmt.Errorf("copies[%d].target %q overlaps a reserved path", i, c.Target)
 		}
-		if c.Secret {
-			if err := validateSecretSource(resolveSource(declarationDir, c.Source)); err != nil {
+		if c.Secret && inspectSources {
+			resolved, err := ResolveSource(declarationDir, c.Source)
+			if err != nil {
+				return fmt.Errorf("copies[%d].source: %w", i, err)
+			}
+			if err := validateSecretSource(ctx, resolved); err != nil {
 				return fmt.Errorf("copies[%d].source: %w", i, err)
 			}
 		}
 	}
 	for i, m := range d.Mounts {
-		if err := sourceExists(declarationDir, m.Source); err != nil {
-			return fmt.Errorf("mounts[%d]: %w", i, err)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if m.Source == "" {
+			return fmt.Errorf("mounts[%d]: source must not be empty", i)
+		}
+		if inspectSources {
+			if err := sourceExists(declarationDir, m.Source); err != nil {
+				return fmt.Errorf("mounts[%d]: %w", i, err)
+			}
 		}
 		if err := absoluteClean(fmt.Sprintf("mounts[%d].target", i), m.Target); err != nil {
 			return err
@@ -90,14 +143,20 @@ func Validate(d Declaration, declarationDir string) error {
 		}
 	}
 	seenNetwork := map[string]bool{}
+	if len(d.Network.Allow) > 256 {
+		return fmt.Errorf("network.allow exceeds 256 destinations")
+	}
 	for i, allow := range d.Network.Allow {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := naming.Host(allow.Host); err != nil {
 			return fmt.Errorf("network.allow[%d].host must be an exact non-wildcard name or address", i)
 		}
 		if allow.Port < 1 || allow.Port > 65535 {
 			return fmt.Errorf("network.allow[%d].port must be between 1 and 65535", i)
 		}
-		key := strings.ToLower(allow.Host) + ":" + strconv.FormatInt(allow.Port, 10)
+		key := strings.ToLower(strings.TrimSuffix(allow.Host, ".")) + ":" + strconv.FormatInt(allow.Port, 10)
 		if seenNetwork[key] {
 			return fmt.Errorf("duplicate network allowance %s", key)
 		}
@@ -106,6 +165,9 @@ func Validate(d Declaration, declarationDir string) error {
 	seenServices := map[string]bool{}
 	seenInterfaces := map[string]bool{}
 	for i, endpoint := range d.Interfaces {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := naming.Interface(endpoint.Name); err != nil {
 			return fmt.Errorf("interfaces[%d].name: %w", i, err)
 		}
@@ -123,6 +185,9 @@ func Validate(d Declaration, declarationDir string) error {
 		}
 	}
 	for i, service := range d.Services {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := naming.Service(service.Name); err != nil {
 			return fmt.Errorf("services[%d].name: %w", i, err)
 		}
@@ -142,17 +207,57 @@ func Validate(d Declaration, declarationDir string) error {
 	return nil
 }
 
-func resolveSource(dir, source string) string {
+// ResolveSource returns the canonical host path used by validation and plans.
+// For a relative source, the declaration directory is the trusted anchor: its
+// platform aliases (for example macOS /var -> /private/var) are resolved before
+// source components are inspected without following symlinks.
+func ResolveSource(dir, source string) (string, error) {
 	if filepath.IsAbs(source) {
-		return filepath.Clean(source)
+		return canonicalPlatformPath(filepath.Clean(source)), nil
 	}
-	return filepath.Join(dir, source)
+	canonicalDir, err := CanonicalSourceAnchor(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve declaration directory: %w", err)
+	}
+	return filepath.Clean(filepath.Join(canonicalDir, source)), nil
+}
+
+// CanonicalSourceAnchor resolves the trusted producer-side declaration
+// directory once. Retained job evidence carries this anchor so an offline
+// verifier can re-project relative sources lexically without reopening the
+// producer filesystem.
+func CanonicalSourceAnchor(dir string) (string, error) {
+	clean := filepath.Clean(dir)
+	if !filepath.IsAbs(clean) {
+		return "", errors.New("declaration source anchor must be absolute")
+	}
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+// ResolveEvidenceSource replays producer source resolution using only the
+// retained canonical anchor and declaration text. It performs no filesystem
+// lookup and therefore has the same answer on an isolated audit host.
+func ResolveEvidenceSource(anchor, source string) (string, error) {
+	if !filepath.IsAbs(anchor) || filepath.Clean(anchor) != anchor {
+		return "", errors.New("retained source anchor must be absolute and clean")
+	}
+	if filepath.IsAbs(source) {
+		return canonicalPlatformPath(filepath.Clean(source)), nil
+	}
+	return filepath.Clean(filepath.Join(anchor, source)), nil
 }
 func sourceExists(dir, source string) error {
 	if source == "" {
 		return fmt.Errorf("source must not be empty")
 	}
-	resolved := resolveSource(dir, source)
+	resolved, err := ResolveSource(dir, source)
+	if err != nil {
+		return fmt.Errorf("source %q: %w", source, err)
+	}
 	info, err := os.Lstat(resolved)
 	if err != nil {
 		return fmt.Errorf("source %q: %w", source, err)
@@ -167,25 +272,26 @@ func sourceExists(dir, source string) error {
 	if err != nil {
 		return fmt.Errorf("source %q: %w", source, err)
 	}
-	if evaluated != filepath.Clean(resolved) {
+	if evaluated != canonicalPlatformPath(filepath.Clean(resolved)) {
 		return fmt.Errorf("source %q contains a symlink; symlinked host sources are not accepted", source)
 	}
 	return nil
 }
 
-func validateSecretSource(root string) error {
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+func validateSecretSource(ctx context.Context, root string) error {
+	return sourcetree.Inspect(ctx, root, func(entry sourcetree.Entry) error {
+		path := root
+		if entry.Relative != "." {
+			path = filepath.Join(root, filepath.FromSlash(entry.Relative))
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		if entry.Info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("secret tree contains symlink %q", path)
 		}
-		if !info.IsDir() && !info.Mode().IsRegular() {
+		if !entry.Info.IsDir() && !entry.Info.Mode().IsRegular() {
 			return fmt.Errorf("secret tree contains unsupported node %q", path)
 		}
-		if info.Mode().Perm()&0o077 != 0 {
-			return fmt.Errorf("secret permissions %04o on %q grant group or other access", info.Mode().Perm(), path)
+		if entry.Info.Mode().Perm()&0o077 != 0 {
+			return fmt.Errorf("secret permissions %04o on %q grant group or other access", entry.Info.Mode().Perm(), path)
 		}
 		return nil
 	})
