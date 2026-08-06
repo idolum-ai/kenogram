@@ -27,7 +27,10 @@ Build metadata is not accepted in tags.
    needs, validation, and known limits in its required sections.
 4. Review normal CI and the release-candidate artifact. The candidate workflow
    runs the full gate and real runtime integration, builds both archives,
-   verifies embedded identity, and records checksums and release-note preview.
+   independently cross-binds the packaged executable's closed JSON provenance
+   to the expected release coordinates and exact executable digest, reruns governed
+   job integration with that exact packaged executable, and records checksums
+   and release-note preview.
 5. Merge only when notes, source, and candidate evidence agree.
 6. The release workflow proves the merged tree equals the reviewed branch head,
    reruns validation, and rebuilds artifacts without write credentials.
@@ -50,9 +53,11 @@ Kenogram is Linux-only. Each release contains:
 - `checksums.txt`
 
 Every archive contains `kenogram`, `README.md`, and `LICENSE`. Binaries are
-static, built with `-trimpath`, and report their version, source commit, build
-date, and Go version through `kenogram version`. Archives use source-commit time
-and normalized ownership for reproducibility.
+static, built with `-trimpath`, and report their version, full source commit,
+build date, and Go version through `kenogram version`; the candidate and
+publication workflows additionally require `kenogram version --json` and a
+governed job to succeed with the packaged binary. Archives use source-commit
+time and normalized ownership for reproducibility.
 
 `checksums.txt` covers both archives and all four standalone onboarding
 assets. Checksums detect corruption or asset substitution when the checksum

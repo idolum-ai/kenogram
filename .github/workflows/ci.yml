@@ -153,6 +153,24 @@ jobs:
             --entrypoint /bin/sh "${tag}" -c 'test -x /usr/bin/tail && test -x /bin/sh && test -x /usr/bin/tmux && tmux -V'
       - name: Integration
         run: make integration
+      - name: Packaged release provenance and governed-job integration
+        run: |
+          set -euo pipefail
+          version="v0.0.0-ci"
+          commit="$(git rev-parse HEAD)"
+          source_date="$(date -u -d "@$(git show -s --format=%ct HEAD)" "+%Y-%m-%dT%H:%M:%SZ")"
+          RELEASE_TARGETS=linux/amd64 make release-dist VERSION="${version}" COMMIT="${commit}" DATE="${source_date}"
+          mkdir packaged-release
+          tar -xzf "dist/kenogram-${version}-linux-amd64.tar.gz" -C packaged-release kenogram
+          packaged-release/kenogram version --json > packaged-release/provenance.json
+          go run ./internal/cmd/releaseprovenance \
+            -executable "${PWD}/packaged-release/kenogram" \
+            -provenance "${PWD}/packaged-release/provenance.json" \
+            -version "${version}" -commit "${commit}" -source-date "${source_date}" \
+            -goos linux -goarch amd64
+          KENOGRAM_INTEGRATION=1 \
+            KENOGRAM_INTEGRATION_BINARY="${PWD}/packaged-release/kenogram" \
+            go test ./internal/integration -run '^TestGovernedJobDirectPodmanEvidence$' -count=1 -timeout=5m -v
       - name: SSH composition without a host listener
         run: make e2e-ssh
       - name: Restore immutable Engram fixture

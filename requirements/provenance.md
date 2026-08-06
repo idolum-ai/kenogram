@@ -1,8 +1,10 @@
 # Executable provenance contract
 
-Status: development provenance implemented. The closed document, semantic
-validator, exact executing-file digest, and `kenogram version --json` are live.
-Release-manifest publication and external attestation remain later work.
+Status: packaged release provenance implemented. The closed document, semantic
+validator, exact executing-file digest, machine JSON output, full-SHA and
+canonical-UTC packaging, and independent packaged-binary cross-binding are
+live. Canonical release-manifest publication and external attestation remain
+later work.
 
 `kenogram.executable-provenance.v1` is a bounded identity report for one exact
 Kenogram executable. It contains:
@@ -29,7 +31,12 @@ independent consumer also authenticates the expected release coordinate and
 executable digest. It is not a signature and does not make the executable its
 own qualification authority.
 
-Release packaging will publish a canonical manifest binding every supported
+Candidate, ordinary pull-request, and publication workflows independently bind
+the packaged Linux executable's build kind, version, full source commit,
+canonical source date, platform tuple, and SHA-256 to verifier-owned expected
+values, then run governed-job integration with that exact executable.
+
+Release packaging will later publish a canonical manifest binding every supported
 asset to the full source commit, source date, Go toolchain, platform tuple, and
 asset digest. A feature-branch or development executable may support contract
 testing, but it cannot produce release-qualified evidence.

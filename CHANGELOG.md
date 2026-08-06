@@ -4,6 +4,12 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+- Preserve the full 40-character source commit and canonical UTC source date in
+  release binaries, and make
+  ordinary CI, candidate, and publication qualification independently
+  cross-bind closed JSON provenance and execute a governed job with the exact
+  packaged binary.
+
 ## [v0.2.0] - 2026-08-05
 
 - Implement the governed-job core and direct one-shot Podman CLI provider:

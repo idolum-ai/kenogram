@@ -41,13 +41,21 @@ for phrase in 'merge_group:' 'fetch-depth: 0' 'github.workflow_sha' \
   'path: .ci-policy' 'path: source' 'persist-credentials: false' \
   "if: steps.scope.outputs.mode == 'editorial'" \
   "if: needs.check.outputs.mode == 'full'" 'if: always()' \
-  'needs: [check, race, apple-host, runtime, runtime-hermes]'; do
+  'needs: [check, race, apple-host, runtime, runtime-hermes]' \
+  'name: Packaged release provenance and governed-job integration' \
+  'source_date="$(date -u -d "@$(git show -s --format=%ct HEAD)" "+%Y-%m-%dT%H:%M:%SZ")"' \
+  'go run ./internal/cmd/releaseprovenance' \
+  'KENOGRAM_INTEGRATION_BINARY="${PWD}/packaged-release/kenogram"'; do
   grep -F -- "${phrase}" .github/workflows/ci.yml >/dev/null || {
     echo "path-aware CI is missing: ${phrase}" >&2; exit 1;
   }
 done
 
-for phrase in 'persist-credentials: false' './scripts/prepare-release-notes.sh' 'make vulncheck' 'make test-race' 'make integration' 'make release-dist' 'candidate-version.txt'; do
+for phrase in 'persist-credentials: false' './scripts/prepare-release-notes.sh' 'make vulncheck' 'make test-race' 'make integration' 'make release-dist' \
+  'commit="$(git rev-parse HEAD)"' \
+  'date="$(date -u -d "@$(git show -s --format=%ct HEAD)" "+%Y-%m-%dT%H:%M:%SZ")"' \
+  'candidate-smoke/kenogram version --json' 'KENOGRAM_INTEGRATION_BINARY=' \
+  'go run ./internal/cmd/releaseprovenance' 'candidate-version.txt' 'candidate-provenance.json'; do
   grep -F -- "${phrase}" .github/workflows/release-candidate.yml >/dev/null || {
     echo "candidate workflow is missing: ${phrase}" >&2; exit 1;
   }
@@ -56,11 +64,23 @@ for phrase in 'environment: release' 'contents: write' 'persist-credentials: fal
   'name: Check out candidate-reviewed head' 'ref: ${{ github.event.pull_request.head.sha }}' \
   'path: .reviewed-release-head' "git -C .reviewed-release-head rev-parse 'HEAD^{tree}'" \
   'merged release tree differs from the candidate-reviewed head' 'git push origin "${SOURCE_SHA}:refs/tags/${TAG}"' \
+  'commit="$(git rev-parse "${RELEASE_MERGE_SHA}")"' \
+  'date="$(date -u -d "@$(git show -s --format=%ct "${RELEASE_MERGE_SHA}")" "+%Y-%m-%dT%H:%M:%SZ")"' \
+  'release-smoke/kenogram version --json' \
+  'go run ./internal/cmd/releaseprovenance' 'KENOGRAM_INTEGRATION_BINARY=' 'release-provenance.json' \
   '--verify-tag --draft' 'gh release upload' '--draft=false'; do
   grep -F -- "${phrase}" .github/workflows/release.yml >/dev/null || {
     echo "release workflow is missing: ${phrase}" >&2; exit 1;
   }
 done
+if rg -n 'git rev-parse --short' .github/workflows/release-candidate.yml .github/workflows/release.yml; then
+  echo "release workflows must retain the full source commit" >&2
+  exit 1
+fi
+if rg -n 'git show -s --format=%cI' .github/workflows/release-candidate.yml .github/workflows/release.yml; then
+  echo "release workflows must canonicalize source dates to UTC" >&2
+  exit 1
+fi
 if grep -F -- 'git fetch --no-tags origin "refs/pull/' .github/workflows/release.yml >/dev/null; then
   echo "release verification must not depend on a credentialless pull-ref fetch" >&2
   exit 1

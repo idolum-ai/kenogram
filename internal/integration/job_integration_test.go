@@ -41,8 +41,19 @@ func TestGovernedJobDirectPodmanEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("image identity: %v", err)
 	}
-	bin := filepath.Join(tmp, "kenogram")
-	run(t, root, buildEnv, "go", "build", "-buildvcs=false", "-o", bin, "./cmd/kenogram")
+	bin := os.Getenv("KENOGRAM_INTEGRATION_BINARY")
+	if bin == "" {
+		bin = filepath.Join(tmp, "kenogram")
+		run(t, root, buildEnv, "go", "build", "-buildvcs=false", "-o", bin, "./cmd/kenogram")
+	} else {
+		if !filepath.IsAbs(bin) || filepath.Clean(bin) != bin {
+			t.Fatal("KENOGRAM_INTEGRATION_BINARY must be an absolute clean path")
+		}
+		info, err := os.Stat(bin)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+			t.Fatalf("KENOGRAM_INTEGRATION_BINARY is not an executable regular file: %v", err)
+		}
+	}
 	t.Cleanup(func() { exec.Command("podman", "rmi", "--force", imageTag).Run() })
 
 	t.Run("success and nonzero with governed policy", func(t *testing.T) {
