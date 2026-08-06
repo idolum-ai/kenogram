@@ -4,6 +4,8 @@ Notable user-visible and operational changes are recorded here.
 
 ## Unreleased
 
+## [v0.2.1] - 2026-08-06
+
 - Preserve the full 40-character source commit and canonical UTC source date in
   release binaries, and make
   ordinary CI, candidate, and publication qualification independently
