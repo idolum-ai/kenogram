@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/idolum-ai/kenogram/internal/jobcontract"
@@ -44,7 +45,7 @@ func TestVerifyBindsEveryReleaseCoordinate(t *testing.T) {
 		"GOOS":        func(want *Expected, _ *jobcontract.Provenance) { want.GOOS = "darwin" },
 		"GOARCH":      func(want *Expected, _ *jobcontract.Provenance) { want.GOARCH = "arm64" },
 		"executable digest": func(_ *Expected, got *jobcontract.Provenance) {
-			got.ExecutableSHA256 = "sha256:" + string(make([]byte, 64))
+			got.ExecutableSHA256 = "sha256:" + strings.Repeat("b", 64)
 		},
 		"build kind": func(_ *Expected, got *jobcontract.Provenance) { got.BuildKind = "development" },
 	}
@@ -57,6 +58,39 @@ func TestVerifyBindsEveryReleaseCoordinate(t *testing.T) {
 				t.Fatal("mismatched release identity was accepted")
 			}
 		})
+	}
+}
+
+func TestVerifyRejectsExecutableSubstitutionAfterValidProvenance(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "kenogram")
+	provenancePath := filepath.Join(directory, "provenance.json")
+	original := []byte("original executable bytes")
+	if err := os.WriteFile(executable, original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(original)
+	expected := Expected{
+		Version: "v1.2.3", Commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		SourceDate: "2026-08-05T21:00:00Z", GOOS: "linux", GOARCH: "amd64",
+	}
+	value := jobcontract.Provenance{
+		Schema: jobcontract.ProvenanceSchema, BuildKind: "release",
+		Version: expected.Version, Commit: expected.Commit, SourceDate: expected.SourceDate,
+		GoVersion: "go1.26.5", GOOS: expected.GOOS, GOARCH: expected.GOARCH,
+		ExecutableSHA256: "sha256:" + hex.EncodeToString(sum[:]),
+	}
+	writeProvenance(t, provenancePath, value)
+	if raw, err := os.ReadFile(provenancePath); err != nil {
+		t.Fatal(err)
+	} else if _, err := jobcontract.ParseProvenance(raw); err != nil {
+		t.Fatalf("fixture provenance is not semantically valid: %v", err)
+	}
+	if err := os.WriteFile(executable, []byte("substituted executable bytes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(executable, provenancePath, expected); err == nil {
+		t.Fatal("substituted executable was accepted against valid retained provenance")
 	}
 }
 
